@@ -11,9 +11,10 @@ enum Subprocess {
         var succeeded: Bool { status == 0 && !timedOut }
     }
 
-    /// Returns nil if the tool couldn't be launched. Output beyond `maxOutput` bytes per pipe is dropped.
+    /// Returns nil if the tool couldn't be launched. Output beyond `maxOutput` bytes per pipe is
+    /// dropped, or with `stopAtMaxOutput` the tool is terminated once stdout reaches it.
     static func run(_ executable: String, _ arguments: [String], currentDirectory: URL? = nil,
-                    timeout: TimeInterval = 30, maxOutput: Int = 64 << 20) -> Output? {
+                    timeout: TimeInterval = 30, maxOutput: Int = 64 << 20, stopAtMaxOutput: Bool = false) -> Output? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: executable)
         p.arguments = arguments
@@ -32,7 +33,8 @@ enum Subprocess {
         for (pipe, sink) in [(out, stdout), (err, stderr)] {
             group.enter()
             DispatchQueue.global(qos: .utility).async {
-                sink.read(pipe.fileHandleForReading, limit: maxOutput)
+                sink.read(pipe.fileHandleForReading, limit: maxOutput,
+                          onLimit: stopAtMaxOutput && sink === stdout ? { p.terminate() } : nil)
                 group.leave()
             }
         }
@@ -49,11 +51,12 @@ enum Subprocess {
 
     private final class Drain: @unchecked Sendable {
         var data = Data()
-        func read(_ h: FileHandle, limit: Int) {
+        func read(_ h: FileHandle, limit: Int, onLimit: (() -> Void)?) {
             while true {
                 let chunk = h.availableData
                 if chunk.isEmpty { break }
                 if data.count < limit { data.append(chunk.prefix(limit - data.count)) }
+                if data.count >= limit, let stop = onLimit { stop(); break }
             }
             try? h.close()
         }

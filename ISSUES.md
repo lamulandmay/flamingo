@@ -1,20 +1,34 @@
 # Issues
 
 What QA found running `make demo` on the Kestrel Works vault. Each line names the owning
-plan. Owners tick their own lines; session 10 re-checks every loop and removes what's fixed.
-Screens are in `docs/screens/`.
+plan. Owners tick their own lines; session 10 re-checks every loop and moves what's fixed
+to the bottom. Screens are in `docs/screens/`.
 
 ## Open
 
-### Pass 1 — 22:45
-- [ ] (01) The shell is still the 22:02 scaffold. On the demo vault the sidebar is a flat list of names with no folders: `decks/`, `docs/`, `finance/` and the rest are flattened. Selecting a file shows no preview. There is no comments rail and no mode switcher. ⌘O "Open Vault…" is in the File menu but opens no panel. ⌘1–4, ⌘K, ⌘⇧C and arrow-key selection do nothing. See `docs/screens/files.png`.
-- [ ] (01) The sidebar opens at about 360pt, the `maxWidth`. DESIGN.md says 240pt.
-- [ ] (05, cc 04) The index has no file text, only comments. `flamingo-index <copy of fixtures/vault>` reports "19 extracted · 26 sections", but `--text` is empty for pptx, docx, xlsx and even `notes/open-questions.md`. `legal/supplier-agreement.pdf` shows `(page 1)`…`(page 4)` with no words. `--search clamp` finds only the two comments, not the brief, slides 6 and 10, or the open-questions note. The path having a space is not the cause; a copy at `/…/kestrel` behaves the same. FlamingoExtractTests pass, so the loss is between `Extract.extract` and the FTS rows, or in how `--text` reads them back.
-- [ ] (07) FlamingoTrailTests: `testCompleteLastLineWithoutNewlineIsReadOnce` fails at `TrailStoreTests.swift:128` (events after `record`+`flush` are `[]`), then crashes on `after[0]`. That makes `scripts/test.sh` exit 1.
-- [ ] (04) Heads-up: Quick Look thumbnailing of any `.usdz` (ours, and Apple's `shaderball.usdz`) never returns from `qlmanage -t` here. If `Thumbnails` uses `QLThumbnailGenerator` for usdz, give it a timeout and fall back to the glyph so the graph and trail don't wait on it.
+### Pass 2 — 23:05
+- [ ] (01) The sidebar is still a flat list. `decks/`, `docs/`, `finance/` and the rest never appear, and files from every folder are interleaved under no headings. The plan and DESIGN.md call for a collapsible folder tree.
+- [ ] (01) ⌘K does nothing. Clicking Go › Open Quickly… in the menu does nothing either: no panel opens, and System Events sees only the main window.
+- [ ] (01) A short coral hairline, about 56pt, sits at the left end of the toolbar's bottom edge under the Files segment. It stays in every mode for more than five minutes after launch. If it's the reindex progress hairline, it never finishes; the CLI indexes the same vault in 0.3s. See `docs/screens/files.png`.
+- [ ] (01) Thoughts left on a pptx have no anchor: ⌘⇧C on `arc-launch-plan.pptx` wrote `- [23:02] QA check…` without a `(slide N)`. Quick Look doesn't report the current slide. If that can't be fixed, consider stepping slides with ⌘↑/⌘↓ yourself, so the anchor is known for decks at least.
+- [ ] (09) Ask mode is an empty pane with one hairline. No cursor blinks, so nothing says "type here". When I switched to it the main window also lost key status (grey traffic lights), and no other Flamingo window was open.
+- [ ] (06) At default zoom 5 of the 19 nodes have no label, including `q3-board-review` and `q3-model`. Those are the two files the central pricing thread runs through. When labels collide, keep the high-degree nodes' labels. See `docs/screens/graph.png`.
+- [ ] (06) The GraphHarness test window floats above every app and covers Flamingo during QA screenshots, so the palette and capture panel shots were unusable. Please close it when you're idle or give it a normal window level.
+- [ ] (05) Wikilinks in the body of markdown notes don't become graph edges, only links in comments do. `weekly-sync-2026-10-08.md` links four files and is an island in the graph. Obsidian users will expect these edges. This is outside plan 05 as written, so it's filed as a request.
+- [ ] (07) Low priority: links in comments render with their raw anchor suffix, e.g. `interview-maya-chen.m4a#time 0:53`. `interview-maya-chen.m4a › time 0:53`, or the alias when there is one, would read better.
+
+### Carried over
+- [ ] (04) Heads-up: Quick Look thumbnailing of any `.usdz` (ours, and Apple's `shaderball.usdz`) never returns from `qlmanage -t`. Put a timeout on usdz thumbnails and fall back to the glyph.
 
 ## Working
-- Build is green. Every test bundle except Trail passes: Core, Extract, Index, Graph, Ask.
-- The bundle has its icon and asset catalog from 08, a hardened-runtime ad-hoc signature, and the Apple Events entitlement.
-- Index CLI on the demo vault: 23 comments indexed, comment search with anchors and highlights, backlinks for `finance/q3-model.xlsx` (2), and a 19-node, 19-edge link graph built in 0.05s.
-- File glyphs from 08 render tinted per family in the sidebar.
+- Build is green. All 7 test bundles pass: Core, Extract, Index, Graph, Trail, Capture, Ask.
+- The demo opens the vault straight into Files mode. pptx previews render, and the rail shows each comment with a time, an anchor chip and coral links.
+- ⌘⇧C → type → Return appends to `.flamingo/notes/decks/arc-launch-plan.pptx.md` in the contract format, records a `commented` trail event, and the rail updates immediately. See `docs/screens/capture.png`.
+- ⌘1–4 switch modes. The graph draws 19 family-tinted nodes, solid link edges and dashed trail edges. The trail shows sessions with comments under their files and `⌕ lead time` between them, and it records new opens live.
+- Index: file text is now in, so `clamp` finds the brief, slides 6 and 10, and `open-questions.md` as well as the two comments. A full reindex of the vault takes 0.32s.
+- The bundle is signed with the Apple Development identity, so Accessibility and Automation grants survive rebuilds. It carries 08's icon, asset catalog, accent and menu bar template.
+
+## Fixed
+- (05) The index had no file text, only comments (pass 1).
+- (07) FlamingoTrailTests crashed (pass 1).
+- (01) The shell was the scaffold, with no preview, rail, modes or capture (pass 1).

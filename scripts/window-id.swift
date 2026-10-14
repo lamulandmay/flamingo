@@ -1,13 +1,21 @@
-// Prints the CGWindowID of the frontmost on-screen window owned by the named app.
-// Usage: window-id [AppName]   (used by scripts/screens.sh for `screencapture -l`)
+// Prints the CGWindowID of the frontmost on-screen window owned by the named app, or with
+// --bounds its frame as x,y,w,h for `screencapture -R` (which also picks up floating panels).
+// Usage: window-id [--bounds] [AppName]   (used by scripts/screens.sh)
 import CoreGraphics
 import Foundation
 
-let owner = CommandLine.arguments.dropFirst().first ?? "Flamingo"
+var args = Array(CommandLine.arguments.dropFirst())
+let bounds = args.first == "--bounds"
+if bounds { args.removeFirst() }
+let owner = args.first ?? "Flamingo"
 let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
 let match = list.first {
     $0[kCGWindowOwnerName as String] as? String == owner && ($0[kCGWindowLayer as String] as? Int) == 0
         && (($0[kCGWindowBounds as String] as? [String: Double])?["Width"] ?? 0) > 300
 }
-guard let id = match?[kCGWindowNumber as String] as? Int else { exit(1) }
-print(id)
+guard let w = match, let id = w[kCGWindowNumber as String] as? Int else { exit(1) }
+if bounds, let b = w[kCGWindowBounds as String] as? [String: Double] {
+    print([b["X"]!, b["Y"]!, b["Width"]!, b["Height"]!].map { String(Int($0)) }.joined(separator: ","))
+} else {
+    print(id)
+}

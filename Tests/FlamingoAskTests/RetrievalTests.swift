@@ -5,11 +5,12 @@ import FlamingoCore
 final class RetrievalTests: XCTestCase {
     func testQueryPlanReformulates() {
         let qs = QueryPlan.queries(for: "What did I decide about pricing and churn?").map(\.text)
-        XCTAssertEqual(qs.first, "What did I decide about pricing and churn?")
-        XCTAssertTrue(qs.contains("decide pricing churn"))
+        XCTAssertEqual(qs.first, "decide pricing churn", "the raw question would OR-match every 'what' and 'I'")
         XCTAssertTrue(qs.contains("decide pricing"), "clause before 'and'")
         XCTAssertTrue(qs.contains("pric"), "stemmed single term catches price/pricing")
-        XCTAssertFalse(qs.contains { $0 == "what" || $0 == "did" })
+        XCTAssertFalse(qs.contains { $0.contains("what") || $0.contains("did") })
+        XCTAssertEqual(QueryPlan.queries(for: "what did I say?").map(\.text), ["what did I say?"],
+                       "all stopwords: the question is all there is")
     }
 
     func testTermsDropStopwordsAndMetaWords() {
@@ -29,8 +30,17 @@ final class RetrievalTests: XCTestCase {
         XCTAssertTrue(places.contains("q3.pptx (slide 7)"))
         XCTAssertTrue(places.contains("q3-model.xlsx (sheet Price)"), "followed the comment's wikilink: \(places)")
         XCTAssertEqual(Set(places).count, places.count, "deduped by file + anchor")
-        XCTAssertFalse(passages.contains { $0.kind == .section && $0.text.contains("Decided: keep $49") },
-                       "a comment hit from the index isn't repeated as a section")
+        XCTAssertEqual(passages.filter { $0.kind == .comment }.count, 1,
+                       "the title note on slide 1 doesn't match and slide 1 isn't a hit")
+    }
+
+    func testContextCommentsComeAfterSections() throws {
+        // "churn" hits slide 1 and slide 9; the note on slide 1 rides along, after the sections.
+        let passages = try Retriever(source: Fixture.vault).retrieve("churn")
+        let kinds = passages.map(\.kind)
+        XCTAssertEqual(kinds.last, .comment)
+        XCTAssertEqual(passages.last?.text, "Needs a better title")
+        XCTAssertEqual(kinds.filter { $0 == .comment }.count, 1)
     }
 
     func testFollowUpSearchReturnsOnlyNewPassagesNumberedAfter() throws {

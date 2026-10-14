@@ -113,15 +113,22 @@ public final class AskEngine: @unchecked Sendable {
         let model = self.model
         var messages: [JSON] = [Prompt.question(question, passages: passages, today: Date())]
         var searches = 0
+        var forceAnswer = false
         for turn in 0... {
             try Task.checkCancellation()
-            let body = Prompt.body(model: model, messages: messages, canSearch: searches < Prompt.maxSearches)
+            let body = Prompt.body(model: model, messages: messages, canSearch: !forceAnswer)
             let message = try await client.send(body, key: key, betas: Prompt.betas(model: model)) { yield(.text($0)) }
+            if message.stopReason == "refusal" {
+                // A decline can arrive after part of the answer streamed; that part doesn't stand.
+                yield(.discard)
+                throw AskError.refused
+            }
             try Self.check(message)
 
             let calls = Self.toolCalls(in: message)
-            // One turn past the searches is the most an answer needs; past that, answer with what came back.
-            guard message.stopReason == "tool_use", !calls.isEmpty, turn <= Prompt.maxSearches + 1 else {
+            guard message.stopReason == "tool_use", !calls.isEmpty, !forceAnswer else {
+                let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { throw AskError.stream("No answer") }
                 yield(.answer(CitationParser.answer(text: message.text, sources: sources)))
                 return
             }
@@ -137,6 +144,7 @@ public final class AskEngine: @unchecked Sendable {
                     results.append(Prompt.toolError(id: call.id, "Unknown tool \(call.name). The only tool is `search`."))
                 } else if searches >= Prompt.maxSearches {
                     results.append(Prompt.toolError(id: call.id, "No searches left. Answer from the passages you have."))
+                    forceAnswer = true
                 } else if let query = call.input["query"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines),
                           !query.isEmpty {
                     searches += 1
@@ -150,6 +158,8 @@ public final class AskEngine: @unchecked Sendable {
                 }
             }
             messages.append(["role": "user", "content": .array(results)])
+            // Failed calls don't count as searches, so the turns are capped too.
+            if turn >= Prompt.maxSearches { forceAnswer = true }
         }
     }
 
@@ -183,7 +193,10 @@ public final class AskEngine: @unchecked Sendable {
             if i < boundary, type != "text" { return nil }
             switch type {
             case "text":
-                return ["type": "text", "text": block["text"] ?? ""]
+                // The API rejects empty text blocks; one can be left open by a mid-stream decline.
+                guard let text = block["text"]?.string,
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return ["type": "text", "text": .string(text)]
             case "thinking":
                 return ["type": "thinking", "thinking": block["thinking"] ?? "", "signature": block["signature"] ?? ""]
             case "redacted_thinking":
@@ -207,7 +220,7 @@ public final class AskEngine: @unchecked Sendable {
 /// `[3]`, `[2][5]` and `[2, 5]` in answer text.
 enum CitationParser {
     private static let pattern = try! NSRegularExpression(
-        pattern: #"(?<!\[)\[(\d{1,4}(?:\s*,\s*\d{1,4})*)\](?![\(\]])"#)
+        pattern: #"(?<!\[)\[\s*(\d{1,4}(?:\s*,\s*\d{1,4})*)\s*\](?![\(\]])"#)
 
     /// Cited passage numbers in order of first appearance.
     static func numbers(in text: String) -> [Int] {

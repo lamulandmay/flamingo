@@ -13,7 +13,9 @@ enum TrailMetrics {
     static let notedColumn: CGFloat = 212
     static let searchMax: CGFloat = 168
     static let searchLink: CGFloat = 16
-    static let gap: CGFloat = 6
+    static let gap: CGFloat = Theme.Space.s
+    /// A glyph standing in for a thumbnail sits a notch above row icons.
+    static let thumbGlyph: CGFloat = Theme.Size.icon + Theme.Space.xs
 
     /// Wide enough for the longest time range on screen, so the rail is one straight line.
     static func gutter(for ranges: [String]) -> CGFloat {
@@ -31,7 +33,8 @@ struct TrailTimeline: View {
     var showsPaused: Bool
     var onOpen: (FileRef, FileAnchor?) -> Void
     var onResume: ((TrailSession) -> Void)?
-    var onRename: (TrailSession, String?) -> Void
+    /// Nil when there is nowhere to save a name; renaming is then off.
+    var onRename: ((TrailSession, String?) -> Void)?
 
     enum Focus: Hashable { case list, title }
 
@@ -92,6 +95,7 @@ struct TrailTimeline: View {
                             gutter: gutter,
                             expanded: isExpanded(s, calendar: calendar),
                             selected: selection == s.id,
+                            active: focus != nil,
                             editing: editing == s.id,
                             topGap: row.topGap,
                             isFirst: row.isFirst,
@@ -100,10 +104,11 @@ struct TrailTimeline: View {
                             draft: $draft,
                             focus: $focus,
                             canResume: onResume != nil,
+                            canRename: onRename != nil,
                             onSelect: { select(s.id) },
                             onToggle: { toggle(s, calendar: calendar) },
                             onBeginRename: { beginRename(s) },
-                            onCommitRename: commitRename,
+                            onCommitRename: { commitRename(restoreFocus: true) },
                             onCancelRename: cancelRename,
                             onResume: { resume(s) },
                             onOpen: { file, anchor in select(s.id); onOpen(file, anchor) }
@@ -123,8 +128,10 @@ struct TrailTimeline: View {
         .focused($focus, equals: .list)
         .focusEffectDisabled()
         .onAppear { if focus == nil { focus = .list } }
+        .onDisappear { if editing != nil { commitRename(restoreFocus: false) } }
         .onChange(of: focus) { old, new in
-            if old == .title, new != .title, editing != nil { commitRename() }
+            // Focus went somewhere else: keep the name, and leave focus where the user put it.
+            if old == .title, new != .title, editing != nil { commitRename(restoreFocus: false) }
         }
         .onKeyPress(keys: [.upArrow, .downArrow, .leftArrow, .rightArrow, .space, .return, .escape]) { press in
             handle(press.key, ordered: ordered, calendar: calendar)
@@ -132,7 +139,7 @@ struct TrailTimeline: View {
         .background {
             Button("", action: resumeSelected)
                 .keyboardShortcut("r", modifiers: .command)
-                .disabled(selection == nil || onResume == nil)
+                .disabled(selection == nil || onResume == nil || editing != nil)
                 .opacity(0)
                 .frame(width: 0, height: 0)
                 .accessibilityHidden(true)
@@ -162,21 +169,23 @@ struct TrailTimeline: View {
     }
 
     private func beginRename(_ s: TrailSession) {
+        guard onRename != nil else { return }
+        if editing != nil, editing != s.id { commitRename(restoreFocus: false) }
         selection = s.id
         draft = title(of: s) ?? ""
         editing = s.id
         DispatchQueue.main.async { focus = .title }
     }
 
-    private func commitRename() {
+    private func commitRename(restoreFocus: Bool) {
         guard let id = editing else { return }
         editing = nil
-        focus = .list
+        if restoreFocus { focus = .list }
         guard let s = sessions.first(where: { $0.id == id }) else { return }
         let t = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t != (title(of: s) ?? "") else { return }
         titles[id] = t
-        onRename(s, t.isEmpty ? nil : t)
+        onRename?(s, t.isEmpty ? nil : t)
     }
 
     private func cancelRename() {
@@ -239,6 +248,8 @@ struct SessionRow: View {
     let gutter: CGFloat
     let expanded: Bool
     let selected: Bool
+    /// The list (or the title field) has keyboard focus. Selection is coral only then.
+    let active: Bool
     let editing: Bool
     let topGap: CGFloat
     let isFirst: Bool
@@ -247,6 +258,7 @@ struct SessionRow: View {
     @Binding var draft: String
     var focus: FocusState<TrailTimeline.Focus?>.Binding
     let canResume: Bool
+    let canRename: Bool
     let onSelect: () -> Void
     let onToggle: () -> Void
     let onBeginRename: () -> Void
@@ -282,7 +294,7 @@ struct SessionRow: View {
             if canResume {
                 Button("Resume", action: onResume).keyboardShortcut("r", modifiers: .command)
             }
-            Button("Rename", action: onBeginRename)
+            if canRename { Button("Rename", action: onBeginRename) }
             Button(expanded ? "Collapse" : "Expand", action: onToggle)
         }
     }
@@ -350,7 +362,7 @@ struct SessionRow: View {
         return ZStack(alignment: .topLeading) {
             if selected {
                 RoundedRectangle(cornerRadius: Theme.Radius.s)
-                    .fill(Theme.Color.selection)
+                    .fill(active ? Theme.Color.selection : Theme.Color.hover)
                     .frame(height: M.header)
                     .padding(.top, topGap)
                     .padding(.horizontal, -Theme.Space.xs)
@@ -361,7 +373,7 @@ struct SessionRow: View {
             }
             .padding(.leading, x - Theme.Size.hairline / 2)
             Circle()
-                .fill(selected ? Theme.Color.accent : Theme.Color.textTertiary)
+                .fill(selected && active ? Theme.Color.accent : Theme.Color.textTertiary)
                 .frame(width: M.dot, height: M.dot)
                 .padding(.leading, x - M.dot / 2)
                 .padding(.top, dotY - M.dot / 2)
@@ -464,7 +476,7 @@ struct TrailNoteText: View {
     private var attributed: AttributedString {
         var text = AttributedString()
         if let a = note.anchor {
-            var chip = AttributedString("\(a.kind.rawValue) \(a.value)  ")
+            var chip = AttributedString(a.label + "  ")
             chip.font = Theme.Font.monoSmall
             chip.foregroundColor = Theme.Color.textTertiary
             text += chip
@@ -491,7 +503,7 @@ struct TrailCompactChain: View {
                 switch stop.kind {
                 case let .file(file, anchor, _):
                     HStack(spacing: Theme.Space.xs) {
-                        FileGlyph(ext: file.ext, size: Theme.Size.iconSmall - 2)
+                        FileGlyph(ext: file.ext, size: Theme.Size.iconSmall)
                         Text(file.name)
                             .font(Theme.Font.small)
                             .foregroundStyle(Theme.Color.textSecondary)
@@ -546,11 +558,12 @@ struct TrailThumb: View {
                     .resizable()
                     .interpolation(.high)
                     .frame(width: w, height: w / aspect)
-                    .clipShape(RoundedRectangle(cornerRadius: 2))
-                    .overlay(RoundedRectangle(cornerRadius: 2).stroke(Theme.Color.hairline, lineWidth: 1))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s - 2))
+                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s - 2)
+                        .stroke(Theme.Color.hairline, lineWidth: Theme.Size.hairline))
                     .frame(height: TrailMetrics.thumb)
             } else {
-                FileGlyph(ext: file.ext, size: 18)
+                FileGlyph(ext: file.ext, size: TrailMetrics.thumbGlyph)
                     .frame(width: TrailMetrics.thumb, height: TrailMetrics.thumb)
             }
         }

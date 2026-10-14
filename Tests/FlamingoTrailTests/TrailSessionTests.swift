@@ -208,9 +208,15 @@ final class TrailSessionTests: XCTestCase {
         XCTAssertEqual(s.searches, ["churn"])
     }
 
-    func testBackspacingMergesToo() {
+    func testBackspacingDropsTheShorterQuery() {
         let s = sessions([ev(.searched, 0, text: "churn"), ev(.searched, 1, text: "chur")])[0]
-        XCTAssertEqual(s.searches, ["chur"])
+        XCTAssertEqual(s.searches, ["churn"])
+    }
+
+    func testBackspacingIntoANewQueryKeepsBoth() {
+        let s = sessions([ev(.searched, 0, text: "churn"), ev(.searched, 1, text: "chur"), ev(.searched, 2, text: "c"),
+                          ev(.searched, 3, text: "co"), ev(.searched, 4, text: "cohort")])[0]
+        XCTAssertEqual(s.searches, ["churn", "cohort"])
     }
 
     func testMergeIgnoresCase() {

@@ -2,12 +2,12 @@ import SwiftUI
 import Quartz
 import FlamingoCore
 
-/// Quick Look preview of the selected file. Plan 01 owns.
+/// Quick Look preview of the selected file. Placeholder until the PDF/media variants land. Plan 01 owns.
 struct PreviewPane: View {
     @EnvironmentObject var state: AppState
     var body: some View {
-        if let v = state.vault, let f = state.selected {
-            QuickLookView(url: v.url(for: f))
+        if let f = state.selected, let url = state.url(for: f) {
+            QuickLookView(url: url)
         } else {
             Color.clear
         }

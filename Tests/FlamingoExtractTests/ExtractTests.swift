@@ -77,6 +77,20 @@ final class SupportTests: XCTestCase {
         XCTAssertThrowsError(try ZipArchive(z.deletingLastPathComponent().appendingPathComponent("nope.zip")))
     }
 
+    /// The streamed read splits `unzip -p` output by archive order, whatever order names are asked in.
+    func testZipStreamedReadKeepsMembersApart() throws {
+        let d = try Fixtures.tempDir(self)
+        let z = d.appendingPathComponent("order.zip")
+        var members: [String: String] = [:]
+        for i in 0..<40 { members["p/m\(i).xml"] = String(repeating: "<x\(i)/>", count: i + 1) }
+        try Fixtures.zip(members, to: z)
+        let zip = try ZipArchive(z)
+        let got = zip.read(members.keys.sorted().reversed())
+        XCTAssertEqual(got.count, 40)
+        for (k, v) in members { XCTAssertEqual(got[k].map { String(decoding: $0, as: UTF8.self) }, v, k) }
+        XCTAssertNil(zip.read("p/absent.xml"))
+    }
+
     func testRelationshipPaths() {
         XCTAssertEqual(OOXMLPath.resolve("../notesSlides/notesSlide1.xml", from: "ppt/slides/slide1.xml"),
                        "ppt/notesSlides/notesSlide1.xml")

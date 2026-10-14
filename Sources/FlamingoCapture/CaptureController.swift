@@ -47,6 +47,14 @@ public final class CaptureController {
 
     private init() {
         host.window.onCancel = { [weak self] in self?.cancel() }
+        // Clicking away from an empty panel dismisses it; typed text is never thrown away.
+        NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: host.window,
+                                               queue: .main) { _ in
+            MainActor.assumeIsolated {
+                let c = CaptureController.shared
+                if c.host.isVisible, c.host.isEmpty { c.cancel() }
+            }
+        }
     }
 
     // MARK: Hotkeys
@@ -56,7 +64,8 @@ public final class CaptureController {
         guard localMonitor == nil else { return }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
-            guard flags == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "c" else { return event }
+            guard flags == [.command, .shift], event.charactersIgnoringModifiers?.lowercased() == "c",
+                  NSApp.modalWindow == nil else { return event }
             MainActor.assumeIsolated { CaptureController.shared.toggle() }
             return nil
         }
@@ -223,8 +232,7 @@ public final class CaptureController {
         guard let vault = target.vault else { return }
         do {
             try SidecarStore(vault: vault).append(comment, to: target.file)
-            TrailStore(vault: vault).record(TrailEvent(kind: .commented, file: target.file,
-                                                       anchor: comment.anchor, text: comment.text))
+            TrailStore(vault: vault).recordComment(comment, on: target.file)
         } catch {
             NSSound.beep()
         }

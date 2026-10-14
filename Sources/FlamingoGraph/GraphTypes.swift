@@ -38,6 +38,9 @@ struct GraphTopology: Sendable {
     let neighbors: [[Int]]
     /// World-space node radius: `3 + ln(1 + commentCount + degree)`.
     let radius: [Double]
+    /// Nodes with no file behind them: wikilink targets that resolve to nothing and sidecar
+    /// targets whose file is gone. Drawn ghosted. All false until `markMissing(in:)`.
+    private(set) var missing: [Bool]
 
     var count: Int { ids.count }
     func degree(_ i: Int) -> Int { neighbors[i].count }
@@ -52,7 +55,10 @@ struct GraphTopology: Sendable {
             let name = node.name.isEmpty ? (node.id as NSString).lastPathComponent : node.name
             let stem = (name as NSString).deletingPathExtension
             labels.append(stem.isEmpty ? name : stem)
-            exts.append(node.ext.isEmpty ? (name as NSString).pathExtension.lowercased() : node.ext.lowercased())
+            var ext = node.ext.isEmpty ? (name as NSString).pathExtension.lowercased() : node.ext.lowercased()
+            // Inbox thoughts (`_inbox/2026-10-14`) are markdown notes with no file of their own.
+            if ext.isEmpty, FileRef(relativePath: node.id).isInbox { ext = "md" }
+            exts.append(ext)
             counts.append(max(0, node.commentCount))
         }
 
@@ -81,6 +87,16 @@ struct GraphTopology: Sendable {
         self.edges = edges
         self.neighbors = adjacency.map { $0.sorted() }
         self.radius = (0..<ids.count).map { 3 + log(1 + Double(counts[$0] + adjacency[$0].count)) }
+        self.missing = [Bool](repeating: false, count: ids.count)
+    }
+
+    /// Marks nodes whose file doesn't exist in `vault`. Inbox notes are never missing.
+    mutating func markMissing(in vault: Vault) {
+        let fm = FileManager.default
+        for i in ids.indices {
+            let ref = FileRef(relativePath: ids[i])
+            missing[i] = !ref.isInbox && !fm.fileExists(atPath: vault.url(for: ref).path)
+        }
     }
 }
 
@@ -122,8 +138,10 @@ struct GraphCamera: Equatable, Sendable {
 
     /// Smallest camera that shows every node with `padding` points to spare. `maxZoom` keeps a
     /// five-node graph from filling the screen.
+    /// `horizontalPadding` overrides `padding` left and right, for labels wider than their node.
     static func fitting(_ positions: [CGPoint], radii: [Double], in size: CGSize,
-                        padding: CGFloat = 48, maxZoom: CGFloat = 2.4) -> GraphCamera {
+                        padding: CGFloat = 48, horizontalPadding: CGFloat? = nil,
+                        maxZoom: CGFloat = 2.4) -> GraphCamera {
         guard !positions.isEmpty, size.width > 1, size.height > 1 else { return GraphCamera() }
         var minX = CGFloat.infinity, minY = CGFloat.infinity, maxX = -CGFloat.infinity, maxY = -CGFloat.infinity
         for i in positions.indices {
@@ -132,7 +150,7 @@ struct GraphCamera: Equatable, Sendable {
             minY = min(minY, p.y - r); maxY = max(maxY, p.y + r)
         }
         let w = max(maxX - minX, 1), h = max(maxY - minY, 1)
-        let availW = max(size.width - 2 * padding, 1), availH = max(size.height - 2 * padding, 1)
+        let availW = max(size.width - 2 * (horizontalPadding ?? padding), 1), availH = max(size.height - 2 * padding, 1)
         let zoom = min(min(availW / w, availH / h), maxZoom)
         return GraphCamera(center: CGPoint(x: (minX + maxX) / 2, y: (minY + maxY) / 2),
                            zoom: min(max(zoom, zoomRange.lowerBound), zoomRange.upperBound))

@@ -102,22 +102,23 @@ final class TrailEdgeTests: XCTestCase {
     }
 
     func testOnlyTheMostCommentedFilesArePaired() {
-        // 20 files; f00…f09 get 1…10 comments. The 8 most commented (f02…f09) pair up; f00 and
-        // f01 only get their consecutive edges.
+        // 20 files; f00…f09 get 1…10 comments. The 5 most commented (f05…f09) pair up; the
+        // rest only get their consecutive edges.
         let files = (0..<20).map { String(format: "f%02d.md", $0) }
         var stream = opens(files)
         for k in 0..<10 {
             for n in 0...k { stream.append(ev(.commented, 300 + Double(k * 20 + n), file: files[k], text: "c\(n)")) }
         }
+        XCTAssertEqual(TrailTuning().maxCommentedFiles, 5)
         let e = edges(stream)
         assertWellFormed(e)
-        XCTAssertNotNil(weight(e, "f02.md", "f09.md"))
-        XCTAssertNotNil(weight(e, "f03.md", "f08.md"))
-        XCTAssertNil(weight(e, "f00.md", "f09.md"))
+        XCTAssertNotNil(weight(e, "f05.md", "f09.md"))
+        XCTAssertNotNil(weight(e, "f06.md", "f08.md"))
+        XCTAssertNil(weight(e, "f04.md", "f09.md"))
         XCTAssertNil(weight(e, "f01.md", "f09.md"))
-        XCTAssertNil(weight(e, "f01.md", "f03.md"))
-        // 19 consecutive + C(8,2) commented pairs, minus the 7 consecutive ones among f02…f09.
-        XCTAssertEqual(e.count, 19 + 28 - 7)
+        XCTAssertNil(weight(e, "f02.md", "f05.md"))
+        // 19 consecutive + C(5,2) commented pairs, minus the 4 consecutive ones among f05…f09.
+        XCTAssertEqual(e.count, 19 + 10 - 4)
     }
 
     // MARK: Weights

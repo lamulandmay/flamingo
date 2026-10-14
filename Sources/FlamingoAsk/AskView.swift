@@ -45,12 +45,15 @@ final class AskSession: ObservableObject {
     private var recall: Int?
     /// The question that was waiting when the key turned out to be missing or rejected.
     private var pending: String?
+    /// Where a pasted key goes. Tests swap it so they never touch the Keychain.
+    var storeKey: (String) throws -> Void = { try AskEngine.setKey($0) }
 
     private static var sessions: [ObjectIdentifier: AskSession] = [:]
 
     static func session(for engine: AskEngine) -> AskSession {
         let id = ObjectIdentifier(engine)
         if let s = sessions[id], s.engine === engine { return s }
+        sessions = sessions.filter { $0.value.engine != nil }
         let s = AskSession(engine: engine)
         sessions[id] = s
         return s
@@ -61,24 +64,36 @@ final class AskSession: ObservableObject {
     func submit() {
         let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, let engine else { return }
-        task?.cancel()
-        if let current, !current.text.isEmpty { history.append(current) }
-        current = Exchange(question: question)
+        interrupt()
+        let exchange = Exchange(question: question)
+        current = exchange
         recall = nil
         waiting = true
         task = Task { [weak self] in
             do {
                 for try await delta in engine.askStreaming(question) {
-                    guard let self, !Task.isCancelled else { return }
+                    guard let self, self.current?.id == exchange.id else { return }
                     self.apply(delta)
                 }
-                self?.current?.done = true
+                self?.finish(exchange.id)
             } catch is CancellationError {
             } catch {
-                self?.fail(error)
+                self?.fail(error, in: exchange.id)
             }
-            self?.waiting = false
         }
+    }
+
+    /// Stops the exchange in flight, if any, and files the current one into history, answered
+    /// or not, so ⌘↑ can bring back a question that failed.
+    private func interrupt() {
+        task?.cancel()
+        task = nil
+        waiting = false
+        if var current {
+            current.done = true
+            history.append(current)
+        }
+        current = nil
     }
 
     private func apply(_ delta: Delta) {
@@ -99,7 +114,16 @@ final class AskSession: ObservableObject {
         }
     }
 
-    private func fail(_ error: Error) {
+    /// Only for the exchange that asked: a cancelled task must not touch the next one.
+    private func finish(_ id: UUID) {
+        guard current?.id == id else { return }
+        current?.done = true
+        waiting = false
+    }
+
+    private func fail(_ error: Error, in id: UUID) {
+        guard current?.id == id else { return }
+        waiting = false
         let ask = error as? AskError
         current?.error = ask?.errorDescription ?? error.localizedDescription
         current?.done = true
@@ -114,7 +138,7 @@ final class AskSession: ObservableObject {
 
     func saveKey() {
         do {
-            try AskEngine.setKey(draft)
+            try storeKey(draft)
             keyError = nil
             hasKey = true
             draft = pending ?? ""
@@ -127,10 +151,8 @@ final class AskSession: ObservableObject {
     /// Shows an earlier exchange again without asking.
     func show(_ exchange: Exchange) {
         guard let i = history.firstIndex(of: exchange) else { return }
-        task?.cancel()
-        waiting = false
         history.remove(at: i)
-        if let current, !current.text.isEmpty { history.append(current) }
+        interrupt()
         current = exchange
         draft = exchange.question
         recall = nil
@@ -140,7 +162,10 @@ final class AskSession: ObservableObject {
     func recall(_ step: Int) -> Bool {
         let questions = history.map(\.question) + (current.map { [$0.question] } ?? [])
         guard !questions.isEmpty else { return false }
-        let next = (recall ?? questions.count) + step
+        var next = (recall ?? questions.count) + step
+        // The field keeps the question just asked; recalling it again would change nothing.
+        while recall == nil, questions.indices.contains(next), questions[next] == draft { next += step }
+        if next < 0, recall == nil { return false }
         if next >= questions.count {
             guard recall != nil else { return false }
             recall = nil
@@ -161,6 +186,7 @@ struct AskSurface: View {
 
     @FocusState private var focused: Bool
     @State private var keyMonitor: Any?
+    @State private var host = HostWindow()
 
     /// A comfortable reading measure.
     private let measure: CGFloat = 680
@@ -185,6 +211,7 @@ struct AskSurface: View {
         }
         .scrollIndicators(.automatic)
         .background(Theme.Color.bg)
+        .background(HostWindowReader(host: host))
         .onAppear {
             focused = true
             installKeyMonitor()
@@ -200,7 +227,7 @@ struct AskSurface: View {
         return VStack(alignment: .leading, spacing: Theme.Space.xs) {
             ForEach(Array(shown.enumerated()), id: \.element.id) { i, exchange in
                 PreviousQuestion(text: exchange.question,
-                                 opacity: 0.35 + 0.45 * Double(i + 1) / Double(shown.count)) {
+                                 opacity: Theme.Opacity.dimmed + (Theme.Opacity.rest - Theme.Opacity.dimmed) * Double(i + 1) / Double(shown.count)) {
                     session.show(exchange)
                     focused = true
                 }
@@ -245,7 +272,8 @@ struct AskSurface: View {
             if exchange.done, !exchange.citations.isEmpty {
                 FlowLayout(spacing: Theme.Space.xs) {
                     ForEach(Self.files(exchange.citations), id: \.id) { citation in
-                        FileChip(file: citation.file) { onOpen(citation.file, citation.anchor) }
+                        Chip(citation.file.name, mono: false) { onOpen(citation.file, citation.anchor) }
+                            .help(citation.file.relativePath)
                     }
                 }
                 .transition(.opacity)
@@ -268,8 +296,9 @@ struct AskSurface: View {
     /// item that uses them for preview anchors.
     private func installKeyMonitor() {
         guard keyMonitor == nil else { return }
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [session] event in
-            guard focused, session.hasKey else { return event }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [session, host] event in
+            // Local monitors see every window's keys; only this window's field is ours.
+            guard focused, session.hasKey, let window = host.window, event.window === window else { return event }
             let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let command = mods == .command || mods == [.command, .numericPad, .function]
             let plain = mods.subtracting([.numericPad, .function]).isEmpty
@@ -289,6 +318,28 @@ struct AskSurface: View {
 }
 
 // MARK: - Small views
+
+/// The window this view lives in, for scoping the key monitor.
+final class HostWindow {
+    weak var window: NSWindow?
+}
+
+private struct HostWindowReader: NSViewRepresentable {
+    let host: HostWindow
+
+    func makeNSView(context: Context) -> NSView { Reader(host: host) }
+    func updateNSView(_ view: NSView, context: Context) { host.window = view.window }
+
+    private final class Reader: NSView {
+        let host: HostWindow
+        init(host: HostWindow) { self.host = host; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            host.window = window
+        }
+    }
+}
 
 private struct PreviousQuestion: View {
     var text: String
@@ -310,34 +361,6 @@ private struct PreviousQuestion: View {
     }
 }
 
-private struct FileChip: View {
-    var file: FileRef
-    var action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: Theme.Space.xs) {
-                FileGlyph(ext: file.ext, size: 11)
-                Text(file.name)
-                    .font(Theme.Font.small)
-                    .foregroundStyle(Theme.Color.text)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .padding(.horizontal, Theme.Space.s)
-            .padding(.vertical, Theme.Space.xs)
-            .background(RoundedRectangle(cornerRadius: Theme.Radius.s).fill(Theme.Color.bgRaised))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s).strokeBorder(Theme.Color.hairline, lineWidth: 1))
-            .opacity(hovering ? 1 : 0.85)
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .animation(Theme.Motion.fast, value: hovering)
-        .help(file.relativePath)
-    }
-}
-
 private struct ErrorLine: View {
     var text: String
     var body: some View {
@@ -351,26 +374,16 @@ private struct ErrorLine: View {
 }
 
 /// The hairline under the field. While the question is out and nothing has come back yet,
-/// it breathes in the accent color instead of showing a spinner.
+/// it pulses in the accent color instead of showing a spinner.
 private struct StreamHairline: View {
     var active: Bool
-    @State private var lit = false
 
     var body: some View {
         Hairline()
-            .overlay(
-                Rectangle()
-                    .fill(Theme.Color.accent)
-                    .frame(height: 1)
-                    .opacity(active ? (lit ? 0.9 : 0.25) : 0)
-            )
-            .onChange(of: active, initial: true) { _, on in
-                if on {
-                    withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) { lit = true }
-                } else {
-                    withAnimation(Theme.Motion.normal) { lit = false }
-                }
+            .overlay(alignment: .top) {
+                if active { ProgressHairline(value: nil).transition(.opacity) }
             }
+            .animation(Theme.Motion.normal, value: active)
     }
 }
 

@@ -71,6 +71,10 @@ public enum Extract {
         }
     }
 
+    /// Bumped whenever any extractor's output changes, so the index knows to re-extract
+    /// files whose mtime and size haven't moved. 0 was the stubs.
+    public static let version = 1
+
     /// Text is cut here so one pathological file can't bloat the index.
     public static let maxTextLength = 2_000_000
 

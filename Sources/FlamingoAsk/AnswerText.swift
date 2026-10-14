@@ -49,9 +49,8 @@ struct CitationChip: View {
                 .foregroundStyle(Theme.Color.text)
                 .lineLimit(1)
             if let anchor = citation.anchor {
-                // Theme.Font.mono is 12pt; the chip runs at the small size.
                 Text("\(anchor.kind.rawValue) \(anchor.value)")
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(Theme.Font.monoSmall)
                     .foregroundStyle(Theme.Color.textSecondary)
                     .lineLimit(1)
             }
@@ -107,7 +106,7 @@ private struct AnswerTextView: NSViewRepresentable {
         tv.textContainer?.heightTracksTextView = false
         tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         tv.linkTextAttributes = [
-            .foregroundColor: NSColor(Theme.Color.accent),
+            .foregroundColor: Theme.NS.accent,
             .cursor: NSCursor.pointingHand,
         ]
         tv.delegate = context.coordinator

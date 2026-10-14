@@ -44,6 +44,9 @@ public struct CommentsRail: View {
     @FocusState private var editorFocused: Bool
     @Environment(\.undoManager) private var undoManager
 
+    /// Scroll target below the last row, so the bottom padding shows too.
+    private static let end = "rail.end"
+
     private var rows: [Comment] {
         comments.enumerated()
             .filter { !hidden.contains($0.element.id) }
@@ -62,11 +65,10 @@ public struct CommentsRail: View {
                     ForEach(rows) { c in row(c).id(c.id) }
                 }
                 .padding(Theme.Space.s)
+                Color.clear.frame(height: 0).id(Self.end)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { undoLine }
-            .onAppear {
-                if let last = rows.last?.id { DispatchQueue.main.async { proxy.scrollTo(last, anchor: .bottom) } }
-            }
+            .onAppear { DispatchQueue.main.async { proxy.scrollTo(Self.end, anchor: .bottom) } }
             .onChange(of: comments.map(\.id)) { old, new in commentsChanged(old: old, new: new, proxy: proxy) }
             .onChange(of: selection) { _, s in
                 if let s { withAnimation(Theme.Motion.fast) { proxy.scrollTo(s) } }
@@ -118,11 +120,12 @@ public struct CommentsRail: View {
         if let e = editing, !newSet.contains(e) { editing = nil }
         // Anything but the delete itself landing means the undo may target the wrong file.
         if let d = deletion, newSet.subtracting(hidden) != d.expected { endDeletion() }
-        guard !newSet.subtracting(oldSet).isEmpty, let last = rows.last?.id else { return }
+        let added = newSet.subtracting(oldSet)
         if oldSet.isDisjoint(with: newSet) {
-            proxy.scrollTo(last, anchor: .bottom)
-        } else {
-            withAnimation(Theme.Motion.normal) { proxy.scrollTo(last, anchor: .bottom) }
+            proxy.scrollTo(Self.end, anchor: .bottom)
+        } else if let last = rows.last?.id, added.contains(last) {
+            // A new thought landed. A restored older one scrolls itself into view via selection.
+            withAnimation(Theme.Motion.normal) { proxy.scrollTo(Self.end, anchor: .bottom) }
         }
     }
 
@@ -239,23 +242,9 @@ public struct CommentsRail: View {
 
     @ViewBuilder private var undoLine: some View {
         if deletion != nil {
-            VStack(spacing: 0) {
-                Hairline()
-                HStack(spacing: Theme.Space.s) {
-                    Text("Deleted")
-                        .font(Theme.Font.small)
-                        .foregroundStyle(Theme.Color.textSecondary)
-                    Spacer(minLength: 0)
-                    Button("Undo") { undoDeletion() }
-                        .buttonStyle(.plain)
-                        .font(Theme.Font.small)
-                        .foregroundStyle(Theme.Color.accent)
-                }
-                .padding(.horizontal, Theme.Space.m)
-                .frame(height: Theme.Size.row)
-            }
-            .background(Theme.Color.bgRaised)
-            .transition(.opacity)
+            Toast("Deleted", action: "Undo") { undoDeletion() }
+                .padding(Theme.Space.s)
+                .transition(.opacity)
         }
     }
 }
@@ -298,7 +287,7 @@ private struct RailRow: View {
                 Text(RailText.timestamp(comment.timestamp))
                     .font(Theme.Font.monoSmall)
                     .foregroundStyle(Theme.Color.textTertiary)
-                if let a = comment.anchor { RailChip(anchor: a) { onJump(a) } }
+                if let a = comment.anchor { Chip(RailText.anchorLabel(a)) { onJump(a) } }
             }
             if editing {
                 TextField("", text: $draft, axis: .vertical)
@@ -333,29 +322,5 @@ private struct RailRow: View {
     private var background: Color {
         if selected { return active ? Theme.Color.selection : Theme.Color.fill }
         return hovering ? Theme.Color.hover : .clear
-    }
-}
-
-/// `slide 7`. Clicking jumps the preview there.
-private struct RailChip: View {
-    let anchor: FileAnchor
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Text(RailText.anchorLabel(anchor))
-                .font(Theme.Font.monoSmall)
-                .foregroundStyle(Theme.Color.textSecondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .padding(.horizontal, Theme.Space.xs)
-                .padding(.vertical, Theme.Space.xs / 4)
-                .background(Theme.Color.fill, in: RoundedRectangle(cornerRadius: Theme.Radius.s))
-        }
-        .buttonStyle(.plain)
-        .opacity(hovering ? 1 : Theme.Opacity.rest)
-        .onHover { hovering = $0 }
-        .animation(Theme.Motion.fast, value: hovering)
     }
 }

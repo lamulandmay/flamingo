@@ -2,7 +2,7 @@ import Foundation
 
 /// Read-only access to a zip (OOXML, glTF bundles, etc.) through `/usr/bin/unzip`.
 /// Opening lists the members once; `read` pulls any number of members with a single
-/// `unzip` run, so a 200-slide deck costs two process launches, not four hundred.
+/// `unzip -p` run, so a 200-slide deck costs two process launches, not four hundred.
 struct ZipArchive {
     static let unzip = "/usr/bin/unzip"
     /// Members larger than this, uncompressed, are skipped. Guards against zip bombs.
@@ -21,13 +21,11 @@ struct ZipArchive {
         var names: [String] = [], sizes: [String: Int] = [:]
         // "  Length      Date    Time    Name" / "---------  ---------- -----   ----" / rows / footer.
         var inRows = false
-        for line in String(decoding: out.stdout, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false) {
+        for line in String(decoding: out.stdout, as: UTF8.self).split(separator: "\n") {
             if line.hasPrefix("---------") { if inRows { break }; inRows = true; continue }
-            guard inRows, let m = line.wholeMatch(of: #/\s*(\d+)\s+\S+\s+\S+\s{3}(.+)/#) else { continue }
-            let name = String(m.2)
-            guard !name.hasSuffix("/") else { continue }
-            names.append(name)
-            sizes[name] = Int(m.1) ?? 0
+            guard inRows, let (size, name) = Self.row(line), !name.hasSuffix("/") else { continue }
+            if sizes[name] == nil { names.append(name) }
+            sizes[name] = size
         }
         self.names = names
         self.sizes = sizes
@@ -40,20 +38,46 @@ struct ZipArchive {
 
     /// Many members at once, keyed by name. Absent or oversized members are left out.
     func read(_ wanted: [String]) -> [String: Data] {
-        let picked = Array(Set(wanted.filter(isSafe)))
+        let want = Set(wanted)
+        let picked = names.filter { want.contains($0) && isSafe($0) }
         guard !picked.isEmpty else { return [:] }
-        if picked.count == 1 {
-            let name = picked[0]
-            guard let out = Subprocess.run(Self.unzip, ["-p", url.path, Self.literal(name)], timeout: 20),
-                  out.succeeded else { return [:] }
-            return [name: out.stdout]
+        // unzip -p writes members back to back in archive order; the listing's sizes split them.
+        let expected = picked.reduce(0) { $0 + sizes[$1]! }
+        if let out = Subprocess.run(Self.unzip, ["-p", url.path] + picked.map(Self.literal), timeout: 60, maxOutput: expected + 1),
+           out.status == 0, out.stdout.count == expected {
+            var result: [String: Data] = [:]
+            var offset = out.stdout.startIndex
+            for name in picked {
+                let end = offset + sizes[name]!
+                result[name] = out.stdout.subdata(in: offset..<end)
+                offset = end
+            }
+            return result
         }
+        return extractToDisk(picked)
+    }
+
+    /// The first `maxBytes` of a member, however large it is uncompressed; `unzip` is stopped
+    /// once that much has arrived. For parts too big to read whole, where a prefix still helps.
+    func readPrefix(_ name: String, maxBytes: Int) -> Data? {
+        guard sizes[name] != nil, !name.hasPrefix("/"), !name.split(separator: "/").contains(".."),
+              let out = Subprocess.run(Self.unzip, ["-p", url.path, Self.literal(name)], timeout: 20,
+                                       maxOutput: maxBytes, stopAtMaxOutput: true),
+              !out.stdout.isEmpty else { return nil }
+        return out.stdout
+    }
+
+    /// Members whose names match, in archive order.
+    func names(where predicate: (String) -> Bool) -> [String] { names.filter(predicate) }
+
+    /// Slow path for when the stream doesn't add up (a corrupt member, a size the listing got
+    /// wrong): extract to a temp dir and keep whatever came out.
+    private func extractToDisk(_ picked: [String]) -> [String: Data] {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("flamingo-unzip-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
         guard (try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)) != nil,
-              let out = Subprocess.run(Self.unzip, ["-qq", "-o", url.path] + picked.map(Self.literal) + ["-d", tmp.path], timeout: 60),
-              out.status == 0 || out.status == 1 // 1 = warnings, members still extracted
+              Subprocess.run(Self.unzip, ["-qq", "-o", url.path] + picked.map(Self.literal) + ["-d", tmp.path], timeout: 60) != nil
         else { return [:] }
         var result: [String: Data] = [:]
         for name in picked {
@@ -62,12 +86,25 @@ struct ZipArchive {
         return result
     }
 
-    /// Members whose names match, in archive order.
-    func names(where predicate: (String) -> Bool) -> [String] { names.filter(predicate) }
-
     private func isSafe(_ name: String) -> Bool {
         guard let size = sizes[name], size <= Self.maxMemberSize else { return false }
         return !name.hasPrefix("/") && !name.split(separator: "/").contains("..")
+    }
+
+    /// `"     1234  10-14-2026 22:28   dir/name.xml"` → (1234, "dir/name.xml"). By hand: Regex
+    /// costs ~20 ms per thousand members.
+    private static func row(_ line: Substring) -> (Int, String)? {
+        var rest = line.drop(while: { $0 == " " })
+        let digits = rest.prefix(while: \.isNumber)
+        guard let size = Int(digits) else { return nil }
+        rest = rest.dropFirst(digits.count)
+        for _ in 0..<2 { // date, time
+            rest = rest.drop(while: { $0 == " " })
+            guard !rest.isEmpty else { return nil }
+            rest = rest.drop(while: { $0 != " " })
+        }
+        guard rest.hasPrefix("   "), rest.count > 3 else { return nil }
+        return (size, String(rest.dropFirst(3)))
     }
 
     /// unzip treats member arguments as wildcard patterns; escape the pattern characters.

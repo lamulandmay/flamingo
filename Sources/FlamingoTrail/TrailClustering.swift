@@ -63,18 +63,20 @@ enum TrailClustering {
         return raw.enumerated().filter { !drop.contains($0.offset) }.map(\.element)
     }
 
-    /// Search-as-you-type records `c`, `ch`, `churn`. Consecutive searches where one query
-    /// extends the other, close in time, become the last one.
+    /// Search-as-you-type records `c`, `ch`, `churn`. Close in time, a query that extends the
+    /// previous one replaces it, and one the previous extends (backspacing toward a new
+    /// query) is dropped. `churn`, `c`, `co`, `cohort` leaves `churn` and `cohort`.
     static func mergeSearches(_ events: [TrailEvent], tuning: TrailTuning) -> [TrailEvent] {
         var out: [TrailEvent] = []
         for e in events {
             if e.kind == .searched, let prev = out.last, prev.kind == .searched,
                e.at.timeIntervalSince(prev.at) <= tuning.searchMerge {
                 let a = (prev.text ?? "").lowercased(), b = (e.text ?? "").lowercased()
-                if a == b || b.hasPrefix(a) || a.hasPrefix(b) {
+                if b.hasPrefix(a) {
                     out[out.count - 1] = e
                     continue
                 }
+                if a.hasPrefix(b) { continue }
             }
             out.append(e)
         }
@@ -105,7 +107,14 @@ enum TrailClustering {
                     for j in (i + 1)..<files.count { if let p = pair(files[i], files[j]) { pairs.insert(p) } }
                 }
             } else {
-                for i in 1..<files.count { if let p = pair(files[i - 1], files[i]) { pairs.insert(p) } }
+                // Consecutive in the order the user moved, not first appearance: going back
+                // to a hub between other files connects the hub to each of them.
+                var previous: FileRef?
+                for e in s.events where e.kind != .searched {
+                    guard let f = e.file else { continue }
+                    if let prev = previous, let p = pair(prev, f) { pairs.insert(p) }
+                    previous = f
+                }
                 var counts: [FileRef: Int] = [:]
                 for e in s.events where e.kind == .commented || e.kind == .linked {
                     if let f = e.file { counts[f, default: 0] += 1 }

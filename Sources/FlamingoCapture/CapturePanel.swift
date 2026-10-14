@@ -40,6 +40,15 @@ final class CapturePanelHost {
 
     var isVisible: Bool { window.isVisible && !dismissing }
 
+    /// Nothing typed yet.
+    var isEmpty: Bool {
+        func find(_ v: NSView) -> ThoughtNSTextView? {
+            (v as? ThoughtNSTextView) ?? v.subviews.lazy.compactMap(find).first
+        }
+        guard let root = window.contentView, let tv = find(root) else { return true }
+        return tv.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// `over` is the frame to center on, in screen coordinates.
     func present(_ panel: CommentPanel, over frame: NSRect, level: NSWindow.Level) {
         var panel = panel

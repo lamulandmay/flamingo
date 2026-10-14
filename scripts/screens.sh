@@ -15,9 +15,14 @@ key() {  # key <keystroke or key code> [modifiers]
             -e "tell application \"System Events\" to $1" >/dev/null
   sleep ${2:-0.8}
 }
-shot() {
-  local id=$(build/window-id Flamingo) || { echo "no Flamingo window" >&2; exit 1; }
-  screencapture -o -x -l $id "$OUT/$1$SUFFIX.png"
+shot() {  # shot <name> [panel]   panel: grab the window's screen region so floating panels show
+  if [[ $2 == panel ]]; then
+    local r=$(build/window-id --bounds Flamingo) || { echo "no Flamingo window" >&2; exit 1; }
+    screencapture -o -x -R $r "$OUT/$1$SUFFIX.png"
+  else
+    local id=$(build/window-id Flamingo) || { echo "no Flamingo window" >&2; exit 1; }
+    screencapture -o -x -l $id "$OUT/$1$SUFFIX.png"
+  fi
   echo "$OUT/$1$SUFFIX.png"
 }
 
@@ -33,8 +38,8 @@ key 'keystroke "4" using command down' 1.5
 shot ask
 key 'keystroke "1" using command down'
 key 'keystroke "k" using command down'
-shot palette
+shot palette panel
 key 'key code 53'                        # Esc
 key 'keystroke "c" using {command down, shift down}'
-shot capture
+shot capture panel
 key 'key code 53'

@@ -62,17 +62,15 @@ public struct TrailEvent: Codable, Sendable, Equatable, Identifiable {
         try c.encode(TrailDate.string(at), forKey: .at)
         try c.encode(kind, forKey: .kind)
         try c.encodeIfPresent(file?.relativePath, forKey: .file)
-        try c.encodeIfPresent(anchor.map { "\($0.kind.rawValue) \($0.value)" }, forKey: .anchor)
+        try c.encodeIfPresent(anchor?.label, forKey: .anchor)
         try c.encodeIfPresent(text, forKey: .text)
     }
 
-    /// `slide 7` or `(slide 7)` → `FileAnchor`.
+    /// `slide 7`, `Slide 7` or `(slide 7)` → `FileAnchor`, with Core's rules.
     static func parseAnchor(_ s: String) -> FileAnchor? {
         var t = s.trimmingCharacters(in: .whitespaces)
         if t.hasPrefix("("), t.hasSuffix(")") { t = String(t.dropFirst().dropLast()) }
-        guard let sp = t.firstIndex(of: " "), let kind = FileAnchor.Kind(rawValue: String(t[..<sp])) else { return nil }
-        let value = t[t.index(after: sp)...].trimmingCharacters(in: .whitespaces)
-        return value.isEmpty ? nil : FileAnchor(kind: kind, value: value)
+        return FileAnchor(parsing: t)
     }
 
     static func derivedID(_ seed: String) -> UUID {
@@ -162,21 +160,25 @@ public struct TrailTuning: Sendable, Equatable {
     /// Sessions with this many files or fewer connect every pair.
     public var cliqueLimit: Int = 6
     /// In larger sessions, at most this many commented files are connected pairwise.
-    public var maxCommentedFiles: Int = 8
-    /// After aggregation, each file keeps at most this many strongest trail edges.
+    public var maxCommentedFiles: Int = 5
+    /// After aggregation, an edge is kept only if it is among the strongest this-many edges of
+    /// at least one of its two files. A hub can keep more; a file is never cut off entirely.
     public var maxEdgesPerFile: Int = 12
     public init() {}
 }
 
+
 /// Records and reads the trail. Plan 07 owns.
 ///
 /// Thread-safe. `record` never blocks on disk: events are buffered and appended within
-/// `flushDelay`. Reads include events that haven't reached the disk yet.
+/// `flushDelay`. Reads include events that haven't reached the disk yet. Every store on the
+/// same vault in this process shares one buffer and cache, so a store made just to record one
+/// event (as capture does) is seen at once by the long-lived ones, and dropping it flushes.
 public final class TrailStore: @unchecked Sendable {
     public let vault: Vault
 
-    /// Posted (on the main queue, `object` = the store) after an event is recorded or a
-    /// session is renamed.
+    /// Posted on the main queue after an event is recorded or a session renamed, once for every
+    /// live store on that vault, with `object` = that store.
     public static let didChangeNotification = Notification.Name("FlamingoTrailStoreDidChange")
     /// UserDefaults key for the privacy switch. Default on.
     public static let enabledDefaultsKey = "trailEnabled"
@@ -185,54 +187,32 @@ public final class TrailStore: @unchecked Sendable {
         set { UserDefaults.standard.set(newValue, forKey: enabledDefaultsKey) }
     }
 
-    public var fileURL: URL { vault.stateDir.appendingPathComponent("trail.jsonl") }
+    public var fileURL: URL { backend.fileURL }
     public var namesURL: URL { vault.stateDir.appendingPathComponent("trail-names.json") }
 
-    /// How long a recorded event may sit in memory before it is appended.
+    /// How long an event recorded through this store may sit in memory before it is appended.
     public var flushDelay: TimeInterval = 0.5
     public var tuning = TrailTuning()
 
-    private let lock = NSLock()
-    private var pending: [TrailEvent] = []
-    private var lastRecorded: TrailEvent?
-    private var flushScheduled = false
-    private let io = DispatchQueue(label: "com.flamingo.trail.io", qos: .utility)
-    private var terminationObserver: NSObjectProtocol?
-
-    // Incremental read cache, touched only on `io`.
-    private var cached: [TrailEvent] = []
-    private var cachedIDs = Set<UUID>()
-    private var cachedOffset: UInt64 = 0
-    private var cachedInode: UInt64 = 0
+    private let backend: TrailBackend
 
     public init(vault: Vault) {
         self.vault = vault
-        terminationObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
-        ) { [weak self] _ in self?.flush() }
+        backend = TrailBackend.shared(for: vault)
+        backend.attach(self)
     }
 
+    /// Dropping a store flushes what it recorded, off the caller's thread. The queued write
+    /// keeps the backend alive until it lands.
     deinit {
-        if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
-        // Nothing else can hold `self` here, so writing directly cannot race a scheduled flush.
-        writePending()
+        backend.flushSoon()
     }
 
     // MARK: Recording
 
     public func record(_ event: TrailEvent) {
         guard TrailStore.isEnabled, let e = TrailStore.sanitized(event) else { return }
-        lock.lock()
-        if let last = lastRecorded, TrailStore.isDuplicate(e, of: last) { lock.unlock(); return }
-        lastRecorded = e
-        pending.append(e)
-        let schedule = !flushScheduled
-        flushScheduled = true
-        lock.unlock()
-        if schedule {
-            io.asyncAfter(deadline: .now() + flushDelay) { [weak self] in self?.writePending() }
-        }
-        notifyChange()
+        backend.record(e, flushDelay: flushDelay)
     }
 
     public func recordOpened(_ file: FileRef, anchor: FileAnchor? = nil) {
@@ -255,7 +235,7 @@ public final class TrailStore: @unchecked Sendable {
 
     /// Appends everything buffered. Safe from any thread; called on `willTerminate` automatically.
     public func flush() {
-        io.sync { writePending() }
+        backend.flush()
     }
 
     /// Paths that are absolute, climb out of the vault, or point into `.flamingo` are not
@@ -295,41 +275,6 @@ public final class TrailStore: @unchecked Sendable {
         }
     }
 
-    private func notifyChange() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            NotificationCenter.default.post(name: TrailStore.didChangeNotification, object: self)
-        }
-    }
-
-    /// Runs on `io` (or in deinit).
-    private func writePending() {
-        lock.lock()
-        let batch = pending
-        pending.removeAll()
-        flushScheduled = false
-        lock.unlock()
-        guard !batch.isEmpty else { return }
-
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        var data = Data()
-        for e in batch {
-            guard let line = try? enc.encode(e) else { continue }
-            data.append(line)
-            data.append(0x0A)
-        }
-        do {
-            try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
-            try TrailStore.append(data, to: fileURL)
-        } catch {
-            // Keep the events; the next record or flush retries.
-            lock.lock()
-            pending.insert(contentsOf: batch, at: 0)
-            lock.unlock()
-        }
-    }
-
     /// O_APPEND write. If a previous run died mid-line, start on a fresh line so the
     /// damage stays confined to the one corrupted line.
     static func append(_ data: Data, to url: URL) throws {
@@ -363,11 +308,7 @@ public final class TrailStore: @unchecked Sendable {
     /// Every event at or after `since`, oldest first, including ones not yet flushed.
     /// Unreadable lines (a torn last line after a crash, hand edits) are skipped.
     public func events(since: Date? = nil) throws -> [TrailEvent] {
-        var all: [TrailEvent] = try io.sync {
-            let onDisk = try readDisk()
-            lock.lock(); defer { lock.unlock() }
-            return onDisk + pending
-        }
+        var all = try backend.events()
         // Stable sort: the file is append-only, so equal timestamps keep their order.
         all = all.enumerated().sorted { a, b in
             a.element.at != b.element.at ? a.element.at < b.element.at : a.offset < b.offset
@@ -397,6 +338,173 @@ public final class TrailStore: @unchecked Sendable {
         }
     }
 
+    // MARK: Names
+
+    /// Session titles keyed by session id.
+    public func names() -> [String: String] {
+        guard let data = try? Data(contentsOf: namesURL),
+              let map = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
+        return map
+    }
+
+    public func title(for session: TrailSession) -> String? { names()[session.id.uuidString] }
+
+    /// Names a session, turning it into a thought chain. `nil` or blank removes the name.
+    public func setTitle(_ title: String?, for session: TrailSession) throws {
+        try backend.io.sync {
+            var map = names()
+            let t = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            map[session.id.uuidString] = t.isEmpty ? nil : t
+            try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
+            try enc.encode(map).write(to: namesURL, options: .atomic)
+        }
+        backend.notifyChange()
+    }
+}
+
+/// What every `TrailStore` on one vault shares: the write buffer, the io queue, the
+/// incremental read cache, and the list of stores to notify.
+final class TrailBackend: @unchecked Sendable {
+    let vault: Vault
+    let fileURL: URL
+    let io = DispatchQueue(label: "com.flamingo.trail.io", qos: .utility)
+
+    private let lock = NSLock()
+    private var pending: [TrailEvent] = []
+    private var lastRecorded: TrailEvent?
+    private var recentIDs: [UUID] = []
+    private var recentIDSet = Set<UUID>()
+    /// When the scheduled flush will run, if one is scheduled.
+    private var flushDeadline: DispatchTime?
+    private let stores = NSHashTable<TrailStore>.weakObjects()
+    private var terminationObserver: NSObjectProtocol?
+
+    // Incremental read cache, touched only on `io`.
+    private var cached: [TrailEvent] = []
+    private var cachedIDs = Set<UUID>()
+    private var cachedOffset: UInt64 = 0
+    private var cachedInode: UInt64 = 0
+    /// The bytes just before `cachedOffset`. If they change, the file was rewritten in place.
+    private var cachedTail = Data()
+    /// Ids on the last line when it has no newline yet: on disk, though not committed.
+    private var tailIDs = Set<UUID>()
+
+    private struct Weak { weak var backend: TrailBackend? }
+    private static let registryLock = NSLock()
+    nonisolated(unsafe) private static var registry: [String: Weak] = [:]
+
+    static func shared(for vault: Vault) -> TrailBackend {
+        let key = vault.root.resolvingSymlinksInPath().path
+        registryLock.lock(); defer { registryLock.unlock() }
+        if let b = registry[key]?.backend { return b }
+        let b = TrailBackend(vault: vault)
+        registry = registry.filter { $0.value.backend != nil }
+        registry[key] = Weak(backend: b)
+        return b
+    }
+
+    private init(vault: Vault) {
+        self.vault = vault
+        fileURL = vault.stateDir.appendingPathComponent("trail.jsonl")
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: nil
+        ) { [weak self] _ in self?.flush() }
+    }
+
+    deinit {
+        if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
+        // Nothing else can hold `self` here, so writing directly cannot race a scheduled flush.
+        writePending()
+    }
+
+    func attach(_ store: TrailStore) {
+        lock.lock(); stores.add(store); lock.unlock()
+    }
+
+    func record(_ e: TrailEvent, flushDelay: TimeInterval) {
+        lock.lock()
+        if recentIDSet.contains(e.id) || lastRecorded.map({ TrailStore.isDuplicate(e, of: $0) }) == true {
+            lock.unlock(); return
+        }
+        lastRecorded = e
+        recentIDs.append(e.id); recentIDSet.insert(e.id)
+        if recentIDs.count > 512 { recentIDSet.remove(recentIDs.removeFirst()) }
+        pending.append(e)
+        // Stores may ask for different delays; the earliest deadline wins.
+        let deadline = DispatchTime.now() + flushDelay
+        let schedule = flushDeadline.map { deadline < $0 } ?? true
+        if schedule { flushDeadline = deadline }
+        lock.unlock()
+        if schedule {
+            io.asyncAfter(deadline: deadline) { [weak self] in self?.writePending() }
+        }
+        notifyChange()
+    }
+
+    func flush() {
+        io.sync { writePending() }
+    }
+
+    func flushSoon() {
+        io.async { self.writePending() }
+    }
+
+    func notifyChange() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            let live = self.stores.allObjects
+            self.lock.unlock()
+            for s in live { NotificationCenter.default.post(name: TrailStore.didChangeNotification, object: s) }
+        }
+    }
+
+    /// File events plus buffered ones, in file-then-buffer order.
+    func events() throws -> [TrailEvent] {
+        try io.sync {
+            let onDisk = try readDisk()
+            lock.lock(); defer { lock.unlock() }
+            return onDisk + pending.filter { !cachedIDs.contains($0.id) && !tailIDs.contains($0.id) }
+        }
+    }
+
+    /// Runs on `io` (or in deinit).
+    private func writePending() {
+        lock.lock()
+        let isEmpty = pending.isEmpty
+        lock.unlock()
+        guard !isEmpty else { return }
+        // Bring the cache up to date so an event already on disk (the same comment recorded
+        // again after a relaunch) isn't written twice.
+        _ = try? readDisk()
+        lock.lock()
+        let batch = pending.filter { !cachedIDs.contains($0.id) && !tailIDs.contains($0.id) }
+        pending.removeAll()
+        flushDeadline = nil
+        lock.unlock()
+        guard !batch.isEmpty else { return }
+
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        var data = Data()
+        for e in batch {
+            guard let line = try? enc.encode(e) else { continue }
+            data.append(line)
+            data.append(0x0A)
+        }
+        do {
+            try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
+            try TrailStore.append(data, to: fileURL)
+        } catch {
+            // Keep the events; the next record or flush retries.
+            lock.lock()
+            pending.insert(contentsOf: batch, at: 0)
+            lock.unlock()
+        }
+    }
+
     /// Runs on `io`. Reads only what was appended since the last call.
     private func readDisk() throws -> [TrailEvent] {
         let fd = open(fileURL.path, O_RDONLY | O_CLOEXEC)
@@ -409,7 +517,7 @@ public final class TrailStore: @unchecked Sendable {
         guard fstat(fd, &st) == 0 else { throw POSIXError(.EIO) }
         let inode = UInt64(st.st_ino)
         let size = UInt64(st.st_size)
-        if inode != cachedInode || size < cachedOffset { resetCache(inode: inode) }
+        if inode != cachedInode || size < cachedOffset || !tailMatches(fd) { resetCache(inode: inode) }
 
         let decoder = JSONDecoder()
         var offset = cachedOffset
@@ -435,8 +543,24 @@ public final class TrailStore: @unchecked Sendable {
         if !carry.isEmpty, let e = decodeLine(carry[...], decoder: decoder), !cachedIDs.contains(e.id) {
             tail.append(e)
         }
-        cachedOffset = offset
+        tailIDs = Set(tail.map(\.id))
+        if offset != cachedOffset {
+            cachedOffset = offset
+            cachedTail = bytes(fd, before: offset)
+        }
         return cached + tail
+    }
+
+    private func bytes(_ fd: Int32, before offset: UInt64) -> Data {
+        let n = Int(min(offset, 64))
+        guard n > 0 else { return Data() }
+        var buf = [UInt8](repeating: 0, count: n)
+        let got = pread(fd, &buf, n, off_t(offset) - off_t(n))
+        return got == n ? Data(buf) : Data()
+    }
+
+    private func tailMatches(_ fd: Int32) -> Bool {
+        cachedOffset == 0 || bytes(fd, before: cachedOffset) == cachedTail
     }
 
     private func decodeLine(_ line: Data, decoder: JSONDecoder) -> TrailEvent? {
@@ -453,31 +577,6 @@ public final class TrailStore: @unchecked Sendable {
     }
 
     private func resetCache(inode: UInt64) {
-        cached = []; cachedIDs = []; cachedOffset = 0; cachedInode = inode
-    }
-
-    // MARK: Names
-
-    /// Session titles keyed by session id.
-    public func names() -> [String: String] {
-        guard let data = try? Data(contentsOf: namesURL),
-              let map = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
-        return map
-    }
-
-    public func title(for session: TrailSession) -> String? { names()[session.id.uuidString] }
-
-    /// Names a session, turning it into a thought chain. `nil` or blank removes the name.
-    public func setTitle(_ title: String?, for session: TrailSession) throws {
-        try io.sync {
-            var map = names()
-            let t = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            map[session.id.uuidString] = t.isEmpty ? nil : t
-            try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
-            let enc = JSONEncoder()
-            enc.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
-            try enc.encode(map).write(to: namesURL, options: .atomic)
-        }
-        notifyChange()
+        cached = []; cachedIDs = []; cachedOffset = 0; cachedInode = inode; cachedTail = Data(); tailIDs = []
     }
 }

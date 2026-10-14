@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import FlamingoCore
+import FlamingoDesign
 @testable import FlamingoAsk
 
 final class MarkdownLiteTests: XCTestCase {
@@ -47,7 +48,7 @@ final class MarkdownLiteTests: XCTestCase {
         XCTAssertEqual(s.string, "See [9].")
         XCTAssertTrue(citations(s).isEmpty)
         XCTAssertFalse(hasLink(s))
-        XCTAssertEqual(attribute(.foregroundColor, of: "[9]", in: s), NSColor.tertiaryLabelColor)
+        XCTAssertEqual(attribute(.foregroundColor, of: "[9]", in: s), Theme.NS.textTertiary)
     }
 
     func testGroupsYieldOneRunPerNumber() {
@@ -101,7 +102,7 @@ final class MarkdownLiteTests: XCTestCase {
         XCTAssertEqual(citations(s).map(\.number), [2])
         let intro: NSParagraphStyle? = attribute(.paragraphStyle, of: "Intro", in: s)
         XCTAssertEqual(intro?.headIndent, 0)
-        XCTAssertEqual(attribute(.foregroundColor, of: "•", in: s), NSColor.secondaryLabelColor)
+        XCTAssertEqual(attribute(.foregroundColor, of: "•", in: s), Theme.NS.textSecondary)
     }
 
     func testOrderedListKeepsNumbers() {

@@ -3,8 +3,8 @@ import FlamingoCore
 import FlamingoIndex
 @testable import FlamingoAsk
 
-/// An in-memory vault whose search behaves like plan 05's: every query word must appear,
-/// the last one as a prefix. Comments are searchable and come back at their own anchor.
+/// An in-memory vault whose search behaves like plan 05's: every query word must appear (the
+/// last one as a prefix), and when nothing matches, any word may. Ranked by words matched.
 struct FakeSource: PassageSource {
     var vault = Vault(root: URL(fileURLWithPath: "/tmp/fake-vault"))
     var sectionsByFile: [FileRef: [SourceSection]] = [:]
@@ -12,36 +12,49 @@ struct FakeSource: PassageSource {
     var commentsByFile: [FileRef: [Comment]] = [:]
     var failSearch = false
 
-    func search(_ query: String, limit: Int) throws -> [SearchHit] {
-        if failSearch { throw NSError(domain: "fake", code: 1) }
+    /// Matched-word count per candidate, AND first, then OR.
+    private func rank<T>(_ query: String, _ items: [(T, String)]) -> [T] {
         let words = QueryPlan.words(query)
         guard !words.isEmpty else { return [] }
-        func matches(_ text: String) -> Bool {
+        func count(_ text: String) -> Int {
             let have = QueryPlan.words(text)
-            return words.enumerated().allSatisfy { i, w in
+            return words.enumerated().filter { i, w in
                 i == words.count - 1 ? have.contains { $0.hasPrefix(w) } : have.contains(w)
-            }
+            }.count
         }
-        var hits: [SearchHit] = []
+        let scored = items.map { ($0.0, count($0.1)) }
+        let all = scored.filter { $0.1 == words.count }
+        let pool = all.isEmpty && words.count > 1 ? scored.filter { $0.1 > 0 } : all
+        return pool.enumerated().sorted { $0.element.1 != $1.element.1 ? $0.element.1 > $1.element.1 : $0.offset < $1.offset }
+            .map(\.element.0)
+    }
+
+    func searchSections(_ query: String, limit: Int) throws -> [SearchHit] {
+        if failSearch { throw NSError(domain: "fake", code: 1) }
+        var items: [(SearchHit, String)] = []
         for (file, sections) in sectionsByFile.sorted(by: { $0.key.relativePath < $1.key.relativePath }) {
-            for s in sections where matches((s.title ?? "") + " " + s.text) {
-                hits.append(SearchHit(file: file, anchor: s.anchor, snippet: "«\(s.text.prefix(60))»", score: -1))
+            for s in sections {
+                items.append((SearchHit(file: file, anchor: s.anchor, snippet: "«\(s.text.prefix(60))»", score: 1),
+                              (s.title ?? "") + " " + s.text))
             }
         }
-        for (file, text) in textByFile where matches(text) {
-            hits.append(SearchHit(file: file, anchor: nil, snippet: String(text.prefix(60)), score: -1))
+        for (file, text) in textByFile.sorted(by: { $0.key.relativePath < $1.key.relativePath }) {
+            items.append((SearchHit(file: file, anchor: nil, snippet: String(text.prefix(60)), score: 1), text))
         }
-        for (file, comments) in commentsByFile.sorted(by: { $0.key.relativePath < $1.key.relativePath }) {
-            for c in comments where matches(c.text) {
-                hits.append(SearchHit(file: file, anchor: c.anchor, snippet: "…\(c.text.prefix(40))…", score: -2))
-            }
+        return Array(rank(query, items).prefix(limit))
+    }
+
+    func searchComments(_ query: String, limit: Int) throws -> [CommentHit] {
+        if failSearch { throw NSError(domain: "fake", code: 1) }
+        let items = commentsByFile.sorted(by: { $0.key.relativePath < $1.key.relativePath }).flatMap { file, comments in
+            comments.map { (CommentHit(file: file, comment: $0, snippet: $0.text, score: 1), $0.text) }
         }
-        return Array(hits.prefix(limit))
+        return Array(rank(query, items).prefix(limit))
     }
 
     func sections(of ref: FileRef) throws -> [SourceSection] { sectionsByFile[ref] ?? [] }
     func text(of ref: FileRef) throws -> String? { textByFile[ref] }
-    func comments() throws -> [FileRef: [Comment]] { commentsByFile }
+    func comments(on ref: FileRef) throws -> [Comment] { commentsByFile[ref] ?? [] }
     func files() -> [FileRef] {
         Array(Set(sectionsByFile.keys).union(textByFile.keys).union(commentsByFile.keys))
             .sorted { $0.relativePath < $1.relativePath }

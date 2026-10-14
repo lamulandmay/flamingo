@@ -76,8 +76,9 @@ enum Prompt {
         "<passages>\n" + passages.map(\.prompt).joined(separator: "\n\n") + (passages.isEmpty ? "" : "\n") + "</passages>"
     }
 
-    /// `canSearch: false` once the searches are spent: the tool stays declared (so the prefix
-    /// is unchanged) and `tool_choice: none` makes the model answer.
+    /// `canSearch: false` only when the model kept calling `search` after being told none are
+    /// left: `tool_choice: none` makes it answer. The tool stays declared so the tools and
+    /// system cache survive; the switch does cost the cached messages, hence the last resort.
     static func body(model: String, messages: [JSON], canSearch: Bool = true) -> JSON {
         var body: JSON = [
             "model": .string(model),
@@ -115,6 +116,8 @@ enum Prompt {
     }
 
     static func supportsEffort(_ model: String) -> Bool {
-        !(model.hasPrefix("claude-haiku-4") || model.hasPrefix("claude-sonnet-4-5") || model.hasPrefix("claude-3"))
+        ["claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
+         "claude-sonnet-4-6", "claude-sonnet-5", "claude-haiku-5", "claude-fable", "claude-mythos"]
+            .contains { model.hasPrefix($0) }
     }
 }

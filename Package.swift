@@ -42,6 +42,7 @@ let package = Package(
         .testTarget(name: "FlamingoIndexTests", dependencies: ["FlamingoIndex"], path: "Tests/FlamingoIndexTests"),
         .testTarget(name: "FlamingoTrailTests", dependencies: ["FlamingoTrail"], path: "Tests/FlamingoTrailTests"),
         .testTarget(name: "FlamingoAskTests", dependencies: ["FlamingoAsk"], path: "Tests/FlamingoAskTests"),
+        .testTarget(name: "FlamingoCaptureTests", dependencies: ["FlamingoCapture", "FlamingoCore"], path: "Tests/FlamingoCaptureTests"),
         .testTarget(name: "FlamingoGraphTests", dependencies: ["FlamingoGraph", "FlamingoCore"], path: "Tests/FlamingoGraphTests"),
     ]
 )

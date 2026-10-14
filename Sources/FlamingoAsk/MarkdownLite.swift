@@ -11,9 +11,7 @@ extension NSAttributedString.Key {
 /// The subset of markdown an answer uses: paragraphs, bullets, bold, italic, inline code,
 /// and `[n]` citations. Rendered for an `NSTextView`.
 enum MarkdownLite {
-    // Mirror Theme.Font.body (13pt) and Theme.Font.mono (12pt); Theme has no NSFont tokens.
-    static let bodySize: CGFloat = 13
-    static let codeSize: CGFloat = 12
+    /// Theme.NS.body at a 1.3 line height.
     static let lineHeight: CGFloat = 17
 
     static func render(_ markdown: String, sources: [Int: Citation], streaming: Bool) -> NSAttributedString {
@@ -34,8 +32,8 @@ enum MarkdownLite {
                 style = paragraphStyle(spacing: isLast ? 0 : Theme.Space.s)
             case .item(let marker, let ordered, let level, let s):
                 out.append(NSAttributedString(string: marker + "\t", attributes: [
-                    .font: NSFont.systemFont(ofSize: bodySize),
-                    .foregroundColor: NSColor.secondaryLabelColor,
+                    .font: Theme.NS.body,
+                    .foregroundColor: Theme.NS.textSecondary,
                 ]))
                 out.append(inline(s, sources: sources, streaming: streaming, bold: false))
                 let nextIsItem: Bool
@@ -46,7 +44,7 @@ enum MarkdownLite {
                                        firstIndent: lead, indent: lead + width)
             }
             if !isLast {
-                out.append(NSAttributedString(string: "\n", attributes: [.font: NSFont.systemFont(ofSize: bodySize)]))
+                out.append(NSAttributedString(string: "\n", attributes: [.font: Theme.NS.body]))
             }
             out.addAttribute(.paragraphStyle, value: style, range: NSRange(location: start, length: out.length - start))
         }
@@ -152,13 +150,13 @@ enum MarkdownLite {
         var code = false
 
         func font() -> NSFont {
-            if code { return NSFont.monospacedSystemFont(ofSize: codeSize, weight: .regular) }
-            var f = NSFont.systemFont(ofSize: bodySize, weight: (bold || baseBold) ? .semibold : .regular)
+            if code { return Theme.NS.mono }
+            var f = NSFont.systemFont(ofSize: Theme.NS.body.pointSize, weight: (bold || baseBold) ? .semibold : .regular)
             if italic != nil { f = NSFontManager.shared.convert(f, toHaveTrait: .italicFontMask) }
             return f
         }
         func attrs() -> [NSAttributedString.Key: Any] {
-            [.font: font(), .foregroundColor: code ? NSColor.secondaryLabelColor : NSColor.labelColor]
+            [.font: font(), .foregroundColor: code ? Theme.NS.textSecondary : Theme.NS.text]
         }
         func flush() {
             if !buf.isEmpty { out.append(NSAttributedString(string: buf, attributes: attrs())); buf = "" }
@@ -181,7 +179,7 @@ enum MarkdownLite {
         }
         func appendCitation(_ nums: [Int]) {
             let f = font()
-            let accent = NSColor(Theme.Color.accent)
+            let accent = Theme.NS.accent
             func plain(_ t: String, _ color: NSColor) {
                 out.append(NSAttributedString(string: t, attributes: [.font: f, .foregroundColor: color]))
             }
@@ -191,14 +189,14 @@ enum MarkdownLite {
                 out.append(NSAttributedString(string: t, attributes: a))
             }
             if nums.count == 1 {
-                if sources[nums[0]] != nil { linked("[\(nums[0])]", nums[0]) } else { plain("[\(nums[0])]", .tertiaryLabelColor) }
+                if sources[nums[0]] != nil { linked("[\(nums[0])]", nums[0]) } else { plain("[\(nums[0])]", Theme.NS.textTertiary) }
                 return
             }
-            let frame: NSColor = nums.contains { sources[$0] != nil } ? accent : .tertiaryLabelColor
+            let frame: NSColor = nums.contains { sources[$0] != nil } ? accent : Theme.NS.textTertiary
             plain("[", frame)
             for (k, num) in nums.enumerated() {
                 if k > 0 { plain(", ", frame) }
-                if sources[num] != nil { linked("\(num)", num) } else { plain("\(num)", .tertiaryLabelColor) }
+                if sources[num] != nil { linked("\(num)", num) } else { plain("\(num)", Theme.NS.textTertiary) }
             }
             plain("]", frame)
         }

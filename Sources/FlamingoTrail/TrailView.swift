@@ -34,7 +34,8 @@ public struct TrailView: View {
     }
 
     /// Called when the user names (or un-names, with nil) a session. With a store, the name is
-    /// saved to `.flamingo/trail-names.json` before this is called.
+    /// also saved to `.flamingo/trail-names.json`. Without a store or this, renaming is off,
+    /// since a name would be lost on the next redraw.
     public func onRename(_ action: @escaping (TrailSession, String?) -> Void) -> TrailView {
         var v = self; v.renameAction = action; return v
     }
@@ -46,8 +47,11 @@ public struct TrailView: View {
             showsPaused: !TrailStore.isEnabled,
             onOpen: onSelect,
             onResume: resumeAction,
-            onRename: { session, title in
-                if let store { try? store.setTitle(title, for: session) }
+            onRename: store == nil && renameAction == nil ? nil : { session, title in
+                if let store {
+                    // The row already shows the new name; the file write needn't block the UI.
+                    Task.detached(priority: .utility) { try? store.setTitle(title, for: session) }
+                }
                 renameAction?(session, title)
             }
         )

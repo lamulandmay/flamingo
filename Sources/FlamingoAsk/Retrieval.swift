@@ -12,28 +12,33 @@ struct SourceSection: Sendable, Equatable {
 /// What retrieval reads from the vault. `IndexStore` in the app, a fake in tests.
 protocol PassageSource: Sendable {
     var vault: Vault { get }
-    func search(_ query: String, limit: Int) throws -> [SearchHit]
+    /// Every matching section, ranked. All terms first, any term when that finds nothing.
+    func searchSections(_ query: String, limit: Int) throws -> [SearchHit]
+    /// Matching comments, ranked, same matching rules.
+    func searchComments(_ query: String, limit: Int) throws -> [CommentHit]
     func sections(of ref: FileRef) throws -> [SourceSection]
     func text(of ref: FileRef) throws -> String?
-    func comments() throws -> [FileRef: [Comment]]
+    func comments(on ref: FileRef) throws -> [Comment]
     func files() -> [FileRef]
 }
 
 struct IndexSource: PassageSource {
     let index: IndexStore
     var vault: Vault { index.vault }
-    func search(_ query: String, limit: Int) throws -> [SearchHit] { try index.search(query, limit: limit) }
+    func searchSections(_ query: String, limit: Int) throws -> [SearchHit] { try index.searchSections(query, limit: limit) }
+    func searchComments(_ query: String, limit: Int) throws -> [CommentHit] { try index.searchComments(query, limit: limit) }
     func sections(of ref: FileRef) throws -> [SourceSection] {
         try index.sections(of: ref).map { SourceSection(anchor: $0.anchor, title: $0.title, text: $0.text) }
     }
     func text(of ref: FileRef) throws -> String? { try index.text(of: ref) }
-    func comments() throws -> [FileRef: [Comment]] { try SidecarStore(vault: index.vault).all() }
-    func files() -> [FileRef] { VaultScanner.files(in: index.vault) }
+    func comments(on ref: FileRef) throws -> [Comment] { try index.comments(on: ref) }
+    func files() -> [FileRef] { (try? index.indexedFiles()) ?? VaultScanner.files(in: index.vault) }
 }
 
-/// Turns a question into index queries: the question itself, its content words, each clause
-/// split on "and", and the strongest single words stemmed so the index's trailing-prefix match
-/// catches "price" from "pricing".
+/// Turns a question into index queries: its content words, each clause split on "and", and the
+/// longest single words stemmed so the index's trailing-prefix match catches "price" from
+/// "pricing". The raw question goes in only when it has no content words: the index falls back
+/// to matching any term, and "what", "did" and "I" match everything.
 enum QueryPlan {
     struct Query: Equatable {
         var text: String
@@ -47,8 +52,11 @@ enum QueryPlan {
             guard !t.isEmpty, !out.contains(where: { $0.text.lowercased() == t.lowercased() }) else { return }
             out.append(Query(text: t, weight: weight))
         }
-        add(question, 1)
         let all = terms(question)
+        guard !all.isEmpty else {
+            add(question, 1)
+            return out
+        }
         add(all.joined(separator: " "), 1)
         let parts = clauses(question)
         if parts.count > 1 {
@@ -101,7 +109,9 @@ enum QueryPlan {
         // Words about the vault rather than in it.
         "say", "said", "says", "think", "thought", "mention", "mentioned", "mentions", "tell", "told",
         "know", "wrote", "write", "written", "comment", "comments", "commented", "note", "notes", "file",
-        "files", "vault", "anything", "something", "thing", "things", "where", "find",
+        "files", "vault", "anything", "something", "thing", "things", "find",
+        // Verbs that carry the question, not the topic.
+        "go", "goes", "going", "gone", "need", "needs", "needed", "want", "wants", "make", "makes", "made",
     ]
 }
 
@@ -124,44 +134,76 @@ final class Retriever {
     private(set) var nextID = 1
     private var seen = Set<String>()
     private var sectionCache: [FileRef: [SourceSection]] = [:]
-    private lazy var allComments: [FileRef: [Comment]] = (try? source.comments()) ?? [:]
+    private var commentCache: [FileRef: [Comment]] = [:]
     private lazy var allFiles: [FileRef] = source.files()
 
     init(source: PassageSource) { self.source = source }
 
-    /// Searches the index for `question` and its reformulations, then packs comments first and
-    /// sections by rank into `budgetTokens`. Throws only if every index query failed.
+    /// Searches the index for `question`'s reformulations and packs, within `budgetTokens`:
+    /// comments that match, then sections by rank (with the files those comments link to), then
+    /// comments that sit on the matching places. Throws only if every index query failed.
     func retrieve(_ question: String, budgetTokens: Int = 12_000) throws -> [Passage] {
         let terms = QueryPlan.terms(question)
-        let ranked = try fusedHits(for: question)
+        let queries = QueryPlan.queries(for: question)
 
-        // A hit that is really one of the user's comments boosts that comment; the rest are sections.
-        var commentBoost: [UUID: Double] = [:]
-        var sectionHits: [SearchHit] = []
-        for (hit, score) in ranked {
-            if let c = Self.comment(matching: hit, in: allComments[hit.file] ?? []) {
-                commentBoost[c.id, default: 0] += score * 61   // rank 1 of a weight-1 query ≈ 1
-            } else if !seen.contains(Self.key(hit.file, hit.anchor)) {
-                sectionHits.append(hit)
+        // Each kind fused across the reformulations by rank, deduped by place or comment id.
+        var sectionRank = Fusion<SearchHit>()
+        var commentRank = Fusion<CommentHit>()
+        var failure: Error?
+        var failures = 0
+        for q in queries {
+            do {
+                sectionRank.add(try source.searchSections(q.text, limit: 50), weight: q.weight) { Self.key($0.file, $0.anchor) }
+                commentRank.add(try source.searchComments(q.text, limit: 50), weight: q.weight) { "c:\($0.comment.id.uuidString)" }
+            } catch {
+                failure = error
+                failures += 1
             }
         }
-        let topHits = Array(sectionHits.prefix(sectionLimit))
+        if failures == queries.count, let failure { throw failure }
+
+        let topHits = Array(sectionRank.ranked.map(\.item)
+            .filter { !seen.contains(Self.key($0.file, $0.anchor)) }
+            .prefix(sectionLimit))
         let hitFiles = Set(topHits.map(\.file))
         let hitPlaces = Set(topHits.map { Self.key($0.file, $0.anchor) })
 
-        let comments = rankComments(terms: terms, boost: commentBoost, hitFiles: hitFiles, hitPlaces: hitPlaces)
-
-        // Sections: direct hits by rank, with files the top comments link to slotted in after
-        // the first few, since those links are how the user connected things.
-        var sections: [Candidate] = topHits.map { hit in
-            sectionText(for: hit) ?? Candidate(file: hit.file, anchor: hit.anchor, title: nil, text: Self.plain(hit.snippet))
+        // Matching comments, weighted by how much of the question they cover (the index falls
+        // back to any term), and nudged up when they sit on or link to a matching place. Each
+        // nudge is about a quarter of a first-place rank.
+        let direct: [CommentHit] = commentRank.ranked.map { hit, score -> (CommentHit, Double) in
+            let coverage = terms.isEmpty ? 1 : Double(Self.matchCount(terms, in: hit.comment.text)) / Double(terms.count)
+            var s = score * (0.4 + 0.6 * coverage)
+            if hitFiles.contains(hit.file) { s += 0.004 }
+            if hit.comment.anchor != nil, hitPlaces.contains(Self.key(hit.file, hit.comment.anchor)) { s += 0.004 }
+            if hit.comment.links.contains(where: {
+                Wikilink.resolve($0, in: source.vault, candidates: Array(hitFiles)) != nil
+            }) { s += 0.004 }
+            return (hit, s)
         }
-        let linked = linkedSections(from: comments.prefix(8).map(\.comment), terms: terms,
+        .sorted { $0.1 > $1.1 }
+        .map(\.0)
+        let directIDs = Set(direct.map(\.comment.id))
+
+        // Comments on the best places that didn't match the words themselves.
+        var context: [(file: FileRef, comment: Comment)] = []
+        for hit in topHits.prefix(8) {
+            for c in cachedComments(on: hit.file) where !directIDs.contains(c.id) && c.anchor == hit.anchor {
+                if !context.contains(where: { $0.comment.id == c.id }) { context.append((hit.file, c)) }
+            }
+        }
+
+        // Sections: direct hits by rank, with the files the top comments link to slotted in after
+        // the first few, since those links are how the user connected things.
+        var sections: [Candidate] = topHits.compactMap { hit in
+            let c = sectionText(for: hit) ?? Candidate(file: hit.file, anchor: hit.anchor, title: nil, text: Self.plain(hit.snippet))
+            return Self.hasContent(c) ? c : nil
+        }
+        let linked = linkedSections(from: direct.prefix(8).map(\.comment), terms: terms,
                                     excluding: Set(sections.map { Self.key($0.file, $0.anchor) }))
         sections.insert(contentsOf: linked, at: min(3, sections.count))
 
-        // Pack: comments that match the question, then sections by rank, then comments that only
-        // sit on a matching place or link to one, if there's room.
+        // Pack.
         var out: [Passage] = []
         var used = 0
         let commentBudget = sections.isEmpty ? budgetTokens : budgetTokens * 45 / 100
@@ -177,8 +219,8 @@ final class Retriever {
             Passage(id: 0, kind: .comment, file: file, anchor: c.anchor,
                     text: Self.excerpt(c.text, terms: terms, max: maxCommentChars), timestamp: c.timestamp)
         }
-        for r in comments.filter(\.direct).prefix(40) {
-            add(comment(r.file, r.comment), key: "c:\(r.comment.id.uuidString)", within: commentBudget)
+        for hit in direct.prefix(40) {
+            add(comment(hit.file, hit.comment), key: "c:\(hit.comment.id.uuidString)", within: commentBudget)
         }
         for s in sections {
             let text = Self.excerpt(s.text, terms: terms, max: maxSectionChars)
@@ -186,60 +228,32 @@ final class Retriever {
             add(Passage(id: 0, kind: .section, file: s.file, anchor: s.anchor, title: s.title, text: text),
                 key: Self.key(s.file, s.anchor), within: budgetTokens)
         }
-        for r in comments.filter({ !$0.direct }).prefix(20) {
-            add(comment(r.file, r.comment), key: "c:\(r.comment.id.uuidString)", within: budgetTokens)
+        for (file, c) in context.prefix(20) {
+            add(comment(file, c), key: "c:\(c.id.uuidString)", within: budgetTokens)
         }
         return out
     }
 
     // MARK: Ranking
 
-    /// Reciprocal-rank fusion over every reformulation, deduped by file + anchor. Rank, not the
-    /// index's raw score, so the result doesn't depend on how bm25 is signed or scaled.
-    private func fusedHits(for question: String) throws -> [(SearchHit, Double)] {
-        var fused: [String: (hit: SearchHit, score: Double, order: Int)] = [:]
-        var failures: [Error] = []
-        let queries = QueryPlan.queries(for: question)
-        for q in queries {
-            let hits: [SearchHit]
-            do { hits = try source.search(q.text, limit: 50) } catch { failures.append(error); continue }
-            for (rank, hit) in hits.enumerated() {
-                let key = Self.key(hit.file, hit.anchor)
-                let score = q.weight / Double(60 + rank + 1)
-                if let e = fused[key] { fused[key] = (e.hit, e.score + score, e.order) }
-                else { fused[key] = (hit, score, fused.count) }
-            }
-        }
-        if failures.count == queries.count, let first = failures.first { throw first }
-        return fused.values
-            .sorted { $0.score != $1.score ? $0.score > $1.score : $0.order < $1.order }
-            .map { ($0.hit, $0.score) }
-    }
+    /// Reciprocal-rank fusion. Rank rather than the index's raw score, so the result doesn't
+    /// depend on how bm25 is scaled.
+    struct Fusion<Item> {
+        private var entries: [String: (item: Item, score: Double, order: Int)] = [:]
 
-    /// `direct`: the comment matches the question itself. Otherwise it's context: it sits on a
-    /// matching place or links to a matching file.
-    private func rankComments(terms: [String], boost: [UUID: Double], hitFiles: Set<FileRef>,
-                              hitPlaces: Set<String>) -> [(file: FileRef, comment: Comment, score: Double, direct: Bool)] {
-        var out: [(file: FileRef, comment: Comment, score: Double, direct: Bool)] = []
-        for (file, comments) in allComments {
-            for c in comments {
-                let matched = Self.matchCount(terms, in: c.text)
-                let onHit = c.anchor != nil && hitPlaces.contains(Self.key(file, c.anchor))
-                let linksToHit = !hitFiles.isEmpty && c.links.contains {
-                    Wikilink.resolve($0, in: source.vault, candidates: Array(hitFiles)) != nil
-                }
-                let direct = matched > 0 || boost[c.id] != nil
-                guard direct || onHit || linksToHit else { continue }
-                var score = terms.isEmpty ? 0 : Double(matched) / Double(terms.count)
-                score += boost[c.id] ?? 0
-                if hitFiles.contains(file) { score += 0.5 }
-                if onHit { score += 0.3 }
-                if linksToHit { score += 0.5 }
-                out.append((file, c, score, direct))
+        mutating func add(_ items: [Item], weight: Double, key: (Item) -> String) {
+            for (rank, item) in items.enumerated() {
+                let k = key(item)
+                let score = weight / Double(60 + rank + 1)
+                if let e = entries[k] { entries[k] = (e.item, e.score + score, e.order) }
+                else { entries[k] = (item, score, entries.count) }
             }
         }
-        return out.sorted {
-            $0.score != $1.score ? $0.score > $1.score : $0.comment.timestamp > $1.comment.timestamp
+
+        var ranked: [(item: Item, score: Double)] {
+            entries.values
+                .sorted { $0.score != $1.score ? $0.score > $1.score : $0.order < $1.order }
+                .map { ($0.item, $0.score) }
         }
     }
 
@@ -261,11 +275,13 @@ final class Retriever {
                         .max { $0.1 < $1.1 }?.0
                 }
                 if pick == nil, sections.isEmpty, let text = try? source.text(of: file), !text.isEmpty {
-                    let key = Self.key(file, nil)
-                    if taken.insert(key).inserted { out.append(Candidate(file: file, anchor: nil, title: nil, text: text)) }
+                    if taken.insert(Self.key(file, nil)).inserted {
+                        out.append(Candidate(file: file, anchor: nil, title: nil, text: text))
+                    }
                     continue
                 }
-                guard let s = pick ?? sections.first else { continue }
+                guard let s = pick ?? sections.first(where: { Self.hasContent(Candidate(file: file, anchor: $0.anchor, title: $0.title, text: $0.text)) })
+                else { continue }
                 if taken.insert(Self.key(file, s.anchor)).inserted {
                     out.append(Candidate(file: file, anchor: s.anchor, title: s.title, text: s.text))
                 }
@@ -275,6 +291,13 @@ final class Retriever {
     }
 
     // MARK: Text
+
+    private func cachedComments(on file: FileRef) -> [Comment] {
+        if let c = commentCache[file] { return c }
+        let c = (try? source.comments(on: file)) ?? []
+        commentCache[file] = c
+        return c
+    }
 
     private func cachedSections(of file: FileRef) -> [SourceSection] {
         if let s = sectionCache[file] { return s }
@@ -300,27 +323,18 @@ final class Retriever {
         return nil
     }
 
+    /// More than the file's own name: an image nobody has OCR'd yet matches on its name alone.
+    static func hasContent(_ c: Candidate) -> Bool {
+        let text = c.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !text.isEmpty && text != c.file.name && text != (c.file.name as NSString).deletingPathExtension
+    }
+
     static func key(_ file: FileRef, _ anchor: FileAnchor?) -> String {
         "s:\(file.relativePath)|\(anchor?.rendered ?? "")"
     }
 
     static func plain(_ snippet: String) -> String {
         snippet.replacingOccurrences(of: "«", with: "").replacingOccurrences(of: "»", with: "")
-    }
-
-    static func normalized(_ s: String) -> String {
-        s.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
-    }
-
-    /// The comment a search hit came from, if it came from one: same place, and the snippet's
-    /// longest fragment appears in the comment's text.
-    static func comment(matching hit: SearchHit, in comments: [Comment]) -> Comment? {
-        let fragments = plain(hit.snippet)
-            .replacingOccurrences(of: "...", with: "…")
-            .components(separatedBy: "…")
-            .map(normalized)
-        guard let longest = fragments.max(by: { $0.count < $1.count }), longest.count >= 6 else { return nil }
-        return comments.first { $0.anchor == hit.anchor && normalized($0.text).contains(longest) }
     }
 
     /// How many of the terms appear in `text`, matching stems against word prefixes.
