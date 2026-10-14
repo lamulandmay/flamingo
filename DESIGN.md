@@ -26,12 +26,70 @@ Premiere's panel system. Dark-first. Content fills the window. Chrome recedes.
 9. **Density like Finder, not like a web app.** 24–28pt rows. Sidebar uses the sidebar
    material. Content is opaque.
 10. **Monochrome SF Symbols.** Icons at 13–14pt, `secondary` color, `accent` when selected.
+    The one exception is file glyphs and graph nodes. They carry a muted family tint
+    (`FileGlyph`, `Theme.Color.family(ext:)`) so a deck and a sheet can be told apart at a glance.
 
 ## Tokens
 
 Use `Theme` from `FlamingoDesign`. Never hardcode a color, font, or spacing in a view.
 If the token you need doesn't exist, ask plan 08 via `plans/REQUESTS.md` and use the
-closest existing one meanwhile.
+closest existing one meanwhile. Every color is dynamic: light, dark, and both Increase
+Contrast variants. AppKit code (`NSTextView` attributes, `CALayer`s, `NSPanel`s) uses the
+same values through `Theme.NS`, never `NSColor.labelColor` and friends.
+
+| Token | Use |
+|---|---|
+| `Color.accent` | Coral. Dark `#FF7A88`, light `#D23B57`. Both pass 4.5:1 on `bg`. Selection, focus, links, one primary action. |
+| `Color.bg` / `bgRaised` / `bgSunken` | Content `#1C1C1E` (white in light). Raised `#232326` for in-window popovers and toasts. Sunken `#161618` for canvases. |
+| `Color.text` / `textSecondary` / `textTertiary` | 88 / 56 / 36% white (86 / 55 / 36% black in light). |
+| `Color.hairline` | White 8% (black 8% in light). |
+| `Color.selection` | Accent at 26% (16% in light). Text on it stays `text`. |
+| `Color.fill` / `hover` | Translucent greys for fields, chips, row hover. They work on material and on `bg`. |
+| `Color.onAccent` | Text on a solid accent fill (rare). |
+| `Color.family(ext:)` | Nine muted hues: deck, document, sheet, pdf, image, media, model, code, note. `FileFamily(ext:)` gives the family itself. |
+| `Font.body` 13, `small` 11, `title` 15 semibold | Text. `bodyMedium` for emphasis. |
+| `Font.mono` 12, `monoSmall` 11 | Paths, anchors, the target line under the comment field. |
+| `Font.caps` + `capsTracking` | The rare section marker. Use `SectionMarker("Pinned")` or `.capsStyle()`. |
+| `Space` xs 4 · s 8 · m 12 · l 16 · xl 24 · xxl 32 | Everything. |
+| `Radius` s 4 · m 8 · l 12 | Rows and chips, fields and toasts, panels. Nested shapes use `outer − inset` (`Radius.m - 2`). |
+| `Motion.fast` 150ms, `normal` 220ms | Ease-out. `fastSeconds` / `normalSeconds` for AppKit. |
+| `Size.row` 26 · `sidebar` 240 · `rail` 280 · `panel` 560 · `icon` 14 · `iconSmall` 13 | Layout. |
+| `Opacity.rest` .75 · `dimmed` .3 · `disabled` .35 | Hover raises `rest` to 1. Graph and faded history use `dimmed`. |
+
+## Components
+
+Use these before drawing your own. `DesignPreview()` in `FlamingoDesign` shows all of them
+in light and dark. Screenshot it and you have the style guide.
+
+| Component | What it is |
+|---|---|
+| `Hairline()` / `VHairline()` | 1pt separators. |
+| `FileGlyph(ext:size:)` / `FolderGlyph(size:)` | Family symbol, family tint. Turns accent inside a selected `flamingoRow`. Fixed width so names align. |
+| `.flamingoRow(selected:)` | 26pt row, `Space.s` inset, hover fill, accent-tinted selection, `Radius.s`. For custom lists. A native `List` draws its own selection, which is coral too via the bundle's `AccentColor`. |
+| `Chip(text:mono:action:)` | Anchors and tags: `slide 7`. Mono by default. With `action` it's clickable. |
+| `KeyHint("⌘K")` | Menus and the command palette only. |
+| `EmptyState("No vault open")` | One tertiary line, centered. |
+| `SectionMarker("Pinned")` | 11pt medium, tracked, uppercase, tertiary. Rare. |
+| `PanelChrome(width:shadow:) { … }` | Command palette, search, comment panel: sidebar material, `Radius.l`, hairline, shadow. In an `NSPanel`, pass `shadow: false`. |
+| `VisualEffect(material:blending:state:)` | `NSVisualEffectView` for SwiftUI. Sidebar background. |
+| `SegmentedModes(selection:)` with `FlamingoMode` | Four symbols, no text, accent when selected. `FlamingoMode.title` and `.key` feed menus. |
+| `SearchField(text:focused:onSubmit:onExit:)` | No placeholder. Accent focus ring. |
+| `IconButton(_:help:isOn:action:)` | 13pt symbol. `help` is the tooltip and VoiceOver label, never drawn. |
+| `ProgressHairline(value:)` | 2pt accent line. Fades at 1. `nil` pulses. |
+| `Toast(_:action:perform:)` | One line, at most one action (`Undo`). |
+| `.focusRing(_:radius:)`, `.pointingHandCursor()`, `.capsStyle()`, `.appearance(_:)` | Small modifiers. `.appearance(.dark)` pins a subtree for previews. |
+| `FlamingoMark()`, `FlamingoMark.menuBarImage()` | The mark as a `Shape` and as a template `NSImage` for a status item. |
+
+## Brand
+
+The mark is a flamingo on one leg with an S-curved neck and a dark-tipped beak. It is drawn
+in code (`FlamingoMarkPath`), and the same geometry makes the app icon, the menu bar
+template and `FlamingoMark()`. The app icon is a white mark on a coral plate. That plate is
+the only gradient in the product. `Resources/Assets/make-icon.swift` regenerates
+`AppIcon.icns`, `Assets.car` (AppIcon + AccentColor), and `MenuBarIconTemplate.png`. The
+asset catalog's `AccentColor` is what makes native controls (List selection, toggles,
+focus rings, text selection) coral instead of system blue. It needs `NSAccentColorName`
+in Info.plist.
 
 ## Layout
 

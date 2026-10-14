@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Not sandboxed: Flamingo reads arbitrary folders, writes xattrs, and watches with FSEvents. -->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+	<!-- Ask the frontmost app for its open document when capturing from anywhere. -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+</dict>
+</plist>

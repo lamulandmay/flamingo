@@ -1,0 +1,2 @@
+- [2026-10-14 14:00] No frontmatter at all
+- [2026-10-14 14:01] Still parsed

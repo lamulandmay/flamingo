@@ -1,0 +1,39 @@
+{"id":"917182FC-BC77-58AF-84E3-DC4CD61D2136","at":"2026-10-13T06:05:10Z","kind":"opened","file":"decks/q3-board-review.pptx"}
+{"id":"3DBD3B25-944A-5BA1-8315-22BCF1377D2F","at":"2026-10-13T06:07:42Z","kind":"opened","file":"decks/q3-board-review.pptx","anchor":"slide 7"}
+{"id":"C99F1BA1-04B6-5085-803C-F1FDC114E71C","at":"2026-10-13T06:09:03Z","kind":"opened","file":"finance/q3-model.xlsx","anchor":"sheet Assumptions"}
+{"id":"B375A9A0-B7E1-536C-8EB4-9CBD59779183","at":"2026-10-13T06:11:00Z","kind":"commented","file":"decks/q3-board-review.pptx","anchor":"slide 7","text":"Pricing contradicts [[q3-model.xlsx]]. The model still carries Arc at $229."}
+{"id":"C6BA03B1-8B4F-56E9-89E0-B19468EFACFA","at":"2026-10-13T06:11:30Z","kind":"linked","file":"decks/q3-board-review.pptx","text":"q3-model.xlsx"}
+{"id":"B99C8652-C8CB-5505-B4D7-E87DE6B81AD4","at":"2026-10-13T06:14:05Z","kind":"searched","text":"price"}
+{"id":"731908F6-77EB-550A-A27E-7271D57BED4E","at":"2026-10-13T06:14:41Z","kind":"opened","file":"docs/pricing-memo.docx"}
+{"id":"8AF768F5-F29D-5FFE-8B6B-68D2A68D37F9","at":"2026-10-13T06:19:00Z","kind":"commented","file":"docs/pricing-memo.docx","text":"Option B is what the board saw. If we go with C, [[q3-board-review.pptx#slide 7]] needs a footnote before it goes in the data room."}
+{"id":"7DFDDA69-818B-5085-B404-378154A6DE29","at":"2026-10-13T06:19:40Z","kind":"linked","file":"docs/pricing-memo.docx","text":"q3-board-review.pptx"}
+{"id":"9E23D469-D48A-5AC2-AA98-D6B651F8462F","at":"2026-10-13T06:21:12Z","kind":"opened","file":"design/whiteboard-pricing.jpg"}
+{"id":"E331550D-5662-543A-8A89-C73AC20E3ABD","at":"2026-10-13T06:23:00Z","kind":"commented","file":"design/whiteboard-pricing.jpg","text":"Arc Pro at $329 was never costed. Nothing in [[unit-economics.xlsx]] supports it."}
+{"id":"CE83996F-D6F8-5A6B-92A2-A0A8FA52435D","at":"2026-10-13T06:26:00Z","kind":"opened","file":"finance/unit-economics.xlsx","anchor":"sheet Scenarios"}
+{"id":"018FFC83-369F-5A45-A634-72EBACABB83E","at":"2026-10-13T06:31:00Z","kind":"commented","file":"finance/unit-economics.xlsx","anchor":"sheet Scenarios","text":"At $249 and 3,000 units contribution is $437k. At $279 we only need 2,700 for more than that. [[pricing-decisions]]"}
+{"id":"441D835A-39C9-596A-8825-53BCAE9053EF","at":"2026-10-13T06:34:22Z","kind":"opened","file":"notes/pricing-decisions.md"}
+{"id":"A8EFDF8C-35C4-512A-878E-75BF3D83D80C","at":"2026-10-13T06:38:00Z","kind":"commented","file":"notes/pricing-decisions.md","anchor":"line 13","text":"This entry should cite [[interview-maya-chen.m4a#time 0:39]]. She named $260 without being asked."}
+{"id":"6FF5953D-BC60-5FB7-8FAC-9112772F3C8B","at":"2026-10-13T06:40:09Z","kind":"opened","file":"finance/q3-model.xlsx","anchor":"cell Revenue!C12"}
+{"id":"A65643E4-F95F-5674-BBCC-66D7B77F6B54","at":"2026-10-13T06:44:00Z","kind":"commented","file":"finance/q3-model.xlsx","anchor":"cell Revenue!C12","text":"November retail units assume retail ships in launch week. [[arc-launch-plan.pptx#slide 5]] says week two. Cut to 180."}
+{"id":"D5121040-C5A4-5658-A701-C466A54DF121","at":"2026-10-13T06:52:31Z","kind":"opened","file":"decks/q3-board-review.pptx","anchor":"slide 8"}
+{"id":"3C2DD17B-6820-5815-8D92-11FF895EFEF6","at":"2026-10-14T01:30:15Z","kind":"opened","file":"decks/arc-launch-plan.pptx"}
+{"id":"259F28D3-D62D-5E44-86C8-98870BB74313","at":"2026-10-14T01:31:40Z","kind":"opened","file":"decks/arc-launch-plan.pptx","anchor":"slide 4"}
+{"id":"07ADBDD0-97BF-5E8E-881B-29A27A696006","at":"2026-10-14T01:36:00Z","kind":"commented","file":"decks/arc-launch-plan.pptx","anchor":"slide 4","text":"Waitlist number is from September 30. Pull the current count before the press kit goes out. [[launch-checklist]]"}
+{"id":"87F43C4D-AAB1-5438-A1B7-C933C7C48EBD","at":"2026-10-14T01:38:28Z","kind":"opened","file":"research/interview-maya-chen.m4a"}
+{"id":"3DEA565A-54A9-5932-A2D3-A54BEAA5E905","at":"2026-10-14T01:41:00Z","kind":"commented","file":"research/interview-maya-chen.m4a","anchor":"time 0:39","text":"She would pay up to $260 if it dims without flicker. Supports option C in [[pricing-memo.docx]]."}
+{"id":"ED28A554-33B3-524A-8E6B-CFC031FB039F","at":"2026-10-14T01:43:00Z","kind":"commented","file":"research/interview-maya-chen.m4a","anchor":"time 0:53","text":"Clamp matters more than the base for her. The brief lists it as a non-goal: [[arc-product-brief.docx]]"}
+{"id":"19B689B3-B7D1-5076-B611-F8EA91454167","at":"2026-10-14T01:45:02Z","kind":"opened","file":"docs/arc-product-brief.docx"}
+{"id":"5939E4A3-C702-5CE4-B6D0-DFF99295BB45","at":"2026-10-14T01:48:00Z","kind":"commented","file":"docs/arc-product-brief.docx","anchor":"page 2","text":"Move clamp mounting out of Non-goals. Six of 22 interviewees asked for it, including [[interview-maya-chen.m4a#time 0:53]]."}
+{"id":"D6B3F0C6-D31A-5916-88C3-C0986FE09D26","at":"2026-10-14T01:51:20Z","kind":"searched","text":"lead time"}
+{"id":"96FD5D57-A8FC-5742-BDE6-1C363713A020","at":"2026-10-14T01:51:48Z","kind":"opened","file":"legal/supplier-agreement.pdf","anchor":"page 3"}
+{"id":"7D65E367-CEC8-5C02-91A7-B5E5B199FBED","at":"2026-10-14T01:55:00Z","kind":"commented","file":"legal/supplier-agreement.pdf","anchor":"page 3","text":"MOQ 5,000 at $14.20. The $12.80 price needs a 12-month forecast we haven't given them. Check [[unit-economics.xlsx#cell BOM!D9]]."}
+{"id":"A43351ED-7C74-58DE-940A-95CCA0EFE0FE","at":"2026-10-14T01:58:10Z","kind":"opened","file":"legal/supplier-agreement.pdf","anchor":"page 4"}
+{"id":"F08B30E5-1472-5CAA-B938-EE166A7A1BBC","at":"2026-10-14T02:01:00Z","kind":"commented","file":"legal/supplier-agreement.pdf","anchor":"page 4","text":"Ten-week lead time means the PO has to go out by October 20 to make the December 12 last-ship date. [[launch-checklist]]"}
+{"id":"81D626E5-CF01-52A5-B2ED-4D556BD808A2","at":"2026-10-14T02:03:01Z","kind":"opened","file":"finance/unit-economics.xlsx","anchor":"cell BOM!D9"}
+{"id":"73CB1636-A4D5-5117-91A5-6EE675F835C3","at":"2026-10-14T02:06:00Z","kind":"commented","file":"finance/unit-economics.xlsx","anchor":"cell BOM!D9","text":"Confirmed $14.20 per [[supplier-agreement.pdf#page 3]]. We are on the 5,000 tier until we commit to a forecast."}
+{"id":"91DAD4E2-895B-546B-A07B-E785FFE30887","at":"2026-10-14T02:10:33Z","kind":"opened","file":"design/arc-lamp.usdz"}
+{"id":"4C5DD5D9-3192-59A9-9652-B5C9586F4370","at":"2026-10-14T02:13:00Z","kind":"commented","file":"design/arc-lamp.usdz","anchor":"node Shade","text":"Shade is 150 mm in the model and 140 mm in [[arc-product-brief.docx]]. Which one went to Ningbo?"}
+{"id":"56858585-359E-5C23-87BA-D6A5200620D6","at":"2026-10-14T02:15:40Z","kind":"opened","file":"media/arc-teaser.mp4"}
+{"id":"068AAF06-1CFD-5E90-8493-5D35D5F3A746","at":"2026-10-14T02:18:00Z","kind":"commented","file":"media/arc-teaser.mp4","anchor":"time 0:05","text":"Date card should say November 18, not just November. Matches [[arc-launch-plan.pptx#slide 3]]."}
+{"id":"5E2D514B-3363-5813-857B-62DE290A5A7D","at":"2026-10-14T02:20:11Z","kind":"opened","file":"notes/launch-checklist.md"}
+{"id":"6C8052FF-F5D8-57A0-9B20-46AD7061FA71","at":"2026-10-14T02:22:47Z","kind":"linked","file":"notes/launch-checklist.md","text":"supplier-agreement.pdf"}

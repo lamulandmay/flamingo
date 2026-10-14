@@ -1,0 +1,36 @@
+import XCTest
+import FlamingoCore
+@testable import FlamingoGraph
+
+final class TopologyTests: XCTestCase {
+    func testDedupAndRadius() {
+        let g = Graph(nodes: [.init(id: "a.pptx", name: "a.pptx", ext: "pptx", commentCount: 2),
+                              .init(id: "b.xlsx", name: "b.xlsx", ext: "xlsx"),
+                              .init(id: "a.pptx", name: "dup", ext: "")],
+                      edges: [.init(source: "a.pptx", target: "b.xlsx", kind: .link),
+                              .init(source: "b.xlsx", target: "a.pptx", kind: .link),
+                              .init(source: "a.pptx", target: "b.xlsx", kind: .trail),
+                              .init(source: "a.pptx", target: "a.pptx", kind: .link),
+                              .init(source: "a.pptx", target: "missing", kind: .link)])
+        let t = GraphTopology(g)
+        XCTAssertEqual(t.count, 2)
+        XCTAssertEqual(t.labels, ["a", "b"])
+        XCTAssertEqual(t.edges.count, 2)
+        XCTAssertEqual(t.edges.first?.weight, 2)
+        XCTAssertEqual(t.neighbors, [[1], [0]])
+        XCTAssertEqual(t.radius[0], 3 + log(4), accuracy: 1e-9)
+    }
+
+    func testCameraRoundTripAndZoomAnchor() {
+        var c = GraphCamera(center: CGPoint(x: 10, y: -5), zoom: 1.5)
+        let size = CGSize(width: 800, height: 600)
+        let s = CGPoint(x: 123, y: 456)
+        let w = c.toWorld(s, size: size)
+        let back = c.toScreen(w, size: size)
+        XCTAssertEqual(back.x, s.x, accuracy: 1e-9); XCTAssertEqual(back.y, s.y, accuracy: 1e-9)
+        c.zoom(by: 2, around: s, size: size)
+        let w2 = c.toWorld(s, size: size)
+        XCTAssertEqual(w2.x, w.x, accuracy: 1e-9); XCTAssertEqual(w2.y, w.y, accuracy: 1e-9)
+        XCTAssertEqual(c.zoom, 3, accuracy: 1e-9)
+    }
+}
