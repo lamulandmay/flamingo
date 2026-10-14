@@ -45,7 +45,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         CaptureController.shared.installInAppHotkey()
         CaptureController.shared.installGlobalHotkey()   // stays off until the captureGlobal default is on
-        state.restoreLastVault()
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--vault"), i + 1 < args.count {
+            state.open(URL(fileURLWithPath: args[i + 1]))
+        } else {
+            state.restoreLastVault()
+        }
     }
 
     // Dock drops and `open -a Flamingo <folder>`.

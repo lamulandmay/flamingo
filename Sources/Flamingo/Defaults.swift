@@ -5,10 +5,6 @@ import FlamingoCore
 enum Defaults {
     private static let d = UserDefaults.standard
 
-    // Keys other modules read too (see their plans): keep the raw strings stable.
-    static let captureGlobalKey = "captureGlobal"   // plan 03
-    static let trailEnabledKey = "trailEnabled"     // plan 07
-
     static var lastVault: String? {
         get { d.string(forKey: "lastVault") }
         set { d.set(newValue, forKey: "lastVault") }
@@ -38,11 +34,6 @@ enum Defaults {
     static var sidebarWidth: CGFloat {
         get { let w = d.double(forKey: "sidebarWidth"); return w == 0 ? 240 : CGFloat(w) }
         set { d.set(Double(newValue), forKey: "sidebarWidth") }
-    }
-
-    static var captureGlobal: Bool {
-        get { d.bool(forKey: captureGlobalKey) }
-        set { d.set(newValue, forKey: captureGlobalKey) }
     }
 
     // MARK: Per-vault memory

@@ -10,17 +10,20 @@ SUFFIX=${1:+-$1}
 mkdir -p $OUT build
 [[ build/window-id -nt scripts/window-id.swift ]] || swiftc -O -o build/window-id scripts/window-id.swift
 
-key() {  # key <keystroke or key code> [modifiers]
-  osascript -e 'tell application "Flamingo" to activate' \
-            -e "tell application \"System Events\" to $1" >/dev/null
+# Drive the instance running from this repo's bundle, not another session's test build.
+PID=$(pgrep -f "^$PWD/build/Flamingo.app/Contents/MacOS/Flamingo" | head -1)
+[[ -n $PID ]] || { echo "Flamingo from build/Flamingo.app is not running; make demo first" >&2; exit 1; }
+key() {  # key <System Events command> [seconds to wait]
+  osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $PID) to true" \
+            -e 'delay 0.2' -e "tell application \"System Events\" to $1" >/dev/null
   sleep ${2:-0.8}
 }
 shot() {  # shot <name> [panel]   panel: grab the window's screen region so floating panels show
   if [[ $2 == panel ]]; then
-    local r=$(build/window-id --bounds Flamingo) || { echo "no Flamingo window" >&2; exit 1; }
+    local r=$(build/window-id --bounds --pid $PID Flamingo) || { echo "no Flamingo window" >&2; exit 1; }
     screencapture -o -x -R $r "$OUT/$1$SUFFIX.png"
   else
-    local id=$(build/window-id Flamingo) || { echo "no Flamingo window" >&2; exit 1; }
+    local id=$(build/window-id --pid $PID Flamingo) || { echo "no Flamingo window" >&2; exit 1; }
     screencapture -o -x -l $id "$OUT/$1$SUFFIX.png"
   fi
   echo "$OUT/$1$SUFFIX.png"

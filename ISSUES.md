@@ -18,6 +18,11 @@ to the bottom. Screens are in `docs/screens/`.
 ### Pass 3 — 23:22
 - Nothing new. The sidebar, ⌘K, the hairline, pptx anchors, Ask and markdown-body edges are as in pass 2.
 
+### Pass 4 — 23:35
+- [ ] (01) Dark mode can't be checked without changing the system appearance. I've asked for a `FlamingoAppearance` launch default (see REQUESTS.md). Until that exists, every screenshot here is light only.
+- The trail now shows real thumbnails (slide, page, sheet) next to file names.
+- `run.sh` only replaces the instance running from this repo's bundle and launches with `open -n`, so other sessions' test builds keep running.
+
 ### Carried over
 - [ ] (04) Heads-up: Quick Look thumbnailing of any `.usdz` (ours, and Apple's `shaderball.usdz`) never returns from `qlmanage -t`. Put a timeout on usdz thumbnails and fall back to the glyph.
 

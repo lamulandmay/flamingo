@@ -28,9 +28,10 @@ struct History {
         index = entries.count - 1
     }
 
-    /// Keeps the current entry's anchor fresh without creating a new entry.
+    /// Keeps the current entry's anchor fresh without creating a new entry. A nil only
+    /// happens while the selection is changing, so it never erases what was there.
     mutating func updateAnchor(_ anchor: FileAnchor?) {
-        guard entries.indices.contains(index) else { return }
+        guard let anchor, entries.indices.contains(index) else { return }
         entries[index].anchor = anchor
     }
 
