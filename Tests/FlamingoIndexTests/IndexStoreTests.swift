@@ -7,7 +7,7 @@ import FlamingoExtract
 /// everything else is text. Registered ahead of the real extractors so these tests don't
 /// depend on plan 04's progress.
 struct FixtureExtractor: Extractor {
-    static let extensions: Set<String> = ["fltest"]
+    static let extensions: Set<String> = ["fltest", "md"]
     init() {}
     func extract(_ url: URL) throws -> Extracted {
         let raw = try String(contentsOf: url, encoding: .utf8)
@@ -31,6 +31,17 @@ struct FixtureExtractor: Extractor {
     }
 }
 
+/// `.rtfd` packages: the text of the `.fltest` files inside.
+struct PackageFixtureExtractor: Extractor {
+    static let extensions: Set<String> = ["rtfd"]
+    init() {}
+    func extract(_ url: URL) throws -> Extracted {
+        let inner = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "fltest" }.sorted { $0.path < $1.path }
+        return Extracted(text: try inner.map { try String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n"))
+    }
+}
+
 class IndexTestCase: XCTestCase {
     var root: URL!
     var vault: Vault!
@@ -38,8 +49,9 @@ class IndexTestCase: XCTestCase {
 
     override class func setUp() {
         super.setUp()
-        if !Extract.extractors.contains(where: { $0 == FixtureExtractor.self }) {
-            Extract.extractors.insert(FixtureExtractor.self, at: 0)
+        for e in [FixtureExtractor.self, PackageFixtureExtractor.self] as [any Extractor.Type]
+        where !Extract.extractors.contains(where: { $0 == e }) {
+            Extract.extractors.insert(e, at: 0)
         }
     }
 
@@ -339,6 +351,14 @@ final class CommentIndexTests: IndexTestCase {
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("\\/"))
     }
 
+    func testMarkdownBodyLinksAreEdges() throws {
+        try write("decks/q3.fltest", deck)
+        try write("notes/sync.md", "# Sync\n== line 3: Board\nFinal pass on [[q3.fltest]] and [[q3.fltest|the deck]], then [[Ghost Note]].")
+        try store.reindex()
+        let edges = try store.buildGraph().edges.map { "\($0.source)>\($0.target):\(Int($0.weight))" }
+        XCTAssertEqual(edges, ["notes/sync.md>Ghost Note:1", "notes/sync.md>decks/q3.fltest:1"])
+    }
+
     func testBacklinks() throws {
         try write("decks/q3.fltest", deck)
         try write("finance/q3-model.fltest", "numbers")
@@ -452,7 +472,9 @@ final class FTSQueryTests: XCTestCase {
         XCTAssertEqual(FTSQuery.build("\"gross margin\" q3"), "\"gross margin\" \"q3\"*")
         XCTAssertEqual(FTSQuery.build("q3 \"gross margin\""), "\"q3\" \"gross margin\"")
         XCTAssertEqual(FTSQuery.build("\"gross mar"), "\"gross mar\"*")
-        XCTAssertEqual(FTSQuery.build("a OR b", any: true), "\"a\" OR \"OR\" OR \"b\"*")
+        XCTAssertEqual(FTSQuery.build("a OR bc", any: true), "\"a\" OR \"OR\" OR \"bc\"*")
+        XCTAssertEqual(FTSQuery.build("pricing a"), "\"pricing\" \"a\"", "no one-character prefixes")
+        XCTAssertEqual(FTSQuery.build("foo\u{0}bar"), "\"foo\" \"bar\"*")
         XCTAssertEqual(FTSQuery.build("q3-model.xlsx"), "\"q3-model.xlsx\"*")
         XCTAssertNil(FTSQuery.build("  * () \"\" "))
         XCTAssertNil(FTSQuery.build(""))
@@ -551,5 +573,196 @@ final class MigrationTests: IndexTestCase {
         try store.reindex(force: true)
         XCTAssertEqual(store.lastReindex?.extracted, 2)
         XCTAssertEqual(try store.search("two").count, 1)
+    }
+}
+
+/// Regressions from the review of this module.
+final class ReviewRegressionTests: IndexTestCase {
+    func testLongDocumentsDontCrowdOutOtherFiles() throws {
+        for d in 0..<2 {
+            try write("big\(d).fltest", (1...300).map { "== page \($0)\nrevenue line \($0)" }.joined(separator: "\n"))
+        }
+        for i in 0..<30 { try write("small\(i).fltest", "a little revenue here") }
+        try store.reindex()
+        let hits = try store.search("revenue", limit: 50)
+        XCTAssertEqual(hits.count, 32)
+        XCTAssertEqual(Set(hits.map(\.file)).count, 32)
+        XCTAssertNotNil(hits.first { $0.file == self.ref("big0.fltest") }?.anchor)
+    }
+
+    func testConcurrentOpensOfAFreshIndex() throws {
+        store = nil
+        try write("a.fltest", "concurrent words")
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var errors: [Error] = []
+        var counts: [Int] = []
+        for _ in 0..<8 {
+            DispatchQueue.global().async(group: group) {
+                do {
+                    let s = try IndexStore(vault: self.vault)
+                    try s.reindex()
+                    let n = try s.search("concurrent").count
+                    lock.lock(); counts.append(n); lock.unlock()
+                } catch {
+                    lock.lock(); errors.append(error); lock.unlock()
+                }
+            }
+        }
+        group.wait()
+        XCTAssertTrue(errors.isEmpty, "\(errors)")
+        XCTAssertEqual(counts, Array(repeating: 1, count: 8))
+    }
+
+    func testUpdateHonorsIgnoreRules() throws {
+        try write(".flamingoignore", "*.log\nbuild/\n")
+        try write("debug.log", "secret")
+        try write("Library/prefs.fltest", "secret")
+        try write("build/out.fltest", "secret")
+        try write("proj/Library/notes.fltest", "kept")
+        try write("proj/x.log", "secret")
+        try store.update([ref("debug.log"), ref("Library/prefs.fltest"), ref("build/out.fltest"), ref("build"), ref("proj")])
+        XCTAssertEqual(try store.indexedFiles(), [ref("proj/Library/notes.fltest")])
+        XCTAssertEqual(try store.search("secret").count, 0)
+        try store.reindex()
+        XCTAssertEqual(try store.indexedFiles(), [ref("proj/Library/notes.fltest")])
+    }
+
+    func testPackagesStayWhole() throws {
+        try write("book.scriv/Files/a.fltest", "inside")
+        try write("deck.key/Data/b.fltest", "inside")
+        try store.update([ref("book.scriv"), ref("deck.key")])
+        XCTAssertEqual(try store.indexedFiles(), [ref("book.scriv"), ref("deck.key")])
+    }
+
+    func testPackageEditedInsideIsReextracted() throws {
+        try write("doc.rtfd/TXT.fltest", "original aardvark")
+        try store.reindex()
+        XCTAssertEqual(try store.search("aardvark").first?.file, ref("doc.rtfd"))
+        Thread.sleep(forTimeInterval: 0.05)
+        let inner = root.appendingPathComponent("doc.rtfd/TXT.fltest")
+        let handle = try FileHandle(forWritingTo: inner)
+        try handle.truncate(atOffset: 0); try handle.write(contentsOf: Data("replacement zebra".utf8)); try handle.close()
+        try store.update([ref("doc.rtfd")])
+        XCTAssertEqual(try store.search("zebra").first?.file, ref("doc.rtfd"))
+        try write("doc.rtfd/TXT.fltest", "third quokka")
+        try store.reindex()
+        XCTAssertEqual(try store.search("quokka").first?.file, ref("doc.rtfd"))
+    }
+
+    func testRenameSeenAsUpdateThenRemove() throws {
+        let a = try write("a.fltest", "deck")
+        let sidecars = SidecarStore(vault: vault)
+        try sidecars.append(Comment(text: "follows the file"), to: a)
+        guard (try? FileIdentity.existingID(for: vault.url(for: a))) != nil else { throw XCTSkip("FileIdentity not ready") }
+        try store.reindex()
+        let b = ref("b.fltest")
+        try FileManager.default.moveItem(at: vault.url(for: a), to: vault.url(for: b))
+        try store.update([b])   // the shell splits a batch into what exists and what's gone
+        try store.remove([a])
+        XCTAssertEqual(try store.commentCounts(), [b: 1])
+        XCTAssertEqual(try store.indexedFiles(), [b])
+    }
+
+    func testRemovedFileOrderFirstStillHeals() throws {
+        let a = try write("a.fltest", "deck")
+        let sidecars = SidecarStore(vault: vault)
+        try sidecars.append(Comment(text: "follows anyway"), to: a)
+        guard (try? FileIdentity.existingID(for: vault.url(for: a))) != nil else { throw XCTSkip("FileIdentity not ready") }
+        try store.reindex()
+        let b = ref("b.fltest")
+        try FileManager.default.moveItem(at: vault.url(for: a), to: vault.url(for: b))
+        try store.remove([a])
+        try store.update([b])
+        XCTAssertEqual(try store.commentCounts(), [b: 1])
+    }
+
+    func testMissingVaultIsLeftAlone() throws {
+        try write("a.fltest", "survivor")
+        try store.reindex()
+        let moved = root.deletingLastPathComponent().appendingPathComponent("moved-\(UUID().uuidString)")
+        try FileManager.default.moveItem(at: root, to: moved)
+        defer { try? FileManager.default.removeItem(at: moved) }
+        XCTAssertThrowsError(try store.update([ref("")]))
+        XCTAssertThrowsError(try store.reindex())
+        XCTAssertThrowsError(try store.buildGraph())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path), "the old folder must not be recreated")
+        store = nil
+        store = try IndexStore(vault: Vault(root: moved))
+        XCTAssertEqual(try store.search("survivor").count, 1, "the index travelled with the vault, intact")
+    }
+
+    func testFileBecomesFolderAndBack() throws {
+        try write("foo", "was file")
+        try store.reindex()
+        try FileManager.default.removeItem(at: root.appendingPathComponent("foo"))
+        try write("foo/a.fltest", "now folder")
+        try store.update([ref("foo")])
+        XCTAssertEqual(try store.indexedFiles(), [ref("foo/a.fltest")])
+        try FileManager.default.removeItem(at: root.appendingPathComponent("foo"))
+        try write("foo", "file again")
+        try store.update([ref("foo")])
+        XCTAssertEqual(try store.indexedFiles(), [ref("foo")])
+    }
+
+    func testSymlinksAreNotIndexed() throws {
+        let outside = root.deletingLastPathComponent().appendingPathComponent("outside-\(UUID().uuidString).fltest")
+        try "outside words".write(to: outside, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("link.fltest"), withDestinationURL: outside)
+        try store.update([ref("link.fltest")])
+        XCTAssertEqual(try store.stats().files, 0)
+    }
+
+    func testOddInputsDontThrowOrCrash() throws {
+        try write("a.fltest", "foo bar")
+        try store.reindex()
+        XCTAssertEqual(try store.search("foo\u{0}bar").count, 1)
+        XCTAssertEqual(try store.searchSections("\u{0}").count, 0)
+        XCTAssertEqual(try store.files(matching: "a", limit: -1), [])
+        XCTAssertEqual(try store.recent(limit: -1), [])
+        XCTAssertEqual(try store.search("f").count, 0, "one letter is not a prefix search")
+        XCTAssertEqual(try store.search("fo").count, 1)
+    }
+
+    func testUnresolvedSpellingIsDeterministic() throws {
+        try write("x.fltest", "x")
+        try write("y.fltest", "y")
+        try store.reindex()
+        for order in [["x.fltest", "y.fltest"], ["y.fltest", "x.fltest"]] {
+            var all: [FileRef: [Comment]] = [:]
+            all[ref(order[0])] = [Comment(text: "[[budget plan]]")]
+            all[ref(order[1])] = [Comment(text: "[[Budget Plan]]")]
+            try store.replaceAllComments(all)
+            let g = try store.buildGraph()
+            XCTAssertEqual(g.nodes.map(\.id), ["Budget Plan", "x.fltest", "y.fltest"])
+            XCTAssertEqual(g.edges.count, 2)
+        }
+    }
+}
+
+final class SQLiteTests: XCTestCase {
+    func testReentrantSameStatementAndNestedTransactions() throws {
+        let db = try Database(path: ":memory:")
+        try db.exec("CREATE TABLE t(x INTEGER)")
+        try db.transaction {
+            try db.run("INSERT INTO t VALUES (1)")
+            try db.transaction { try db.run("INSERT INTO t VALUES (2)") }
+            XCTAssertThrowsError(try db.transaction { try db.run("INSERT INTO t VALUES (3)"); throw IndexError(code: 0, message: "undo") })
+        }
+        let sql = "SELECT x FROM t ORDER BY x"
+        let nested = try db.query(sql) { row -> [Int] in
+            let outer = row.int(0)
+            return try db.query(sql) { $0.int(0) }.map { outer * 10 + $0 }
+        }
+        XCTAssertEqual(nested, [[11, 12], [21, 22]])
+        XCTAssertEqual(try db.query(sql) { $0.int(0) }, [1, 2])
+    }
+
+    func testNULInText() throws {
+        let db = try Database(path: ":memory:")
+        try db.exec("CREATE TABLE t(s TEXT)")
+        try db.run("INSERT INTO t VALUES (?)", "a\u{0}b")
+        XCTAssertEqual(try db.scalarInt("SELECT length(CAST(s AS BLOB)) FROM t"), 3)
     }
 }

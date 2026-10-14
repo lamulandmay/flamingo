@@ -84,6 +84,8 @@ public struct CommentsRail: View {
         .onKeyPress(.escape) { escape() }
         .onChange(of: comments) { pendingText = [:] }
         .onChange(of: editorFocused) { _, focused in if !focused, editing != nil { commitEdit() } }
+        // Switching files replaces the rail; an edit in progress is saved, not dropped.
+        .onDisappear { if editing != nil { commitEdit() } }
         .task(id: deletion?.id) { await expireDeletion() }
         .environment(\.openURL, OpenURLAction { url in
             guard let target = RailText.linkTarget(from: url) else { return .systemAction }
@@ -191,6 +193,8 @@ public struct CommentsRail: View {
         updated.text = text
         pendingText[id] = text
         onEdit(updated)
+        // If the shell's save failed, `comments` never changes; stop showing text that isn't on disk.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if pendingText[id] == text { pendingText[id] = nil } }
     }
 
     private func cancelEdit() {

@@ -35,6 +35,8 @@ final class CapturePanelHost {
     let window = CapturePanelWindow()
     private var hosting: NSHostingView<CommentPanel>?
     private var dismissing = false
+    /// Bumped on every present and dismiss so a late fade completion can't act on a newer one.
+    private var generation = 0
 
     static let fade = Theme.Motion.fastSeconds
 
@@ -70,6 +72,7 @@ final class CapturePanelHost {
         window.setFrame(NSRect(origin: origin, size: NSSize(width: width, height: height)), display: true)
 
         dismissing = false
+        generation += 1
         window.alphaValue = 0
         window.makeKeyAndOrderFront(nil)
         window.invalidateShadow()
@@ -78,6 +81,12 @@ final class CapturePanelHost {
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().alphaValue = 1
         }
+    }
+
+    /// Brings a panel that lost focus back to the front with its text intact.
+    func refocus() {
+        guard isVisible else { return }
+        window.makeKeyAndOrderFront(nil)
     }
 
     /// Swaps in a panel with fresh inputs (e.g. completion candidates) without losing typed text.
@@ -91,15 +100,18 @@ final class CapturePanelHost {
     func dismiss(then completion: (() -> Void)? = nil) {
         guard window.isVisible, !dismissing else { completion?(); return }
         dismissing = true
+        generation += 1
+        let gen = generation
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = Self.fade
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             window.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, self.dismissing else { return }
+                guard let self, self.dismissing, self.generation == gen else { return }
                 self.window.orderOut(nil)
                 self.window.contentView = nil
+                self.window.undoManager?.removeAllActions()
                 self.hosting = nil
                 self.dismissing = false
                 completion?()

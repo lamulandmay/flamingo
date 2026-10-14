@@ -590,15 +590,20 @@ final class GraphRenderer {
         if labelSize[i].width < 0 {
             // Measuring is the expensive part of a first frame. If even a sliver where the label
             // would go is already taken, the label can't be placed: skip measuring for now.
-            let sliver = CGRect(x: x - 0.5, y: y + sr[i] + Style.labelGap, width: 1, height: Style.labelSliverHeight)
-            if placer.collides(sliver, padding: Style.labelPadding, owner: i) { return }
+            let below = CGRect(x: x - 0.5, y: y + sr[i] + Style.labelGap, width: 1, height: Style.labelSliverHeight)
+            let above = CGRect(x: x - 0.5, y: y - sr[i] - Style.labelGap - Style.labelSliverHeight, width: 1, height: Style.labelSliverHeight)
+            if placer.collides(below, padding: Style.labelPadding, owner: i),
+               placer.collides(above, padding: Style.labelPadding, owner: i) { return }
             measure(i, &context)
         }
         let size = labelSize[i]
         guard size.width > 0, size.height > 0 else { return }
-        let rect = LabelLayout.rect(center: CGPoint(x: x, y: y), radius: sr[i], size: size, gap: Style.labelGap)
-        guard LabelPlacer.overlaps(rect, p.bounds) else { return }
-        guard placer.tryPlace(rect, padding: Style.labelPadding, owner: i) else { return }
+        var placed: CGRect?
+        for rect in LabelLayout.rects(center: CGPoint(x: x, y: y), radius: sr[i], size: size, gap: Style.labelGap)
+        where LabelPlacer.overlaps(rect, p.bounds) {
+            if placer.tryPlace(rect, padding: Style.labelPadding, owner: i) { placed = rect; break }
+        }
+        guard let rect = placed else { return }
         placedNode.append(i)
         placedRect.append(rect)
         placedAlpha.append(alpha)

@@ -122,5 +122,11 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(s.current?.error, "Claude is overloaded")
         XCTAssertTrue(s.hasKey)
         XCTAssertFalse(s.waiting)
+
+        MockAPI.reset([SSE.reply(SSE.message(text: ["ok"]))])
+        await ask(s, "churn")
+        XCTAssertEqual(s.history.map(\.question), ["pricing"], "a failed question stays in history to retry")
+        XCTAssertTrue(s.recall(-1))
+        XCTAssertEqual(s.draft, "pricing")
     }
 }

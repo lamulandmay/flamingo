@@ -20,6 +20,7 @@ final class TrailSharedStoreTests: TrailStoreTestCase {
             // What capture does: a store just for one record.
             TrailStore(vault: vault).recordComment(comment, on: ref("deck.pptx"))
         }
+        shell.flush()   // runs after the throwaway's queued flush
         XCTAssertTrue(try fileText(shell).contains(comment.id.uuidString))
         wait(for: [posted], timeout: 2)
         XCTAssertEqual(try shell.events().map(\.id), [comment.id])
@@ -79,5 +80,31 @@ final class TrailSharedStoreTests: TrailStoreTestCase {
         let b = TrailStore(vault: Vault(root: otherRoot))
         a.recordOpened(ref("a.md"))
         XCTAssertEqual(try b.events(), [])
+    }
+
+    func testEarliestFlushDelayWins() throws {
+        let slow = makeStore()              // flushDelay 3600
+        let fast = makeStore()
+        fast.flushDelay = 0.05
+        let a = ev(.opened, 0, file: "a.md"), b = ev(.opened, 10, file: "b.md")
+        slow.record(a)
+        fast.record(b)
+        // Read the file directly: going through a store would wait on the io queue.
+        func onDisk() -> String { String(decoding: (try? Data(contentsOf: slow.fileURL)) ?? Data(), as: UTF8.self) }
+        let deadline = Date().addingTimeInterval(2)
+        while !onDisk().contains(b.id.uuidString), Date() < deadline { usleep(10_000) }
+        XCTAssertTrue(onDisk().contains(a.id.uuidString) && onDisk().contains(b.id.uuidString))
+    }
+
+    func testUnterminatedLastLineAndPendingEventWithSameIdAppearOnce() throws {
+        let store = makeStore()
+        let e = ev(.commented, 0, file: "a.md", text: "typed by hand")
+        try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
+        try JSONEncoder().encode(e).write(to: store.fileURL)          // no trailing newline
+        XCTAssertEqual(try store.events().map(\.id), [e.id])
+        store.record(e)
+        XCTAssertEqual(try store.events().map(\.id), [e.id])
+        store.flush()
+        XCTAssertEqual(try fileText(store).components(separatedBy: e.id.uuidString).count - 1, 1)
     }
 }

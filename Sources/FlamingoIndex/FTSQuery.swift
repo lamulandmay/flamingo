@@ -27,6 +27,8 @@ enum FTSQuery {
             if ch == "\"" {
                 flush(phrase: inQuote)
                 inQuote.toggle()
+            } else if ch.unicodeScalars.allSatisfy({ CharacterSet.controlCharacters.contains($0) }) {
+                flush(phrase: inQuote)   // NUL and friends would end the string early in SQLite
             } else if !inQuote, ch.isWhitespace {
                 flush(phrase: false)
             } else {
@@ -54,10 +56,12 @@ enum FTSQuery {
         let ts = terms(input)
         guard !ts.isEmpty else { return nil }
         let typingLastWord = !(input.last?.isWhitespace ?? true) && input.last != "\""
+        // A one-character prefix (`a*`) matches half the vocabulary and is slow; wait for two.
+        let lastToken = ts.last!.text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).last ?? ""
+        let prefix = typingLastWord && lastToken.count >= 2
         let parts = ts.enumerated().map { i, t -> String in
             let quoted = "\"" + t.text.replacingOccurrences(of: "\"", with: "\"\"") + "\""
-            let isLast = i == ts.count - 1
-            return quoted + (isLast && typingLastWord ? "*" : "")
+            return quoted + (i == ts.count - 1 && prefix ? "*" : "")
         }
         return parts.joined(separator: any ? " OR " : " ")
     }

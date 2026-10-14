@@ -9,12 +9,17 @@ public enum FileIdentity {
     private static let lock = NSLock()
     private static var cache: [Vault: [UUID: FileRef]] = [:]
 
-    /// Returns the existing id or assigns a new one.
+    /// Returns the existing id or assigns a new one. Two processes racing to stamp the
+    /// same file agree: the first `setxattr` wins (`XATTR_CREATE`) and the loser reads it back.
     public static func id(for url: URL) throws -> UUID {
         if let existing = try existingID(for: url) { return existing }
         let fresh = UUID()
-        try assign(fresh, to: url)
-        return fresh
+        let value = Array(fresh.uuidString.utf8)
+        if setxattr(url.path, xattrName, value, value.count, 0, XATTR_CREATE) == 0 { return fresh }
+        let code = errno
+        if code == EEXIST, let winner = try existingID(for: url) { return winner }
+        if code == EEXIST { try assign(fresh, to: url); return fresh }   // junk value: replace it
+        throw FileIdentityError.writeFailed(path: url.path, errno: code)
     }
 
     /// Reads the id without assigning one. Nil when the file has none (or carries
@@ -53,18 +58,26 @@ public enum FileIdentity {
 
     /// Every identified file in the vault, by id. Walks the vault (honouring the same
     /// rules as `VaultScanner.files`) and refreshes the cache. When two files carry the
-    /// same id (a copy), the one with the shortest path, then the first in Finder order, wins.
+    /// same id (a copy), the one with the shortest path, then the first in Finder order, wins;
+    /// use `carriers(in:)` to see all of them.
     public static func ids(in vault: Vault) -> [UUID: FileRef] {
-        var map: [UUID: FileRef] = [:]
+        carriers(in: vault).compactMapValues { refs in
+            refs.min { a, b in a.components.count != b.components.count ? a.components.count < b.components.count : a < b }
+        }
+    }
+
+    /// Every file carrying each id, in Finder order. Duplicated files (Finder's Duplicate,
+    /// `cp -p`) keep their xattrs, so an id can have several carriers. Refreshes the cache.
+    public static func carriers(in vault: Vault) -> [UUID: [FileRef]] {
+        var map: [UUID: [FileRef]] = [:]
         for ref in VaultScanner.files(in: vault) {
             guard let id = try? existingID(for: vault.url(for: ref)) else { continue }
-            if let existing = map[id] {
-                if ref.components.count < existing.components.count { map[id] = ref }
-            } else {
-                map[id] = ref
-            }
+            map[id, default: []].append(ref)
         }
-        lock.lock(); cache[vault] = map; lock.unlock()
+        let best = map.compactMapValues { refs in
+            refs.min { a, b in a.components.count != b.components.count ? a.components.count < b.components.count : a < b }
+        }
+        lock.lock(); cache[vault] = best; lock.unlock()
         return map
     }
 

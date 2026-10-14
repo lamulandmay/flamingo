@@ -41,8 +41,16 @@ public struct Vault: Hashable, Sendable {
 
     public func url(for ref: FileRef) -> URL { root.appendingPathComponent(ref.relativePath) }
 
-    /// Whether the user file `ref` points at currently exists on disk.
+    /// Whether the user file `ref` points at currently exists on disk. Case-insensitive on
+    /// the default APFS, like `FileManager`.
     public func exists(_ ref: FileRef) -> Bool { FileManager.default.fileExists(atPath: url(for: ref).path) }
+
+    /// Like `exists`, but the on-disk name must match `ref` exactly, so a case-only rename
+    /// (`Report.txt` → `report.txt`) counts as the old path being gone.
+    public func existsExactly(_ ref: FileRef) -> Bool {
+        guard let canonical = try? url(for: ref).resourceValues(forKeys: [.canonicalPathKey]).canonicalPath else { return false }
+        return canonical.precomposedStringWithCanonicalMapping.hasSuffix("/" + ref.relativePath.precomposedStringWithCanonicalMapping)
+    }
 }
 
 /// Identity of a file inside a vault. Tonight identity is the relative path;

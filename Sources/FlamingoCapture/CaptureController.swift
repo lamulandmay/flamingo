@@ -110,9 +110,10 @@ public final class CaptureController {
     // MARK: Showing
 
     /// Leaves a thought on the shell's current file and anchor. With no file selected the
-    /// thought goes to today's inbox note in the current vault.
+    /// thought goes to today's inbox note in the current vault. With the panel already up this
+    /// only brings it forward, so a menu item can call it alongside the ⌘⇧C monitor.
     public func show() {
-        if host.isVisible { return cancel() }
+        if host.isVisible { return host.refocus() }
         let vault = knownVaults().first
         let target: Target
         if let (file, anchor) = currentTarget?() {
@@ -131,7 +132,7 @@ public final class CaptureController {
     /// window and, where the app says, the slide, page, cell or time. Documents outside every
     /// vault go to today's inbox note in the current vault. Focus returns to that app after.
     public func captureFromFrontmost() {
-        if host.isVisible { return cancel() }
+        if host.isVisible { return hotkeyWhileVisible() }
         guard let front = NSWorkspace.shared.frontmostApplication,
               front.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return show() }
         FrontmostContext.requestAccessibilityIfNeeded()
@@ -153,8 +154,14 @@ public final class CaptureController {
         present(target, over: over, level: .modalPanel, returnTo: front)
     }
 
-    /// Toggles the panel: dismisses it if up, otherwise `show()`.
-    public func toggle() { host.isVisible ? cancel() : show() }
+    /// What ⌘⇧C does: refocuses a panel that lost focus, dismisses a focused one, else `show()`.
+    public func toggle() { host.isVisible ? hotkeyWhileVisible() : show() }
+
+    /// The hotkey on a panel that's already up: bring it back if focus wandered off (the
+    /// thought is still there), otherwise dismiss it like Esc.
+    private func hotkeyWhileVisible() {
+        if host.window.isKeyWindow { cancel() } else { host.refocus() }
+    }
 
     /// Dismisses the panel without saving.
     public func cancel() {

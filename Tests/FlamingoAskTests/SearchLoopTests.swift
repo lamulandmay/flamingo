@@ -59,16 +59,50 @@ final class SearchLoopTests: XCTestCase {
         XCTAssertNil(result["is_error"])
     }
 
-    func testSearchesAreCappedThenToolChoiceNone() async throws {
+    func testSearchesAreCappedThenToolChoiceNoneOnlyIfIgnored() async throws {
         let call = { (n: Int) in SSE.reply(SSE.message(thinking: false, text: [], tools: [("toolu_\(n)", #"{"query": "revenue"}"#)], stop: "tool_use")) }
-        MockAPI.reset([call(1), call(2), call(3), SSE.reply(SSE.message(text: ["Done."]))])
+        MockAPI.reset([call(1), call(2), call(3), call(4), SSE.reply(SSE.message(text: ["Done."]))])
         let deltas = try await collect(try makeEngine(), "pricing")
         XCTAssertEqual(deltas.filter { if case .searching = $0 { return true } else { return false } }.count, 3)
         let requests = MockAPI.requests.map(\.body)
-        XCTAssertEqual(requests.count, 4)
-        XCTAssertNil(requests[2]["tool_choice"])
-        XCTAssertEqual(requests[3]["tool_choice"], ["type": "none"])
-        XCTAssertEqual(requests[3]["tools"], requests[0]["tools"], "tools stay declared so the prefix doesn't change")
+        XCTAssertEqual(requests.count, 5)
+        XCTAssertNil(requests[3]["tool_choice"], "auto keeps the cached messages; the model is told instead")
+        let fourth = try XCTUnwrap(requests[4]["messages"]?.array?.last?["content"]?.array?.first)
+        XCTAssertEqual(fourth["is_error"], true)
+        XCTAssertEqual(fourth["content"], "No searches left. Answer from the passages you have.")
+        XCTAssertEqual(requests[4]["tool_choice"], ["type": "none"], "only after it searched anyway")
+        XCTAssertEqual(requests[4]["tools"], requests[0]["tools"], "tools stay declared so their cache holds")
+        guard case .answer(let a) = deltas.last else { return XCTFail("ends with the answer") }
+        XCTAssertEqual(a.text, "Done.")
+    }
+
+    func testFailedCallsAlsoRunOutOfTurns() async throws {
+        let bad = { (n: Int) in SSE.reply(SSE.message(thinking: false, text: [], tools: [("toolu_\(n)", #"{"query": ""}"#)], stop: "tool_use")) }
+        MockAPI.reset([bad(1), bad(2), bad(3), bad(4), SSE.reply(SSE.message(text: ["Answer."]))])
+        let deltas = try await collect(try makeEngine(), "pricing")
+        let requests = MockAPI.requests.map(\.body)
+        XCTAssertEqual(requests.count, 5)
+        XCTAssertEqual(requests[4]["tool_choice"], ["type": "none"])
+        guard case .answer(let a) = deltas.last else { return XCTFail("ends with the answer") }
+        XCTAssertEqual(a.text, "Answer.")
+    }
+
+    func testBlankFinalTurnIsAnErrorNotAnEmptyAnswer() async throws {
+        MockAPI.reset([SSE.reply(SSE.message(text: []))])
+        do { _ = try await collect(try makeEngine(), "pricing"); XCTFail("should throw") }
+        catch { XCTAssertEqual(error as? AskError, .stream("No answer")) }
+    }
+
+    func testRefusalAfterPartialTextRetractsIt() async throws {
+        MockAPI.reset([SSE.reply(SSE.message(text: ["You decided"], stop: "refusal"))])
+        var deltas: [Delta] = []
+        do {
+            for try await d in try makeEngine().askStreaming("pricing") { deltas.append(d) }
+            XCTFail("should throw")
+        } catch {
+            XCTAssertEqual(error as? AskError, .refused)
+        }
+        XCTAssertEqual(deltas.last, .discard)
     }
 
     func testInvalidToolInputIsReturnedAsError() async throws {
@@ -95,9 +129,11 @@ final class SearchLoopTests: XCTestCase {
         let content: [JSON] = [
             ["type": "thinking", "thinking": "", "signature": "s1"],
             ["type": "text", "text": "partial", "citations": .null],
+            ["type": "text", "text": " \n"],
             ["type": "tool_use", "id": "toolu_0", "name": "search", "input": ["query": "a"]],
             ["type": "fallback", "from": ["model": "claude-sonnet-5-5"], "to": ["model": "claude-sonnet-5"]],
             ["type": "thinking", "thinking": "", "signature": "s2"],
+            ["type": "text", "text": ""],
             ["type": "tool_use", "id": "toolu_1", "name": "search", "input": ["query": "b"]],
         ]
         XCTAssertEqual(AskEngine.replayable(content), [

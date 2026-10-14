@@ -39,20 +39,41 @@ public struct FrontmostContext: Sendable {
         probe()
     }
 
-    /// Like `current()`, plus `vault` and `file` when the document is inside one of `vaults`
-    /// (the deepest root wins when vaults nest). Apps without `AXDocument` (VS Code) fall back
-    /// to the window title naming exactly one vault file. Still non-nil when nothing matched,
-    /// so the caller can fall back to an inbox note.
+    /// Like `current()`, plus `vault` and `file` when the document is a file the vault lists
+    /// (the deepest root wins when vaults nest). Code editors without `AXDocument` (VS Code)
+    /// fall back to the window title naming exactly one vault file. Still non-nil when nothing
+    /// matched, so the caller can fall back to an inbox note.
     public static func current(in vaults: [Vault]) -> FrontmostContext? {
         guard var ctx = probe() else { return nil }
         guard !ctx.isFlamingo, !vaults.isEmpty else { return ctx }
         if let url = ctx.documentURL {
-            if let (v, f) = locate(url, in: vaults) { ctx.vault = v; ctx.file = f }
-        } else if let title = ctx.windowTitle, let (v, f) = titleMatch(title, in: vaults) {
+            if let (v, f) = locate(url, in: vaults), isListed(v.url(for: f), relativePath: f.relativePath) {
+                ctx.vault = v; ctx.file = f
+            }
+        } else if titleFallbackApps(ctx.appBundleID), let title = ctx.windowTitle,
+                  let (v, f) = titleMatch(title, in: vaults) {
             ctx.vault = v; ctx.file = f
             ctx.documentURL = v.url(for: f)
         }
         return ctx
+    }
+
+    /// Only what `VaultScanner` would list: a regular file or package, nothing hidden or
+    /// ignored. Finder's folder windows and Terminal's working directory don't count.
+    static func isListed(_ url: URL, relativePath: String) -> Bool {
+        let parts = relativePath.split(separator: "/").map(String.init)
+        guard !parts.contains(where: { $0.hasPrefix(".") || VaultScanner.ignoredNames.contains($0) }) else { return false }
+        let v = try? url.resourceValues(forKeys: [.isRegularFileKey, .isPackageKey])
+        return v?.isRegularFile == true || v?.isPackage == true
+    }
+
+    /// Editors that title windows after the open file but don't expose `AXDocument`. Other
+    /// apps (a browser showing `report.pdf`) would match a vault file by coincidence.
+    static func titleFallbackApps(_ bundleID: String) -> Bool {
+        let editors: Set<String> = ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders", "com.vscodium",
+                                    "com.todesktop.230313mt8jl8oz", "com.exafunction.windsurf", "dev.zed.Zed",
+                                    "com.sublimetext.4", "com.sublimetext.3", "com.panic.Nova"]
+        return editors.contains(bundleID) || bundleID.hasPrefix("com.jetbrains.")
     }
 
     // MARK: Accessibility permission

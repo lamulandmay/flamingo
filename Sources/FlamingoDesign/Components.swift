@@ -21,19 +21,42 @@ public struct VHairline: View {
 // MARK: - Glyphs
 
 /// A file-type glyph: the family's SF Symbol, tinted by `Theme.Color.family(ext:)`,
-/// accent when inside a selected `flamingoRow`. Fixed width so names line up.
+/// accent when selected. Fixed width so names line up.
+///
+/// Selection comes from an enclosing `flamingoRow(selected:)`, or pass `selected:` directly
+/// when the row is a native `List`/`NSOutlineView` row. For AppKit cells use `nsImage(ext:size:)`
+/// with `Theme.NS.family(ext:selected:)` as the image view's `contentTintColor`.
 public struct FileGlyph: View {
     public let ext: String
     public var size: CGFloat
-    @Environment(\.flamingoRowSelected) private var selected
+    public var selected: Bool?
+    @Environment(\.flamingoRowSelected) private var rowSelected
     public init(ext: String, size: CGFloat = 14) { self.ext = ext; self.size = size }
+    public init(ext: String, size: CGFloat = 14, selected: Bool) { self.ext = ext; self.size = size; self.selected = selected }
     public var body: some View {
         Image(systemName: FileGlyph.symbol(for: ext))
             .font(.system(size: size))
             .symbolRenderingMode(.monochrome)
-            .foregroundStyle(selected ? Theme.Color.accent : Theme.Color.family(ext: ext))
+            .foregroundStyle((selected ?? rowSelected) ? Theme.Color.accent : Theme.Color.family(ext: ext))
             .frame(width: (size * 1.35).rounded())
             .accessibilityHidden(true)
+    }
+
+    /// The glyph as a template `NSImage` for AppKit rows. Tint it with
+    /// `Theme.NS.family(ext:selected:)` through `NSImageView.contentTintColor`.
+    public static func nsImage(ext: String, size: CGFloat = 14) -> NSImage? {
+        let img = NSImage(systemSymbolName: symbol(for: ext), accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: size, weight: .regular))
+        img?.isTemplate = true
+        return img
+    }
+
+    /// Folder glyph as a template `NSImage`. Tint with `Theme.NS.textSecondary`, or `accent` when selected.
+    public static func nsFolderImage(size: CGFloat = 14) -> NSImage? {
+        let img = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: size, weight: .regular))
+        img?.isTemplate = true
+        return img
     }
 
     /// SF Symbol name for an extension. Unknown extensions get a plain `doc`.
@@ -48,12 +71,14 @@ public struct FileGlyph: View {
 /// Folder glyph for the sidebar tree. Secondary, accent when its row is selected.
 public struct FolderGlyph: View {
     public var size: CGFloat
-    @Environment(\.flamingoRowSelected) private var selected
+    public var selected: Bool?
+    @Environment(\.flamingoRowSelected) private var rowSelected
     public init(size: CGFloat = 14) { self.size = size }
+    public init(size: CGFloat = 14, selected: Bool) { self.size = size; self.selected = selected }
     public var body: some View {
         Image(systemName: "folder")
             .font(.system(size: size))
-            .foregroundStyle(selected ? Theme.Color.accent : Theme.Color.textSecondary)
+            .foregroundStyle((selected ?? rowSelected) ? Theme.Color.accent : Theme.Color.textSecondary)
             .frame(width: (size * 1.35).rounded())
             .accessibilityHidden(true)
     }
@@ -289,6 +314,12 @@ public enum FlamingoMode: Int, CaseIterable, Identifiable, Hashable, Sendable {
 public struct SegmentedModes: View {
     @Binding public var selection: FlamingoMode
     public init(selection: Binding<FlamingoMode>) { self._selection = selection }
+    /// `0` files, `1` graph, `2` trail, `3` ask, so a shell enum's `rawValue` binds directly.
+    public init(selection: Binding<Int>) {
+        self._selection = Binding(
+            get: { FlamingoMode(rawValue: selection.wrappedValue) ?? .files },
+            set: { selection.wrappedValue = $0.rawValue })
+    }
 
     public var body: some View {
         HStack(spacing: 2) {

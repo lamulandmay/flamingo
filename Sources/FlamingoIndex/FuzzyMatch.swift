@@ -4,6 +4,7 @@ import Foundation
 /// Matches in the file name beat matches in folders; word starts and runs score higher.
 enum FuzzyMatch {
     static func rank(_ query: String, in paths: [String], limit: Int) -> [String] {
+        let limit = max(0, limit)
         let q = Array(query.lowercased().filter { !$0.isWhitespace })
         guard !q.isEmpty else { return Array(paths.prefix(limit)) }
         var scored: [(path: String, score: Int)] = []

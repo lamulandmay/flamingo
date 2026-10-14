@@ -64,7 +64,7 @@ in light and dark. Screenshot it and you have the style guide.
 | Component | What it is |
 |---|---|
 | `Hairline()` / `VHairline()` | 1pt separators. |
-| `FileGlyph(ext:size:)` / `FolderGlyph(size:)` | Family symbol, family tint. Turns accent inside a selected `flamingoRow`. Fixed width so names align. |
+| `FileGlyph(ext:size:)` / `FolderGlyph(size:)` | Family symbol, family tint. Turns accent inside a selected `flamingoRow`, or pass `selected:` in native rows. Fixed width so names align. AppKit cells use `FileGlyph.nsImage(ext:)` tinted with `Theme.NS.family(ext:selected:)`. |
 | `.flamingoRow(selected:)` | 26pt row, `Space.s` inset, hover fill, accent-tinted selection, `Radius.s`. For custom lists. A native `List` draws its own selection, which is coral too via the bundle's `AccentColor`. |
 | `Chip(text:mono:action:)` | Anchors and tags: `slide 7`. Mono by default. With `action` it's clickable. |
 | `KeyHint("⌘K")` | Menus and the command palette only. |
@@ -72,7 +72,7 @@ in light and dark. Screenshot it and you have the style guide.
 | `SectionMarker("Pinned")` | 11pt medium, tracked, uppercase, tertiary. Rare. |
 | `PanelChrome(width:shadow:) { … }` | Command palette, search, comment panel: sidebar material, `Radius.l`, hairline, shadow. In an `NSPanel`, pass `shadow: false`. |
 | `VisualEffect(material:blending:state:)` | `NSVisualEffectView` for SwiftUI. Sidebar background. |
-| `SegmentedModes(selection:)` with `FlamingoMode` | Four symbols, no text, accent when selected. `FlamingoMode.title` and `.key` feed menus. |
+| `SegmentedModes(selection:)` | Four symbols, no text, accent when selected. Binds a `FlamingoMode` or an `Int` (0–3). `FlamingoMode.title` and `.key` feed menus. |
 | `SearchField(text:focused:onSubmit:onExit:)` | No placeholder. Accent focus ring. |
 | `IconButton(_:help:isOn:action:)` | 13pt symbol. `help` is the tooltip and VoiceOver label, never drawn. |
 | `ProgressHairline(value:)` | 2pt accent line. Fades at 1. `nil` pulses. |
@@ -112,3 +112,5 @@ and a hairline.
 - Does it look right in both light and dark? Toggle with System Settings.
 - Does it look right at 1000×600 and at full screen?
 - Could a Finder user guess what every control does without a label?
+
+The latest review of every view is in `plans/DESIGN-REVIEW.md`.

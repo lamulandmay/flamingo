@@ -81,19 +81,12 @@ enum AnchorScripts {
                     set ds to every source document
                     set hit to missing value
                     repeat with d in ds
-                        if wn ends with (name of d) then
+                        set dn to name of d
+                        if wn is dn or wn ends with (" " & dn) or wn ends with ("—" & dn) then
                             set hit to d
                             exit repeat
                         end if
                     end repeat
-                    if hit is missing value then
-                        repeat with d in ds
-                            if wn contains (name of d) then
-                                set hit to d
-                                exit repeat
-                            end if
-                        end repeat
-                    end if
                     if hit is not missing value then
                         set p to path of hit
                         try

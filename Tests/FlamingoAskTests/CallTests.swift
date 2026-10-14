@@ -73,6 +73,8 @@ final class CallTests: XCTestCase {
         let body = Prompt.body(model: "claude-haiku-4-5", messages: [])
         XCTAssertNil(body["fallbacks"])
         XCTAssertNil(body["output_config"])
+        XCTAssertNil(Prompt.body(model: "claude-opus-4-1", messages: [])["output_config"], "effort arrived with Opus 4.5")
+        XCTAssertNotNil(Prompt.body(model: "claude-opus-5-5", messages: [])["output_config"])
         XCTAssertEqual(Prompt.betas(model: "claude-haiku-4-5"), [])
     }
 
@@ -109,7 +111,7 @@ final class CallTests: XCTestCase {
     // MARK: Citations
 
     func testCitationNumbers() {
-        XCTAssertEqual(CitationParser.numbers(in: "a [1] b [2][3] c [2, 4] d [[5]] e [6](x) f [7,8]"), [1, 2, 3, 4, 7, 8])
+        XCTAssertEqual(CitationParser.numbers(in: "a [1] b [2][3] c [2, 4] d [[5]] e [6](x) f [7,8] g [ 9 ]"), [1, 2, 3, 4, 7, 8, 9])
     }
 
     func testAnswerDedupesPlacesAndDropsUnknownNumbers() {

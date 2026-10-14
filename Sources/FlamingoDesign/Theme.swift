@@ -135,7 +135,13 @@ public enum Theme {
         public static let onAccent = NSColor.flamingo("onAccent",
             light: NSColor(hex: 0xFFFFFF), dark: NSColor(hex: 0x1C1C1E))
 
+        /// Family tint for AppKit glyphs; accent when selected, `textSecondary` for unknown extensions.
+        public static func family(ext: String, selected: Bool = false) -> NSColor {
+            selected ? accent : (FileFamily(ext: ext)?.nsColor ?? textSecondary)
+        }
+
         public static let body = NSFont.systemFont(ofSize: 13)
+        public static let bodyMedium = NSFont.systemFont(ofSize: 13, weight: .medium)
         public static let small = NSFont.systemFont(ofSize: 11)
         public static let title = NSFont.systemFont(ofSize: 15, weight: .semibold)
         public static let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)

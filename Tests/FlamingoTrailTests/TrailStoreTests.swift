@@ -71,6 +71,12 @@ final class TrailStoreTests: TrailStoreTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: store.fileURL.path))
         }
         XCTAssertNil(weakStore, "nothing (notifications, scheduled flushes) keeps the store alive")
+        // The flush is queued off the caller's thread; it lands well before the hour-long delay.
+        let url = vault.stateDir.appendingPathComponent("trail.jsonl")
+        let deadline = Date().addingTimeInterval(2)
+        func onDisk() -> String { String(decoding: (try? Data(contentsOf: url)) ?? Data(), as: UTF8.self) }
+        while !onDisk().contains(e.id.uuidString), Date() < deadline { usleep(10_000) }
+        XCTAssertTrue(onDisk().contains(e.id.uuidString))
         XCTAssertEqual(try TrailStore(vault: vault).events().map(\.id), [e.id])
     }
 

@@ -109,6 +109,7 @@ struct TopBar: View {
         .padding(.horizontal, Theme.Space.m)
         .frame(height: height)
         .background(Theme.Color.bg)
+        .focusEffectDisabled()
     }
 }
 

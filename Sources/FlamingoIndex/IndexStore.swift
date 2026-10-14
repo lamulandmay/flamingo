@@ -46,10 +46,19 @@ public struct IndexStats: Sendable, Equatable {
     public var comments: Int
 }
 
+public enum IndexStoreError: Error, CustomStringConvertible, Sendable {
+    /// The vault folder was moved or deleted while open. Nothing was changed.
+    case vaultMissing(String)
+    public var description: String {
+        switch self { case .vaultMissing(let p): "vault folder is gone: \(p)" }
+    }
+}
+
 /// SQLite + FTS5 at `<vault>/.flamingo/index.sqlite`. Plan 05 owns.
 ///
 /// Thread-safe. Writes (`reindex`, `update`, `remove`) are serialized on one connection;
 /// reads use a second WAL connection, so search stays fast while a reindex runs.
+/// Searching and the other reads are in Search.swift, the graph in GraphBuilder.swift.
 public final class IndexStore: @unchecked Sendable {
     public let vault: Vault
     public var databaseURL: URL { vault.stateDir.appendingPathComponent("index.sqlite") }
@@ -58,7 +67,7 @@ public final class IndexStore: @unchecked Sendable {
     static let schemaVersion = 2
     /// Changes whenever extraction output may differ, so files indexed by older extractors
     /// are re-extracted even though they haven't changed on disk.
-    static var extractVersion: String { "1" }
+    static var extractVersion: String { "\(Extract.version)" }
     static let batchSize = 200
     static let extractionWidth = min(8, max(4, ProcessInfo.processInfo.activeProcessorCount / 2))
     static let commentBoost = 1.5
@@ -72,6 +81,7 @@ public final class IndexStore: @unchecked Sendable {
     private let readLock = NSLock()
     private let cacheLock = NSLock()
     private var pathCache: [String]?
+    private var generation = 0
     private var report: ReindexReport?
 
     public init(vault: Vault) throws {
@@ -92,7 +102,7 @@ public final class IndexStore: @unchecked Sendable {
     /// `reindex`, re-extracting every file when `force` is set.
     public func reindex(force: Bool, progress: ((Double) -> Void)? = nil) throws {
         writeLock.lock(); defer { writeLock.unlock() }
-        if force { try writer.exec("UPDATE files SET mtime = -1") }
+        if force { try writer.exec("UPDATE files SET size = -1") }
         try reindex(progress: progress)
     }
 
@@ -100,16 +110,20 @@ public final class IndexStore: @unchecked Sendable {
     /// Unchanged files (same mtime and size) are skipped, so re-running is cheap.
     public func reindex(progress: ((Double) -> Void)? = nil) throws {
         writeLock.lock(); defer { writeLock.unlock() }
+        try requireVault()
         let started = Date()
         progress?(0)
         let known = try stamps()
         var todo: [Pending] = []
         var seen = Set<String>()
-        for ref in VaultScanner.files(in: vault) {
+        let scanned = VaultScanner.files(in: vault)
+        for ref in scanned {
             seen.insert(ref.relativePath)
-            guard let stamp = Stamp(url: vault.url(for: ref)) else { continue }
-            if let k = known[ref.relativePath], k.stamp == stamp { continue }
-            todo.append(Pending(ref: ref, stamp: stamp, id: known[ref.relativePath]?.id))
+            let url = vault.url(for: ref)
+            guard let stamp = Stamp(url: url) else { continue }
+            let k = known[ref.relativePath]
+            if let k, k.stamp == stamp, !(stamp.isDirectory && Self.packageChanged(url, since: k.indexedAt)) { continue }
+            todo.append(Pending(ref: ref, stamp: stamp, id: k?.id))
         }
         let gone = known.keys.filter { !seen.contains($0) }
         if !gone.isEmpty {
@@ -120,6 +134,7 @@ public final class IndexStore: @unchecked Sendable {
         _ = try? sidecars.reconcile()   // notes whose file was renamed while we weren't looking
         try replaceAllComments((try? sidecars.all()) ?? [:])
         invalidateCaches()
+        Thumbnails.pruneCache(in: vault, files: scanned)   // thumbnails of edited, renamed, deleted files
         cacheLock.lock()
         report = ReindexReport(scanned: seen.count, extracted: todo.count, removed: gone.count,
                                seconds: Date().timeIntervalSince(started))
@@ -127,77 +142,88 @@ public final class IndexStore: @unchecked Sendable {
         progress?(1)
     }
 
-    /// Incremental: re-extract these files only (when their mtime or size changed), drop
-    /// the ones that are gone, and re-ingest their sidecar comments. A directory means
-    /// everything under it; `""` means the whole vault. A new path carrying the
-    /// `FileIdentity` of a vanished one is treated as a rename: it keeps its rows, and
-    /// its sidecar follows it (`SidecarStore.reconcile`).
+    /// Incremental: re-extract these files only (when their mtime or size changed; packages
+    /// always), drop the ones that are gone, and re-ingest their sidecar comments. A folder
+    /// means everything under it; `""` means the whole vault. Paths the scanner would skip
+    /// (hidden, `.flamingoignore`d) are ignored. A new path carrying the `FileIdentity` of a
+    /// vanished one is a rename: it keeps its rows and its sidecar follows it.
     public func update(_ refs: [FileRef]) throws {
-        let refs = Array(Set(refs)).filter { Self.isIndexable($0.relativePath) }
         guard !refs.isEmpty else { return }
         writeLock.lock(); defer { writeLock.unlock() }
+        try requireVault()
         if refs.contains(where: { $0.relativePath.isEmpty }) { return try reindex() }
 
-        let fm = FileManager.default
-        var present: [(FileRef, Stamp)] = []
+        let rules = PathRules(vault: vault)
+        var present: [(ref: FileRef, stamp: Stamp, direct: Bool)] = []
         var missing: [String] = []
-        var staleUnder: [(dir: String, keep: Set<String>)] = []
-        var commentTargets = Set(refs)
-        for ref in refs {
+        var folders: [(dir: String, keep: Set<String>)] = []
+        var commentTargets = Set<FileRef>()
+        for ref in Set(refs) {
             let url = vault.url(for: ref)
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else {
-                missing.append(ref.relativePath); continue
-            }
-            if isDir.boolValue && !Self.isPackage(url) {
-                let sub = VaultScanner.files(in: Vault(root: url)).map {
-                    FileRef(relativePath: ref.relativePath + "/" + $0.relativePath)
+            let stamp = Stamp(url: url)
+            guard rules.admits(ref.relativePath, isDirectory: stamp?.isDirectory ?? false) else { continue }
+            commentTargets.insert(ref)
+            guard let stamp else { missing.append(ref.relativePath); continue }
+            if stamp.isDirectory && !VaultScanner.isPackage(url) {
+                let sub = files(under: ref.relativePath, rules: rules)
+                folders.append((ref.relativePath, Set(sub)))
+                for p in sub {
+                    let r = FileRef(relativePath: p)
+                    commentTargets.insert(r)
+                    if let st = Stamp(url: vault.url(for: r)) { present.append((r, st, false)) }
                 }
-                staleUnder.append((ref.relativePath, Set(sub.map(\.relativePath))))
-                commentTargets.formUnion(sub)
-                for s in sub { if let st = Stamp(url: vault.url(for: s)) { present.append((s, st)) } }
-            } else if let st = Stamp(url: url) {
-                present.append((ref, st))
+            } else {
+                present.append((ref, stamp, true))
             }
         }
 
-        let known = try stamps(for: present.map(\.0.relativePath))
+        // Renames: a new path whose identity belongs to a row whose file vanished.
+        let known = try stamps(for: present.map(\.ref.relativePath))
+        var reconcile = missing.contains(where: hasSidecars)
         try writer.transaction {
-            for (ref, _) in present {
-                if let k = known[ref.relativePath] {
-                    if k.id == nil { try recordIdentity(of: ref) }
-                } else {
-                    try adoptRenamedRow(for: ref)
+            for p in present {
+                if let k = known[p.ref.relativePath] {
+                    if k.id == nil { try recordIdentity(of: p.ref) }
+                } else if let id = identity(of: p.ref) {
+                    try adoptRow(carrying: id, to: p.ref)
+                    if !hasSidecars(p.ref.relativePath) { reconcile = true }   // its note may be orphaned elsewhere
                 }
             }
         }
-        if missing.contains(where: hasSidecars), let moves = try? sidecars.reconcile() {
+        if reconcile, let moves = try? sidecars.reconcile() {
             for m in moves { commentTargets.insert(m.from); commentTargets.insert(m.to) }
         }
-        let afterRename = try stamps(for: present.map(\.0.relativePath))
-        let todo = present.compactMap { ref, st -> Pending? in
-            let k = afterRename[ref.relativePath]
-            return k?.stamp == st ? nil : Pending(ref: ref, stamp: st, id: k?.id)
+
+        let after = try stamps(for: present.map(\.ref.relativePath))
+        let todo = present.compactMap { p -> Pending? in
+            let k = after[p.ref.relativePath]
+            // A package's own stat doesn't change when a file inside it is rewritten.
+            let unchanged = k?.stamp == p.stamp && !(p.direct && p.stamp.isDirectory)
+            return unchanged ? nil : Pending(ref: p.ref, stamp: p.stamp, id: k?.id)
         }
         try ingest(todo) { _ in }
         try writer.transaction {
             for p in missing { try deleteRows(path: p); try deleteRows(under: p) }
-            for (dir, keep) in staleUnder {
-                let rows = try writer.query("SELECT path FROM files WHERE substr(path, 1, length(?1)) = ?1", dir + "/") { $0.string(0) }
-                for p in rows where !keep.contains(p) { try deleteRows(path: p) }
+            for p in present where p.direct { try deleteRows(under: p.ref.relativePath) }   // was a folder
+            for (dir, keep) in folders {
+                try deleteRows(path: dir)   // was a file
+                for p in try paths(under: dir) where !keep.contains(p) { try deleteRows(path: p) }
             }
             for ref in commentTargets { try replaceComments(for: ref) }
         }
         invalidateCaches()
     }
 
+    /// Drops these files (and anything under them) from the index. Their comments keep
+    /// mirroring the sidecars, which may outlive the file.
     public func remove(_ refs: [FileRef]) throws {
         guard !refs.isEmpty else { return }
         writeLock.lock(); defer { writeLock.unlock() }
         try writer.transaction {
-            for ref in refs {
+            for ref in refs where !ref.relativePath.isEmpty {
                 try deleteRows(path: ref.relativePath)
-                if !ref.relativePath.isEmpty { try deleteRows(under: ref.relativePath) }
+                try deleteRows(under: ref.relativePath)
+                try replaceComments(for: ref)
             }
         }
         invalidateCaches()
@@ -208,97 +234,9 @@ public final class IndexStore: @unchecked Sendable {
         writeLock.lock(); defer { writeLock.unlock() }
         try writer.transaction {
             try writer.exec("DELETE FROM comments")
-            for (ref, comments) in all { try insertComments(comments, for: ref) }
-        }
-    }
-
-    // MARK: - Search
-
-    /// Best hits across file content and comments, one content hit per file (at its best
-    /// section's anchor). All terms must match; if nothing does, any term may.
-    public func search(_ query: String, limit: Int = 50) throws -> [SearchHit] {
-        guard limit > 0 else { return [] }
-        return try firstNonEmpty(query) { match in
-            let content = Self.bestPerFile(try sectionHits(match, limit: max(limit * 4, 100)))
-            let comments = try commentHits(match, limit: limit).map {
-                SearchHit(file: $0.file, anchor: $0.comment.anchor, snippet: $0.snippet, score: $0.score, commentID: $0.comment.id)
+            for (ref, comments) in all.sorted(by: { $0.key.relativePath < $1.key.relativePath }) {
+                try insertComments(comments, for: ref)
             }
-            var seen = Set<String>()
-            let merged = (content + comments).sorted { $0.score > $1.score }.filter { seen.insert($0.id).inserted }
-            return Array(merged.prefix(limit))
-        }
-    }
-
-    /// Every matching section, ranked, not grouped by file. For retrieval (plan 09).
-    public func searchSections(_ query: String, limit: Int = 50) throws -> [SearchHit] {
-        guard limit > 0 else { return [] }
-        return try firstNonEmpty(query) { try sectionHits($0, limit: limit) }
-    }
-
-    /// Matching comments, ranked.
-    public func searchComments(_ query: String, limit: Int = 50) throws -> [CommentHit] {
-        guard limit > 0 else { return [] }
-        return try firstNonEmpty(query) { try commentHits($0, limit: limit) }
-    }
-
-    /// Most recently modified files.
-    public func recent(limit: Int = 20) throws -> [FileRef] {
-        try read { db in
-            try db.query("SELECT path FROM files ORDER BY mtime DESC, path LIMIT ?", limit) { FileRef(relativePath: $0.string(0)) }
-        }
-    }
-
-    /// Fuzzy file-name match for the command palette. Empty query returns `recent`.
-    public func files(matching query: String, limit: Int = 50) throws -> [FileRef] {
-        let q = query.trimmingCharacters(in: .whitespaces)
-        guard !q.isEmpty else { return try recent(limit: limit) }
-        return FuzzyMatch.rank(q, in: try indexedPaths(), limit: limit).map(FileRef.init(relativePath:))
-    }
-
-    public func sections(of ref: FileRef) throws -> [Section] {
-        try read { db in
-            try db.query("""
-                SELECT anchor_kind, anchor_value, title, text FROM sections
-                WHERE path = ? AND ord > 0 ORDER BY ord
-                """, ref.relativePath) { row -> Section? in
-                guard let anchor = Self.anchor(row, 0) else { return nil }
-                return Section(anchor: anchor, title: row.optionalString(2), text: row.string(3))
-            }.compactMap { $0 }
-        }
-    }
-
-    public func text(of ref: FileRef) throws -> String? {
-        let parts = try read { db in
-            try db.query("SELECT text FROM sections WHERE path = ? ORDER BY ord", ref.relativePath) { $0.string(0) }
-        }
-        guard !parts.isEmpty else { return nil }
-        return parts.filter { !$0.isEmpty }.joined(separator: "\n\n")
-    }
-
-    /// Every indexed file, sorted by path.
-    public func indexedFiles() throws -> [FileRef] { try indexedPaths().map(FileRef.init(relativePath:)) }
-
-    /// Comment count per file, including sidecars whose file is gone.
-    public func commentCounts() throws -> [FileRef: Int] {
-        let rows = try read { db in
-            try db.query("SELECT path, count(*) FROM comments GROUP BY path") { (FileRef(relativePath: $0.string(0)), $0.int(1)) }
-        }
-        return Dictionary(rows, uniquingKeysWith: +)
-    }
-
-    /// Indexed comments on one file, oldest first.
-    public func comments(on ref: FileRef) throws -> [Comment] {
-        try read { db in
-            try db.query("SELECT id, ts, anchor_kind, anchor_value, text FROM comments WHERE path = ? ORDER BY ts, rowid",
-                         ref.relativePath) { Self.comment($0, 0) }
-        }
-    }
-
-    public func stats() throws -> IndexStats {
-        try read { db in
-            IndexStats(files: try db.scalarInt("SELECT count(*) FROM files"),
-                       sections: try db.scalarInt("SELECT count(*) FROM sections"),
-                       comments: try db.scalarInt("SELECT count(*) FROM comments"))
         }
     }
 
@@ -307,17 +245,20 @@ public final class IndexStore: @unchecked Sendable {
     struct Stamp: Equatable {
         var mtime: Double
         var size: Int
+        var isDirectory = false
         init(mtime: Double, size: Int) { self.mtime = mtime; self.size = size }
-        /// `nil` unless a regular file or a folder (packages): never a pipe or a device,
-        /// which would block extraction forever.
+        /// `nil` unless a regular file or a folder: never a symlink (the scanner doesn't
+        /// follow them), a pipe or a device (which would block extraction forever).
         init?(url: URL) {
             var st = stat()
-            guard stat(url.path, &st) == 0 else { return nil }
+            guard lstat(url.path, &st) == 0 else { return nil }
             let type = st.st_mode & S_IFMT
             guard type == S_IFREG || type == S_IFDIR else { return nil }
             mtime = Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9
             size = Int(st.st_size)
+            isDirectory = type == S_IFDIR
         }
+        static func == (a: Stamp, b: Stamp) -> Bool { a.mtime == b.mtime && a.size == b.size }
     }
 
     struct Pending {
@@ -333,84 +274,135 @@ public final class IndexStore: @unchecked Sendable {
         var extracted: Extracted?
     }
 
-    struct RawHit {
-        var path: String
-        var anchor: FileAnchor?
-        var snippet: String
-        var score: Double
+    struct Known {
+        var stamp: Stamp
+        var id: String?
+        var indexedAt: Double
     }
 
-    func read<T>(_ body: (Database) throws -> T) throws -> T {
+    /// Reads on the reader connection. `snapshot` keeps several queries on one commit.
+    func read<T>(snapshot: Bool = false, _ body: (Database) throws -> T) throws -> T {
         readLock.lock(); defer { readLock.unlock() }
-        return try body(reader)
+        return snapshot ? try reader.snapshot { try body(reader) } : try body(reader)
     }
 
     func indexedPaths() throws -> [String] {
         cacheLock.lock()
         if let p = pathCache { cacheLock.unlock(); return p }
+        let gen = generation
         cacheLock.unlock()
         let paths = try read { db in try db.query("SELECT path FROM files ORDER BY path") { $0.string(0) } }
-        cacheLock.lock(); pathCache = paths; cacheLock.unlock()
+        cacheLock.lock()
+        if generation == gen { pathCache = paths }   // a write landed meanwhile: don't cache what we read
+        cacheLock.unlock()
         return paths
     }
 
     private func invalidateCaches() {
-        cacheLock.lock(); pathCache = nil; cacheLock.unlock()
+        cacheLock.lock(); generation += 1; pathCache = nil; cacheLock.unlock()
     }
+
+    func requireVault() throws {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: vault.root.path, isDirectory: &isDir), isDir.boolValue else {
+            throw IndexStoreError.vaultMissing(vault.root.path)
+        }
+    }
+
+    private struct SchemaTooNew: Error {}
 
     private static func openWriter(_ path: String) throws -> Database {
         do {
-            return try configure(Database(path: path))
-        } catch {
-            // The index is a cache. If it is unreadable or from the future, start over.
-            for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: path + suffix) }
-            return try configure(Database(path: path))
+            return try configureRetrying(path)
+        } catch let e as IndexError where e.isCorrupt {
+            recreate(path)
+        } catch is SchemaTooNew {
+            recreate(path)
         }
+        return try configureRetrying(path)
+    }
+
+    /// Switching a fresh file to WAL can report BUSY without waiting on the busy handler
+    /// when another connection is doing the same, so retry those briefly.
+    private static func configureRetrying(_ path: String) throws -> Database {
+        var attempt = 0
+        while true {
+            do {
+                return try configure(Database(path: path))
+            } catch let e as IndexError where e.isBusy && attempt < 100 {
+                attempt += 1
+                usleep(useconds_t(10_000 + Int.random(in: 0..<20_000)))
+            }
+        }
+    }
+
+    /// The index is a cache: if it is unreadable or from a newer Flamingo, start over.
+    /// Only then; busy or I/O errors must never delete a file someone else has open.
+    private static func recreate(_ path: String) {
+        for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: path + suffix) }
     }
 
     private static func configure(_ db: Database) throws -> Database {
         try db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY;")
-        let v = db.userVersion
-        if v > schemaVersion { throw IndexError(code: 0, message: "index.sqlite schema \(v) is newer than \(schemaVersion)") }
-        if v < 1 { try db.transaction { try db.exec(Schema.v1) } }
-        if v < 2 { try db.transaction { try db.exec(Schema.v2) } }
-        let stored = try db.query("SELECT value FROM meta WHERE key = 'extract_version'") { $0.string(0) }.first
-        if stored != extractVersion {
-            try db.transaction {
-                try db.exec("UPDATE files SET mtime = -1")   // stale; keep serving old text until reindexed
+        // BEGIN IMMEDIATE serializes two processes opening a fresh index at once.
+        try db.transaction {
+            let v = try db.userVersion()
+            if v > schemaVersion { throw SchemaTooNew() }
+            if v < 1 { try db.exec(Schema.v1) }
+            if v < 2 { try db.exec(Schema.v2) }
+            let stored = try db.query("SELECT value FROM meta WHERE key = 'extract_version'") { $0.string(0) }.first
+            if stored != extractVersion {
+                try db.exec("UPDATE files SET size = -1")   // stale; keep serving old text until reindexed
                 try db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('extract_version', ?)", extractVersion)
             }
         }
         return db
     }
 
-    private func stamps() throws -> [String: (stamp: Stamp, id: String?)] {
-        let rows = try writer.query("SELECT path, mtime, size, id FROM files") {
-            ($0.string(0), (stamp: Stamp(mtime: $0.double(1), size: $0.int(2)), id: $0.optionalString(3)))
+    private func stamps() throws -> [String: Known] {
+        let rows = try writer.query("SELECT path, mtime, size, id, indexed_at FROM files") {
+            ($0.string(0), Known(stamp: Stamp(mtime: $0.double(1), size: $0.int(2)), id: $0.optionalString(3), indexedAt: $0.double(4)))
         }
         return Dictionary(rows, uniquingKeysWith: { a, _ in a })
     }
 
-    private func stamps(for paths: [String]) throws -> [String: (stamp: Stamp, id: String?)] {
-        var out: [String: (stamp: Stamp, id: String?)] = [:]
+    private func stamps(for paths: [String]) throws -> [String: Known] {
+        var out: [String: Known] = [:]
         for p in paths {
-            let row = try writer.query("SELECT mtime, size, id FROM files WHERE path = ?", p) {
-                (stamp: Stamp(mtime: $0.double(0), size: $0.int(1)), id: $0.optionalString(2))
+            let row = try writer.query("SELECT mtime, size, id, indexed_at FROM files WHERE path = ?", p) {
+                Known(stamp: Stamp(mtime: $0.double(0), size: $0.int(1)), id: $0.optionalString(2), indexedAt: $0.double(3))
             }
             if let r = row.first { out[p] = r }
         }
         return out
     }
 
+    /// Whether anything inside a package was modified after `time`. Huge packages (apps,
+    /// libraries) aren't walked; their own stamp has to do.
+    static func packageChanged(_ url: URL, since time: Double) -> Bool {
+        guard let e = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.contentModificationDateKey]) else { return false }
+        var n = 0
+        for case let u as URL in e {
+            n += 1
+            if n > 2000 { return false }
+            if let d = try? u.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+               d.timeIntervalSince1970 > time { return true }
+        }
+        return false
+    }
+
     /// Ids are read, never assigned: a file has one once someone comments on it.
+    private func identity(of ref: FileRef) -> UUID? {
+        (try? FileIdentity.existingID(for: vault.url(for: ref))) ?? nil
+    }
+
     private func recordIdentity(of ref: FileRef) throws {
-        guard let id = (try? FileIdentity.existingID(for: vault.url(for: ref))) ?? nil else { return }
+        guard let id = identity(of: ref) else { return }
         try writer.run("UPDATE files SET id = ? WHERE path = ?", id.uuidString, ref.relativePath)
     }
 
-    /// If `ref` is new but carries the identity of a row whose file vanished, move that row.
-    private func adoptRenamedRow(for ref: FileRef) throws {
-        guard let id = (try? FileIdentity.existingID(for: vault.url(for: ref))) ?? nil else { return }
+    /// Moves the row of a vanished file carrying `id` to `ref`, keeping its extracted text.
+    private func adoptRow(carrying id: UUID, to ref: FileRef) throws {
         let candidates = try writer.query("SELECT path, title FROM files WHERE id = ? AND path != ?",
                                           id.uuidString, ref.relativePath) { ($0.string(0), $0.optionalString(1)) }
         guard let (old, title) = candidates.first(where: {
@@ -422,9 +414,30 @@ public final class IndexStore: @unchecked Sendable {
         try writer.run("UPDATE sections SET title = ? WHERE path = ? AND ord = 0", Self.fileTitle(title, ref), ref.relativePath)
     }
 
+    /// What the scanner lists under a folder, judged by the vault's rules (not the folder's).
+    private func files(under dir: String, rules: PathRules) -> [String] {
+        let url = vault.url(for: FileRef(relativePath: dir))
+        var out = VaultScanner.files(in: Vault(root: url), ignore: .empty).map { dir + "/" + $0.relativePath }
+        // Scanning `dir` as a root skips its root-only names (`Library`); below the vault root they count.
+        for name in VaultScanner.rootOnlyIgnoredNames {
+            let sub = url.appendingPathComponent(name)
+            if Stamp(url: sub)?.isDirectory == true, !VaultScanner.isPackage(sub) {
+                out += files(under: dir + "/" + name, rules: rules)
+            }
+        }
+        return out.filter { rules.admits($0, isDirectory: false) }
+    }
+
+    /// Indexed paths strictly inside `dir`: `dir/` ≤ path < `dir0` ('0' sorts right after '/').
+    private func paths(under dir: String) throws -> [String] {
+        try writer.query("SELECT path FROM files WHERE path >= ?1 AND path < ?2", dir + "/", dir + "0") { $0.string(0) }
+    }
+
     private func ingest(_ todo: [Pending], progress: (Double) -> Void) throws {
         guard !todo.isEmpty else { progress(1); return }
-        let queue = ExtractionQueue(todo, vault: vault, width: Self.extractionWidth)
+        // Grouped by type: Spotlight-backed formats pay ~0.75s whenever the importer changes.
+        let todo = todo.sorted { ($0.ref.ext, $0.ref.relativePath) < ($1.ref.ext, $1.ref.relativePath) }
+        let queue = ExtractionQueue(todo, vault: vault, width: Self.extractionWidth, buffer: Self.batchSize * 2)
         var written = 0
         defer { queue.cancel() }
         while let batch = queue.next(batchSize: Self.batchSize) {
@@ -465,9 +478,8 @@ public final class IndexStore: @unchecked Sendable {
     }
 
     private func deleteRows(under dir: String) throws {
-        let prefix = dir + "/"
-        try writer.run("DELETE FROM sections WHERE substr(path, 1, length(?1)) = ?1", prefix)
-        try writer.run("DELETE FROM files WHERE substr(path, 1, length(?1)) = ?1", prefix)
+        try writer.run("DELETE FROM sections WHERE path >= ?1 AND path < ?2", dir + "/", dir + "0")
+        try writer.run("DELETE FROM files WHERE path >= ?1 AND path < ?2", dir + "/", dir + "0")
     }
 
     /// A note for this path, or (for a folder) notes for anything under it.
@@ -499,129 +511,6 @@ public final class IndexStore: @unchecked Sendable {
         }
     }
 
-    enum Match: Equatable {
-        case fts(String)
-        /// Plain substrings, for scripts written without spaces (Chinese, Japanese, Thai),
-        /// which the unicode61 tokenizer can't split into words.
-        case substring([String])
-    }
-
-    /// All terms, then any term, then substrings when the query is in an unspaced script.
-    static func plan(_ query: String) -> [Match] {
-        guard let all = FTSQuery.build(query) else { return [] }
-        let terms = FTSQuery.terms(query)
-        var plan: [Match] = [.fts(all)]
-        if terms.count > 1, let any = FTSQuery.build(query, any: true) { plan.append(.fts(any)) }
-        if FTSQuery.isUnspaced(query) { plan.append(.substring(terms.map(\.text))) }
-        return plan
-    }
-
-    private func firstNonEmpty<T>(_ query: String, _ run: (Match) throws -> [T]) throws -> [T] {
-        for match in Self.plan(query) {
-            let hits = try run(match)
-            if !hits.isEmpty { return hits }
-        }
-        return []
-    }
-
-    private func sectionHits(_ match: Match, limit: Int) throws -> [SearchHit] {
-        switch match {
-        case .fts(let q): return try rawSectionHits(q, limit: limit)
-        case .substring(let terms):
-            let rows = try substringRows("sections", columns: "path, anchor_kind, anchor_value, title, text",
-                                         textColumns: ["text", "coalesce(title, '')"], order: "path, ord", terms: terms, limit: limit) {
-                (FileRef(relativePath: $0.string(0)), Self.anchor($0, 1), $0.string(3), $0.string(4))
-            }
-            return rows.enumerated().map { i, r in
-                let body = r.3.range(of: terms[0], options: .caseInsensitive) != nil ? r.3 : r.2
-                return SearchHit(file: r.0, anchor: r.1, snippet: Self.substringSnippet(body, terms), score: 1 - Double(i) * 1e-6)
-            }
-        }
-    }
-
-    private func commentHits(_ match: Match, limit: Int) throws -> [CommentHit] {
-        switch match {
-        case .fts(let q): return try rawCommentHits(q, limit: limit)
-        case .substring(let terms):
-            let rows = try substringRows("comments", columns: "path, id, ts, anchor_kind, anchor_value, text",
-                                         textColumns: ["text"], order: "ts DESC", terms: terms, limit: limit) {
-                (FileRef(relativePath: $0.string(0)), Self.comment($0, 1))
-            }
-            return rows.enumerated().map { i, r in
-                CommentHit(file: r.0, comment: r.1, snippet: Self.substringSnippet(r.1.text, terms),
-                           score: (1 - Double(i) * 1e-6) * Self.commentBoost)
-            }
-        }
-    }
-
-    private func substringRows<T>(_ table: String, columns: String, textColumns: [String], order: String,
-                                  terms: [String], limit: Int, row: (Row) throws -> T) throws -> [T] {
-        let test = { (t: Int) in textColumns.map { "instr(lower(\($0)), lower(?\(t + 1))) > 0" }.joined(separator: " OR ") }
-        let sql = "SELECT \(columns) FROM \(table) WHERE "
-            + terms.indices.map { "(\(test($0)))" }.joined(separator: " AND ")
-            + " ORDER BY \(order) LIMIT ?\(terms.count + 1)"
-        let values: [(any SQLBindable)?] = terms.map { $0 } + [limit]
-        return try read { db in try db.prepare(sql).query(values, row: row) }
-    }
-
-    private func rawSectionHits(_ q: String, limit: Int) throws -> [SearchHit] {
-        try read { db in
-            try db.query("""
-                SELECT s.path, s.anchor_kind, s.anchor_value, f.st, f.sx, f.rank FROM (
-                    SELECT rowid, rank,
-                        snippet(sections_fts, 0, '«', '»', '…', 10) AS st,
-                        snippet(sections_fts, 1, '«', '»', '…', 16) AS sx
-                    FROM sections_fts WHERE sections_fts MATCH ?1 ORDER BY rank LIMIT ?2
-                ) f JOIN sections s ON s.rowid = f.rowid ORDER BY f.rank
-                """, q, limit) {
-                SearchHit(file: FileRef(relativePath: $0.string(0)), anchor: Self.anchor($0, 1),
-                          snippet: Self.snippet(title: $0.string(3), text: $0.string(4)), score: -$0.double(5))
-            }
-        }
-    }
-
-    private func rawCommentHits(_ q: String, limit: Int) throws -> [CommentHit] {
-        try read { db in
-            try db.query("""
-                SELECT c.path, c.id, c.ts, c.anchor_kind, c.anchor_value, c.text, f.snip, f.rank FROM (
-                    SELECT rowid, snippet(comments_fts, 0, '«', '»', '…', 16) AS snip, rank
-                    FROM comments_fts WHERE comments_fts MATCH ?1 ORDER BY rank LIMIT ?2
-                ) f JOIN comments c ON c.rowid = f.rowid ORDER BY f.rank
-                """, q, limit) {
-                CommentHit(file: FileRef(relativePath: $0.string(0)), comment: Self.comment($0, 1),
-                           snippet: Self.clean($0.string(6)), score: -$0.double(7) * Self.commentBoost)
-            }
-        }
-    }
-
-    /// One hit per file, ranked by its best section. If that is the file-level row (a name
-    /// or title match) but a deeper section also matched, open at the deeper section.
-    static func bestPerFile(_ hits: [SearchHit]) -> [SearchHit] {
-        var order: [String] = []
-        var best: [String: SearchHit] = [:]
-        for h in hits {
-            let p = h.file.relativePath
-            if var b = best[p] {
-                if b.anchor == nil, h.anchor != nil { b.anchor = h.anchor; b.snippet = h.snippet; best[p] = b }
-            } else {
-                order.append(p); best[p] = h
-            }
-        }
-        return order.compactMap { best[$0] }
-    }
-
-    static func anchor(_ row: Row, _ i: Int32) -> FileAnchor? {
-        guard let k = row.optionalString(i), let kind = FileAnchor.Kind(rawValue: k) else { return nil }
-        return FileAnchor(kind: kind, value: row.string(i + 1))
-    }
-
-    /// Reads `id, ts, anchor_kind, anchor_value, text` starting at column `i`.
-    static func comment(_ row: Row, _ i: Int32) -> Comment {
-        Comment(id: UUID(uuidString: row.string(i)) ?? UUID(),
-                timestamp: Date(timeIntervalSince1970: row.double(i + 1)),
-                anchor: anchor(row, i + 2), text: row.string(i + 4))
-    }
-
     static func fileTitle(_ title: String?, _ ref: FileRef) -> String {
         guard let title, title != ref.name, title != (ref.name as NSString).deletingPathExtension else { return ref.name }
         return title + " · " + ref.name
@@ -631,86 +520,51 @@ public final class IndexStore: @unchecked Sendable {
         guard s.utf16.count > limit else { return s }
         return String(s.utf16.prefix(limit)) ?? String(s.prefix(limit / 2))
     }
-
-    /// The text snippet when the match is in the text, else the matching title with the
-    /// start of the text for context.
-    static func snippet(title: String, text: String) -> String {
-        let t = clean(title), x = clean(text)
-        if x.contains("«") || t.isEmpty { return x }
-        return x.isEmpty ? t : t + " — " + x
-    }
-
-    /// A window around the first match, every term marked «…».
-    static func substringSnippet(_ text: String, _ terms: [String]) -> String {
-        let flat = clean(text)
-        guard let first = terms.lazy.compactMap({ flat.range(of: $0, options: .caseInsensitive) }).first else {
-            return String(flat.prefix(80))
-        }
-        let start = flat.index(first.lowerBound, offsetBy: -24, limitedBy: flat.startIndex) ?? flat.startIndex
-        let end = flat.index(first.upperBound, offsetBy: 48, limitedBy: flat.endIndex) ?? flat.endIndex
-        var window = String(flat[start..<end])
-        for t in terms {
-            guard let re = try? NSRegularExpression(pattern: NSRegularExpression.escapedPattern(for: t), options: .caseInsensitive) else { continue }
-            window = re.stringByReplacingMatches(in: window, range: NSRange(window.startIndex..., in: window), withTemplate: "«$0»")
-        }
-        return (start > flat.startIndex ? "…" : "") + window + (end < flat.endIndex ? "…" : "")
-    }
-
-    /// Snippets keep the text's own line breaks; a result row wants one line.
-    static func clean(_ s: String) -> String {
-        s.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }.joined(separator: " ")
-    }
-
-    static func isIndexable(_ path: String) -> Bool {
-        path.split(separator: "/").allSatisfy { !$0.hasPrefix(".") && !VaultScanner.ignoredNames.contains(String($0)) }
-    }
-
-    static func isPackage(_ url: URL) -> Bool {
-        (try? url.resourceValues(forKeys: [.isPackageKey]))?.isPackage == true
-    }
 }
 
 /// Extracts files on a few background threads and hands back finished batches in
-/// completion order, so one slow file never holds up writing the rest.
+/// completion order, so one slow file never holds up writing the rest. Workers pause
+/// when `buffer` results are waiting, so memory stays bounded if writing falls behind.
 private final class ExtractionQueue: @unchecked Sendable {
     private let todo: [IndexStore.Pending]
     private let vault: Vault
-    private let lock = NSCondition()
+    private let buffer: Int
+    private let cond = NSCondition()
     private var nextIndex = 0
     private var done: [IndexStore.Extraction] = []
     private var delivered = 0
     private var cancelled = false
 
-    init(_ todo: [IndexStore.Pending], vault: Vault, width: Int) {
-        self.todo = todo; self.vault = vault
+    init(_ todo: [IndexStore.Pending], vault: Vault, width: Int, buffer: Int) {
+        self.todo = todo; self.vault = vault; self.buffer = buffer
         for _ in 0..<min(width, todo.count) {
             Thread.detachNewThread { [self] in work() }
         }
     }
 
-    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    func cancel() { cond.lock(); cancelled = true; cond.broadcast(); cond.unlock() }
 
     /// Blocks until `batchSize` results are ready (or everything left is), `nil` when finished.
     func next(batchSize: Int) -> [IndexStore.Extraction]? {
-        lock.lock(); defer { lock.unlock() }
+        cond.lock(); defer { cond.unlock() }
         let remaining = todo.count - delivered
         guard remaining > 0 else { return nil }
         let want = min(batchSize, remaining)
-        while done.count < want { lock.wait() }
+        while done.count < want { cond.wait() }
         let batch = done
         done.removeAll(keepingCapacity: true)
         delivered += batch.count
+        cond.broadcast()
         return batch
     }
 
     private func work() {
         while true {
-            lock.lock()
+            cond.lock()
             let i = nextIndex
             nextIndex += 1
             let stop = cancelled || i >= todo.count
-            lock.unlock()
+            cond.unlock()
             if stop { return }
             let p = todo[i]
             let result: IndexStore.Extraction = autoreleasepool {
@@ -718,10 +572,11 @@ private final class ExtractionQueue: @unchecked Sendable {
                 let id = ((try? FileIdentity.existingID(for: url)) ?? nil)?.uuidString ?? p.id
                 return IndexStore.Extraction(ref: p.ref, stamp: p.stamp, id: id, extracted: try? Extract.extract(url))
             }
-            lock.lock()
+            cond.lock()
+            while done.count >= buffer && !cancelled { cond.wait() }
             done.append(result)
-            lock.signal()
-            lock.unlock()
+            cond.broadcast()
+            cond.unlock()
         }
     }
 }

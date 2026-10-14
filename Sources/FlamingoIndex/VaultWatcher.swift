@@ -8,16 +8,26 @@ import FlamingoCore
 public final class VaultWatcher: @unchecked Sendable {
     public let vault: Vault
     /// Changed files (sidecar targets included), de-duplicated and sorted. An empty
-    /// `relativePath` means "rescan everything". Called on a private background queue.
-    public var onChange: (([FileRef]) -> Void)?
+    /// `relativePath` means "rescan everything" (the vault moved, events were dropped, or
+    /// `.flamingoignore` changed). Called on a private background queue.
+    public var onChange: (([FileRef]) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return changeHandler }
+        set { lock.lock(); changeHandler = newValue; lock.unlock() }
+    }
     /// Targets whose `.flamingo/notes/<target>.md` sidecar changed. Called right after `onChange`
     /// returns, in the same flush, on the same private queue, so an index updated in `onChange`
     /// already holds the new comments (rebuild the graph here).
-    public var onSidecarChange: (([FileRef]) -> Void)?
+    public var onSidecarChange: (([FileRef]) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return sidecarHandler }
+        set { lock.lock(); sidecarHandler = newValue; lock.unlock() }
+    }
 
     private let queue = DispatchQueue(label: "com.flamingo.vaultwatcher")
-    private static let queueKey = DispatchSpecificKey<Void>()
+    private let queueKey = DispatchSpecificKey<Void>()
     private let lock = NSLock()
+    private var changeHandler: (([FileRef]) -> Void)?
+    private var sidecarHandler: (([FileRef]) -> Void)?
+    private var rules: PathRules
     private var stream: FSEventStreamRef?
     private var pending = Set<String>()
     private var pendingSidecar = Set<String>()
@@ -30,7 +40,8 @@ public final class VaultWatcher: @unchecked Sendable {
 
     public init(vault: Vault) {
         self.vault = vault
-        queue.setSpecific(key: Self.queueKey, value: ())
+        rules = PathRules(vault: vault)
+        queue.setSpecific(key: queueKey, value: ())
     }
 
     deinit { stop() }
@@ -61,6 +72,7 @@ public final class VaultWatcher: @unchecked Sendable {
         if FSEventStreamStart(s) { stream = s } else { FSEventStreamInvalidate(s); FSEventStreamRelease(s) }
     }
 
+    /// Stops the stream and drops anything not yet delivered: no new callback starts after this.
     public func stop() {
         lock.lock()
         let s = stream
@@ -70,11 +82,14 @@ public final class VaultWatcher: @unchecked Sendable {
         FSEventStreamStop(s)
         FSEventStreamInvalidate(s)
         FSEventStreamRelease(s)
+        queue.async { [weak self] in self?.discardPending() }
     }
 
     /// Synchronously delivers anything pending, on the watcher's queue.
-    public func flush() {
-        if DispatchQueue.getSpecific(key: Self.queueKey) != nil { deliver() } else { queue.sync { deliver() } }
+    public func flush() { onQueue { deliver() } }
+
+    private func onQueue(_ work: () -> Void) {
+        if DispatchQueue.getSpecific(key: queueKey) != nil { work() } else { queue.sync(execute: work) }
     }
 
     // MARK: - Event handling (private queue)
@@ -86,6 +101,7 @@ public final class VaultWatcher: @unchecked Sendable {
 
     private func handle(_ paths: [String], _ flags: [FSEventStreamEventFlags]) {
         let roots = Self.rootPaths(vault.root)
+        if paths.contains(where: { $0.hasSuffix("/" + IgnoreRules.fileName) }) { rules = PathRules(vault: vault) }
         var added = false
         for (p, f) in zip(paths, flags) {
             guard let c = classifyAbsolute(p, f, roots: roots) else { continue }
@@ -116,12 +132,12 @@ public final class VaultWatcher: @unchecked Sendable {
         }
         guard var rel else { return nil }
         while rel.hasSuffix("/") { rel.removeLast() }
-        return Self.classify(relativePath: rel, flags: flags) { [vault, weak self] sub in
+        return Self.classify(relativePath: rel, flags: flags, isPackage: { [vault, weak self] sub in
             if let hit = self?.packageCache[sub] { return hit }
             let isPkg = (try? vault.root.appendingPathComponent(sub).resourceValues(forKeys: [.isPackageKey]))?.isPackage ?? false
             self?.packageCache[sub] = isPkg
             return isPkg
-        }
+        }, rules: rules)
     }
 
     private func schedule() {
@@ -134,7 +150,14 @@ public final class VaultWatcher: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + delay, execute: item)
     }
 
+    private func discardPending() {
+        timer?.cancel(); timer = nil
+        firstPending = nil
+        pending.removeAll(); pendingSidecar.removeAll()
+    }
+
     private func deliver() {
+        guard isRunning else { return discardPending() }
         timer?.cancel(); timer = nil
         firstPending = nil
         packageCache.removeAll()
@@ -142,8 +165,11 @@ public final class VaultWatcher: @unchecked Sendable {
         let all = pending.sorted().map { FileRef(relativePath: $0) }
         let side = pendingSidecar.sorted().map { FileRef(relativePath: $0) }
         pending.removeAll(); pendingSidecar.removeAll()
-        onChange?(all)
-        if !side.isEmpty { onSidecarChange?(side) }
+        lock.lock()
+        let (change, sidecar) = (changeHandler, sidecarHandler)
+        lock.unlock()
+        change?(all)
+        if !side.isEmpty { sidecar?(side) }
     }
 
     // MARK: - Pure classification
@@ -153,27 +179,32 @@ public final class VaultWatcher: @unchecked Sendable {
         var sidecar: Bool
     }
 
-    static let packageExtensions: Set<String> = ["key", "numbers", "pages", "app", "bundle", "rtfd", "photoslibrary",
-                                                 "logicx", "band", "sparsebundle", "xcodeproj", "playground"]
+    static var packageExtensions: Set<String> { VaultScanner.packageExtensions }
 
-    /// Maps one event (path relative to the vault root, "" for the root) to the file it affects.
-    /// `isPackage` receives the relative path of an ancestor with a path extension.
+    /// Maps one event (path relative to the vault root, "" for the root) to the file it affects,
+    /// or `nil` when `VaultScanner` wouldn't list it. `isPackage` receives the relative path of
+    /// an ancestor with a path extension.
     static func classify(relativePath: String, flags: FSEventStreamEventFlags,
-                         isPackage: (String) -> Bool = { _ in false }) -> Classified? {
+                         isPackage: (String) -> Bool = { _ in false },
+                         rules: PathRules = PathRules(ignore: .empty)) -> Classified? {
         func has(_ f: Int) -> Bool { flags & FSEventStreamEventFlags(f) != 0 }
         let comps = relativePath.split(separator: "/").map(String.init)
         let lost = has(kFSEventStreamEventFlagMustScanSubDirs) || has(kFSEventStreamEventFlagUserDropped)
             || has(kFSEventStreamEventFlagKernelDropped)
-        if has(kFSEventStreamEventFlagRootChanged) { return Classified(ref: FileRef(relativePath: ""), sidecar: false) }
+        let everything = Classified(ref: FileRef(relativePath: ""), sidecar: false)
+        if has(kFSEventStreamEventFlagRootChanged) { return everything }
 
         if comps.first == ".flamingo" {
-            guard !lost, comps.count >= 3, comps[1] == "notes", !has(kFSEventStreamEventFlagItemIsDir),
+            if lost { return comps.count == 1 || comps[1] == "notes" ? everything : nil }   // sidecar edits may be lost
+            guard comps.count >= 3, comps[1] == "notes", !has(kFSEventStreamEventFlagItemIsDir),
                   !comps.dropFirst(2).contains(where: { $0.hasPrefix(".") }),
                   comps.last!.hasSuffix(".md"), !metadataOnly(flags) else { return nil }
             let target = comps.dropFirst(2).joined(separator: "/").dropLast(3)
             return target.isEmpty ? nil : Classified(ref: FileRef(relativePath: String(target)), sidecar: true)
         }
+        if comps == [IgnoreRules.fileName] { return metadataOnly(flags) ? nil : everything }   // new rules: rescan
         if comps.contains(where: { $0.hasPrefix(".") || VaultScanner.ignoredNames.contains($0) }) { return nil }
+        if let first = comps.first, VaultScanner.rootOnlyIgnoredNames.contains(first) { return nil }
         if lost { return Classified(ref: FileRef(relativePath: comps.joined(separator: "/")), sidecar: false) }
         if metadataOnly(flags) { return nil }
 
@@ -184,14 +215,16 @@ public final class VaultWatcher: @unchecked Sendable {
                !(has(kFSEventStreamEventFlagItemCreated) || has(kFSEventStreamEventFlagItemRemoved) || has(kFSEventStreamEventFlagItemRenamed)) {
                 return nil
             }
-            return Classified(ref: FileRef(relativePath: sub), sidecar: false)
+            return rules.ignore.isIgnored(sub, isDirectory: false) ? nil : Classified(ref: FileRef(relativePath: sub), sidecar: false)
         }
         if has(kFSEventStreamEventFlagItemIsDir),
            !(has(kFSEventStreamEventFlagItemCreated) || has(kFSEventStreamEventFlagItemRemoved) || has(kFSEventStreamEventFlagItemRenamed)) {
             return nil
         }
         if comps.isEmpty { return nil }
-        return Classified(ref: FileRef(relativePath: comps.joined(separator: "/")), sidecar: false)
+        let path = comps.joined(separator: "/")
+        if rules.ignore.isIgnored(path, isDirectory: has(kFSEventStreamEventFlagItemIsDir)) { return nil }
+        return Classified(ref: FileRef(relativePath: path), sidecar: false)
     }
 
     private static func metadataOnly(_ flags: FSEventStreamEventFlags) -> Bool {

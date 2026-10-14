@@ -16,7 +16,7 @@ usage: flamingo-index <vault> [options]
   --backlinks <path>  comments elsewhere that link to <path>
   --text <path>       the indexed text of one file
   --graph             node and edge counts by kind
-  --bench             reindex from scratch, then time searches
+  --bench             re-extract everything, then time searches
   --watch             keep running and apply changes as they happen
   --no-reindex        query the existing index as is
   --force             re-extract every file, changed or not
@@ -68,7 +68,7 @@ while i < args.count {
     case "--bench": bench = true
     case "--recent", "--graph": actions.append((a, nil))
     case "--limit":
-        guard i + 1 < args.count, let n = Int(args[i + 1]) else { fail("--limit needs a number") }
+        guard i + 1 < args.count, let n = Int(args[i + 1]), n >= 0 else { fail("--limit needs a number ≥ 0") }
         limit = n; i += 1
     default:
         if a.hasPrefix("--") { fail("unknown option \(a)\n\n\(usage)") }
@@ -89,10 +89,9 @@ let vault = Vault(root: URL(fileURLWithPath: vaultPath))
 
 if bench {
     do {
-        let db = vault.stateDir.appendingPathComponent("index.sqlite").path
-        for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: db + suffix) }
+        // Forced rather than deleting index.sqlite, which the app may have open.
         let fresh = try IndexStore(vault: vault)
-        try fresh.reindex()
+        try fresh.reindex(force: true)
         let r = fresh.lastReindex!
         print("reindex: \(r.scanned) files, \(r.extracted) extracted in \(fmt(r.seconds, 2))s (\(fmt(Double(r.scanned) / max(r.seconds, 0.001), 0)) files/s)")
         let words = try fresh.indexedFiles().compactMap { ref -> String? in

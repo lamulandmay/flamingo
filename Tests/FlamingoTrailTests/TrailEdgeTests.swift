@@ -117,8 +117,11 @@ final class TrailEdgeTests: XCTestCase {
         XCTAssertNil(weight(e, "f04.md", "f09.md"))
         XCTAssertNil(weight(e, "f01.md", "f09.md"))
         XCTAssertNil(weight(e, "f02.md", "f05.md"))
-        // 19 consecutive + C(5,2) commented pairs, minus the 4 consecutive ones among f05…f09.
-        XCTAssertEqual(e.count, 19 + 10 - 4)
+        // 19 consecutive opens, plus f19 → f00 (the user went back to comment on f00; the
+        // comments then walk f00…f09 again, already consecutive), plus C(5,2) commented pairs,
+        // minus the 4 consecutive ones among f05…f09.
+        XCTAssertNotNil(weight(e, "f00.md", "f19.md"))
+        XCTAssertEqual(e.count, 19 + 1 + 10 - 4)
     }
 
     // MARK: Weights
@@ -207,5 +210,20 @@ final class TrailEdgeTests: XCTestCase {
                 XCTAssertTrue(top.contains(key) || otherTop.contains(key), key)
             }
         }
+    }
+
+    func testConsecutiveFollowsVisitOrderNotFirstAppearance() {
+        // Back to the hub between every other file: the hub links to each, the others don't link.
+        var stream: [TrailEvent] = []
+        var t: TimeInterval = 0
+        for d in 1...6 {
+            stream.append(ev(.opened, t, file: "hub.md")); t += 30
+            stream.append(ev(.opened, t, file: "d\(d).md")); t += 30
+        }
+        let e = edges(stream)
+        assertWellFormed(e)
+        for d in 1...6 { XCTAssertNotNil(weight(e, "d\(d).md", "hub.md"), "d\(d) – hub") }
+        XCTAssertNil(weight(e, "d1.md", "d2.md"))
+        XCTAssertEqual(e.count, 6)
     }
 }

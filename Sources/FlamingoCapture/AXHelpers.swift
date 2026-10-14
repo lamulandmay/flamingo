@@ -17,6 +17,7 @@ enum AXFrontmost {
         AXUIElementSetMessagingTimeout(app, 0.5)
         guard let w = element(app, kAXFocusedWindowAttribute) ?? element(app, kAXMainWindowAttribute)
                 ?? (copy(app, kAXWindowsAttribute) as? [AXUIElement])?.first else { return nil }
+        AXUIElementSetMessagingTimeout(w, 0.5)
         var frame: CGRect?
         if let pos = point(w, kAXPositionAttribute), let size = size(w, kAXSizeAttribute) {
             frame = appKitFrame(axOrigin: pos, size: size, primaryHeight: CGDisplayBounds(CGMainDisplayID()).height)

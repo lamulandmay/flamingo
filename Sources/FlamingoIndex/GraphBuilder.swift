@@ -7,30 +7,39 @@ extension IndexStore {
     /// Nodes are every indexed file, every sidecar target whose file is gone, and every
     /// wikilink target that resolves to nothing (so each link in each sidecar is an edge).
     /// `link` edges point from the commented file to the linked one; weight is the number
-    /// of comments making that link. `extraEdges` between known nodes are merged in.
+    /// of comments making that link. Wikilinks in the body of Markdown notes are edges from
+    /// the note, weight 1, as in Obsidian. `extraEdges` between known nodes are merged in.
     public func buildGraph(extraEdges: [Graph.Edge] = []) throws -> Graph {
-        let (paths, counts, linking) = try read { db in
+        try requireVault()   // never recreate `.flamingo` in a folder that was moved away
+        let (paths, counts, linking) = try read(snapshot: true) { db in
             (try db.query("SELECT path FROM files ORDER BY path") { $0.string(0) },
              try db.query("SELECT path, count(*) FROM comments GROUP BY path") { ($0.string(0), $0.int(1)) },
-             try db.query("SELECT path, text FROM comments WHERE instr(text, '[[') > 0 ORDER BY rowid") { ($0.string(0), $0.string(1)) })
+             try db.query("SELECT path, text FROM comments WHERE instr(text, '[[') > 0 ORDER BY rowid") { ($0.string(0), $0.string(1)) }
+             + db.query("""
+                SELECT s.path, group_concat(coalesce(s.title, '') || char(10) || s.text, char(10)) FROM sections s
+                JOIN files f ON f.path = s.path
+                WHERE f.ext IN ('md', 'markdown') AND (instr(s.text, '[[') > 0 OR instr(s.title, '[[') > 0)
+                GROUP BY s.path ORDER BY s.path
+                """) { ($0.string(0), $0.string(1)) })
         }
         var nodes: [String: Graph.Node] = [:]
         for p in paths { nodes[p] = Self.node(p) }
         for (p, n) in counts { nodes[p, default: Self.node(p)].commentCount = n }
 
-        var resolver = LinkResolver(vault: vault, paths: paths)
-        var unresolved: [String: String] = [:]   // lowercased target → first spelling seen
+        let resolver = LinkResolver(paths: paths)
+        // Unresolved targets differing only in case are one node, spelled the same every build.
+        var spellings: [String: String] = [:]
+        for (_, text) in linking {
+            for target in Wikilink.parse(text) where resolver.resolve(target, from: "") == nil {
+                spellings[target.lowercased()] = min(spellings[target.lowercased()] ?? target, target)
+            }
+        }
         var weights: [EdgeKey: Double] = [:]
         for (source, text) in linking {
             var linked = Set<String>()
             for target in Wikilink.parse(text) {
-                var dest = resolver.resolve(target, from: source)
-                if dest == nil {
-                    let spelled = unresolved[target.lowercased(), default: target]
-                    unresolved[target.lowercased()] = spelled
-                    dest = spelled
-                }
-                guard let dest, dest != source, linked.insert(dest).inserted else { continue }
+                let dest = resolver.resolve(target, from: source) ?? spellings[target.lowercased()] ?? target
+                guard dest != source, linked.insert(dest).inserted else { continue }
                 if nodes[dest] == nil { nodes[dest] = Self.node(dest) }
                 weights[EdgeKey(source: source, target: dest, kind: .link), default: 0] += 1
             }
@@ -53,13 +62,13 @@ extension IndexStore {
     /// Comments on other files whose wikilinks resolve to `ref`, newest first.
     public func backlinks(to ref: FileRef) throws -> [(FileRef, Comment)] {
         let stem = (ref.name as NSString).deletingPathExtension
-        let rows = try read { db in
+        let rows = try read(snapshot: true) { db in
             try db.query("""
                 SELECT path, id, ts, anchor_kind, anchor_value, text FROM comments
                 WHERE instr(text, '[[') > 0 ORDER BY ts DESC, rowid DESC
                 """) { (path: $0.string(0), comment: Self.comment($0, 1)) }
         }
-        var resolver = LinkResolver(vault: vault, paths: try indexedPaths())
+        let resolver = LinkResolver(paths: try indexedPaths())
         return rows.compactMap { row -> (FileRef, Comment)? in
             guard row.path != ref.relativePath, row.comment.text.range(of: stem, options: .caseInsensitive) != nil else { return nil }
             let hits = Wikilink.parse(row.comment.text).contains {
@@ -81,29 +90,15 @@ struct EdgeKey: Hashable {
     var kind: Graph.Edge.Kind
 }
 
-/// `Wikilink.resolve`, preferring a match in the linking file's own folder, memoized.
+/// `Wikilink.Resolver` over the indexed files, by path. The resolver's rules are plan 02's:
+/// path, then basename, then case-insensitive; ties go to the linking file's own folder.
 struct LinkResolver {
-    let vault: Vault
-    let all: [FileRef]
-    let exact: Set<String>
-    let byFolder: [String: [FileRef]]
-    private var memo: [String: String?] = [:]
+    private let resolver: Wikilink.Resolver
 
-    init(vault: Vault, paths: [String]) {
-        self.vault = vault
-        all = paths.map(FileRef.init(relativePath:))
-        exact = Set(paths)
-        byFolder = Dictionary(grouping: all) { ($0.relativePath as NSString).deletingLastPathComponent }
-    }
+    init(paths: [String]) { resolver = Wikilink.Resolver(candidates: paths.map(FileRef.init(relativePath:))) }
 
-    mutating func resolve(_ target: String, from source: String) -> String? {
-        if exact.contains(target) { return target }
-        let folder = (source as NSString).deletingLastPathComponent
-        let key = folder + "\u{0}" + target
-        if let hit = memo[key] { return hit }
-        let local = byFolder[folder].flatMap { Wikilink.resolve(target, in: vault, candidates: $0) }
-        let found = (local ?? Wikilink.resolve(target, in: vault, candidates: all))?.relativePath
-        memo[key] = found
-        return found
+    /// `source` is the linking file's path; `""` when there is none.
+    func resolve(_ target: String, from source: String) -> String? {
+        (source.isEmpty ? resolver.resolve(target) : resolver.resolve(target, from: FileRef(relativePath: source)))?.relativePath
     }
 }

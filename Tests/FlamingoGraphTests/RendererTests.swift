@@ -94,11 +94,13 @@ final class RendererTests: XCTestCase {
         var kept: [CGRect] = []
         var slow: [Int] = []
         for c in candidates {
-            let r = LabelLayout.rect(for: c, gap: 2)
-            let probe = r.insetBy(dx: -2, dy: -2)
-            if kept.contains(where: { LabelPlacer.overlaps(probe, $0) }) { continue }
-            kept.append(r)
-            slow.append(c.node)
+            for r in LabelLayout.rects(center: c.center, radius: c.radius, size: c.size, gap: 2) {
+                let probe = r.insetBy(dx: -2, dy: -2)
+                if kept.contains(where: { LabelPlacer.overlaps(probe, $0) }) { continue }
+                kept.append(r)
+                slow.append(c.node)
+                break
+            }
         }
         XCTAssertEqual(fast, slow, "spatial hash must agree with the O(n^2) definition")
     }
@@ -110,7 +112,17 @@ final class RendererTests: XCTestCase {
         let obstacles = [c0, c1].map { LabelLayout.Obstacle(node: $0.node, center: $0.center, radius: $0.radius) }
 
         let asZoom = LabelLayout.place([c0], gap: 2, padding: 2, priorityCount: 0, obstacles: obstacles)
-        XCTAssertTrue(asZoom.isEmpty, "a zoom label must not cover another node")
+        XCTAssertEqual(asZoom.count, 1)
+        let moved = try! XCTUnwrap(asZoom.first?.rect)
+        XCTAssertFalse(moved.intersects(LabelLayout.obstacleRect(center: c1.center, radius: c1.radius)),
+                       "a zoom label must not cover another node")
+        XCTAssertLessThanOrEqual(moved.maxY, c0.center.y - c0.radius, "blocked below, it goes above")
+
+        // Boxed in on every side, it gives up.
+        let walls = [CGPoint(x: 100, y: 87), CGPoint(x: 150, y: 100), CGPoint(x: 50, y: 100)].enumerated().map {
+            LabelLayout.Obstacle(node: 2 + $0.offset, center: $0.element, radius: 4)
+        }
+        XCTAssertTrue(LabelLayout.place([c0], gap: 2, padding: 2, priorityCount: 0, obstacles: obstacles + walls).isEmpty)
 
         let asPriority = LabelLayout.place([c0], gap: 2, padding: 2, priorityCount: 1, obstacles: obstacles)
         XCTAssertEqual(asPriority.map(\.node), [0], "selected/hovered labels always show")

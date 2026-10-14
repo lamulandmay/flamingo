@@ -123,4 +123,20 @@ final class VaultWatcherTests: XCTestCase {
         try "x".write(to: dir.appendingPathComponent(".flamingo/index.sqlite"), atomically: true, encoding: .utf8)
         wait(for: [none], timeout: 1.5)
     }
+
+    func testIgnoreRulesAndRescans() {
+        let rules = PathRules(ignore: IgnoreRules(text: "*.log\nbuild/\n"))
+        func c(_ p: String, _ f: FSEventStreamEventFlags) -> VaultWatcher.Classified? {
+            VaultWatcher.classify(relativePath: p, flags: f, rules: rules)
+        }
+        XCTAssertEqual(c(".flamingoignore", modified)?.ref.relativePath, "")
+        XCTAssertNil(c("debug.log", modified))
+        XCTAssertNil(c("build/out.txt", modified))
+        XCTAssertNil(c("Library/Preferences/x.plist", modified))
+        XCTAssertEqual(c("proj/Library/notes.txt", modified)?.ref.relativePath, "proj/Library/notes.txt")
+        XCTAssertEqual(c("notes.txt", modified)?.ref.relativePath, "notes.txt")
+        let dropped = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)
+        XCTAssertEqual(c(".flamingo/notes", dropped)?.ref.relativePath, "", "lost sidecar events mean a rescan")
+    }
 }
+

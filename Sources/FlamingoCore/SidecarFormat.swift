@@ -24,6 +24,11 @@ public struct SidecarDocument: Equatable, Sendable {
     /// The body, in order.
     public private(set) var items: [Item]
 
+    /// `"\n"`, or `"\r\n"` for a note whose first line ended in CR. `render` uses it for
+    /// every line, so a CRLF note written by another editor stays CRLF after Flamingo
+    /// appends to it. Lines are stored without the terminator either way.
+    public var lineTerminator: String = "\n"
+
     public init(frontmatter: [String]? = nil, items: [Item] = []) {
         self.frontmatter = frontmatter
         self.items = items
@@ -138,9 +143,26 @@ public struct SidecarDocument: Equatable, Sendable {
         return c
     }
 
-    /// Appends every item of `other` after this document's items (used when two notes merge).
+    /// Appends `other`'s items after this document's (used when two notes merge). Comments
+    /// identical to one already here are skipped, so merging the same note twice (a crash
+    /// between writing the new note and removing the old one) does not duplicate thoughts.
+    /// A raw line that would read back as a continuation of the preceding comment gets a
+    /// blank line before it.
     public mutating func merge(_ other: SidecarDocument) {
-        items.append(contentsOf: other.items)
+        var keys = Set(comments.map(SidecarDocument.contentKey))
+        for item in other.items {
+            switch item {
+            case .comment(let c):
+                let key = SidecarDocument.contentKey(c)
+                guard keys.insert(key).inserted else { continue }
+                items.append(item)
+            case .raw(let line):
+                if case .comment = items.last, line.unicodeScalars.starts(with: "  ".unicodeScalars) {
+                    items.append(.raw(""))
+                }
+                items.append(item)
+            }
+        }
         normalize()
     }
 
@@ -153,22 +175,51 @@ public struct SidecarDocument: Equatable, Sendable {
             guard case .comment(let c) = items[i] else { continue }
             let ts = SidecarFormat.string(fromTimestamp: c.timestamp)
             let date = SidecarFormat.timestamp(from: ts) ?? c.timestamp
-            let key = ts + "\n" + (c.anchor?.rendered ?? "") + "\n" + c.text
+            var anchor = c.anchor
+            if let a = anchor, a.value.contains(where: \.isNewline) {
+                anchor = FileAnchor(kind: a.kind, value: a.value.map { $0.isNewline ? " " : String($0) }.joined())
+            }
+            let key = ts + "\n" + (anchor?.rendered ?? "") + "\n" + c.text
             let n = seen[key, default: 0]
             seen[key] = n + 1
-            let id = SidecarFormat.stableID(target: t, timestamp: ts, anchor: c.anchor, text: c.text, occurrence: n)
-            if id != c.id || date != c.timestamp {
-                items[i] = .comment(Comment(id: id, timestamp: date, anchor: c.anchor, text: c.text))
+            let id = SidecarFormat.stableID(target: t, timestamp: ts, anchor: anchor, text: c.text, occurrence: n)
+            if id != c.id || date != c.timestamp || anchor != c.anchor {
+                items[i] = .comment(Comment(id: id, timestamp: date, anchor: anchor, text: c.text))
             }
         }
+    }
+
+    /// Timestamp, anchor and text: what makes two comments "the same thought".
+    static func contentKey(_ c: Comment) -> String {
+        SidecarFormat.string(fromTimestamp: c.timestamp) + "\n" + (c.anchor?.rendered ?? "") + "\n" + c.text
     }
 
     private var commentItemIndices: [Int] {
         items.indices.filter { if case .comment = items[$0] { return true } else { return false } }
     }
 
+    /// Item index of the comment with `id`. Ids of identical comments are numbered by
+    /// occurrence, so after one twin is removed the other is renumbered; an id that names a
+    /// vanished higher occurrence of a group still resolves to that group (its last member),
+    /// which keeps ids held by a UI valid while it deletes duplicates one by one.
     private func itemIndex(of id: UUID) -> Int? {
-        items.firstIndex { if case .comment(let c) = $0 { return c.id == id } else { return false } }
+        if let i = items.firstIndex(where: { if case .comment(let c) = $0 { return c.id == id } else { return false } }) {
+            return i
+        }
+        let t = target?.relativePath ?? ""
+        var groups: [String: [Int]] = [:]
+        for (i, item) in items.enumerated() {
+            if case .comment(let c) = item { groups[SidecarDocument.contentKey(c), default: []].append(i) }
+        }
+        for indices in groups.values {
+            guard let last = indices.last, case .comment(let c) = items[last] else { continue }
+            let ts = SidecarFormat.string(fromTimestamp: c.timestamp)
+            for n in indices.count..<(indices.count + 64)
+            where SidecarFormat.stableID(target: t, timestamp: ts, anchor: c.anchor, text: c.text, occurrence: n) == id {
+                return last
+            }
+        }
+        return nil
     }
 }
 
@@ -193,29 +244,51 @@ public struct SidecarDocument: Equatable, Sendable {
 ///   left in the text untouched.
 /// - Lines starting with two spaces directly after a comment are continuation lines.
 /// - Anything else is kept verbatim as a raw line.
-/// - Only trailing whitespace after the timestamp or anchor on an otherwise empty
-///   first line is not preserved; and a file without a final newline gains one.
+/// - Lines are split on LF only (Swift would otherwise treat `\r\n` as one character).
+///   A note whose first line ends in CR is a CRLF note: the CRs are stripped on read and
+///   put back on write (`SidecarDocument.lineTerminator`). Structure is matched on Unicode
+///   scalars, so text that starts with a combining mark still parses.
+///
+/// Known deviations from byte-exactness: trailing whitespace after the timestamp or anchor
+/// on an otherwise empty first line is dropped; a file without a final newline gains one;
+/// a timestamp that falls in the local daylight-saving gap is read as the following hour
+/// and written back that way.
 public enum SidecarFormat {
     public static let timestampFormat = "yyyy-MM-dd HH:mm"
 
-    private static let formatter: DateFormatter = {
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .gregorian)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = .current
-        f.isLenient = false
-        f.dateFormat = timestampFormat
-        return f
+    private static let calendar: Calendar = {
+        var c = Calendar(identifier: .gregorian)
+        c.timeZone = .current
+        return c
     }()
 
     /// `2026-10-14 22:05`, local time.
-    public static func string(fromTimestamp date: Date) -> String { formatter.string(from: date) }
+    public static func string(fromTimestamp date: Date) -> String {
+        let c = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        return String(format: "%04d-%02d-%02d %02d:%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0, c.hour ?? 0, c.minute ?? 0)
+    }
 
-    /// Strict inverse of `string(fromTimestamp:)`: only accepts strings it would itself produce.
+    /// Inverse of `string(fromTimestamp:)`. Accepts exactly `yyyy-MM-dd HH:mm` with a real
+    /// calendar date; a time inside the local daylight-saving gap resolves to the following hour.
     public static func timestamp(from string: String) -> Date? {
-        guard string.count == timestampFormat.count, let d = formatter.date(from: string),
-              formatter.string(from: d) == string else { return nil }
-        return d
+        let s = Array(string.utf8)
+        guard s.count == 16, s[4] == UInt8(ascii: "-"), s[7] == UInt8(ascii: "-"), s[10] == UInt8(ascii: " "), s[13] == UInt8(ascii: ":") else { return nil }
+        func number(_ range: Range<Int>) -> Int? {
+            var n = 0
+            for i in range {
+                guard s[i] >= UInt8(ascii: "0"), s[i] <= UInt8(ascii: "9") else { return nil }
+                n = n * 10 + Int(s[i] - UInt8(ascii: "0"))
+            }
+            return n
+        }
+        guard let year = number(0..<4), let month = number(5..<7), let day = number(8..<10),
+              let hour = number(11..<13), let minute = number(14..<16),
+              (1...12).contains(month), (1...31).contains(day), hour < 24, minute < 60 else { return nil }
+        let comps = DateComponents(year: year, month: month, day: day, hour: hour, minute: minute)
+        guard let date = calendar.date(from: comps) else { return nil }
+        let back = calendar.dateComponents([.year, .month, .day], from: date)
+        guard back.year == year, back.month == month, back.day == day else { return nil }
+        return date
     }
 
     /// The id every parse assigns to a comment with this content. `occurrence` is 0 for the
@@ -230,33 +303,35 @@ public enum SidecarFormat {
         render(SidecarDocument(target: target, id: id, comments: comments))
     }
 
-    /// Serializes a document. Every line ends with `\n`; an empty document renders as `""`.
+    /// Serializes a document. Every line ends with the document's `lineTerminator`; an
+    /// empty document renders as `""`.
     public static func render(_ document: SidecarDocument) -> String {
+        let nl = document.lineTerminator
         var out = ""
         if let fm = document.frontmatter {
-            out += "---\n"
-            for line in fm { out += line; out += "\n" }
-            out += "---\n"
+            out += "---" + nl
+            for line in fm { out += line; out += nl }
+            out += "---" + nl
         }
         for item in document.items {
             switch item {
             case .raw(let line):
-                out += line; out += "\n"
+                out += line; out += nl
             case .comment(let c):
-                out += render(comment: c)
+                out += render(comment: c, lineTerminator: nl)
             }
         }
         return out
     }
 
-    /// One comment as its sidecar lines (each terminated by `\n`).
-    public static func render(comment c: Comment) -> String {
+    /// One comment as its sidecar lines, each terminated by `lineTerminator`.
+    public static func render(comment c: Comment, lineTerminator nl: String = "\n") -> String {
         var out = "- [" + string(fromTimestamp: c.timestamp) + "]"
         if let a = c.anchor { out += " " + a.rendered }
-        let lines = c.text.split(separator: "\n", omittingEmptySubsequences: false)
+        let lines = splitLines(c.text)
         if let first = lines.first, !first.isEmpty { out += " " + first }
-        out += "\n"
-        for line in lines.dropFirst() { out += "  " + line + "\n" }
+        out += nl
+        for line in lines.dropFirst() { out += "  " + line + nl }
         return out
     }
 
@@ -270,13 +345,18 @@ public enum SidecarFormat {
     /// Parses a sidecar note, keeping everything (see the type's rules).
     public static func parseDocument(_ text: String) -> SidecarDocument {
         guard !text.isEmpty else { return SidecarDocument() }
-        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        var lines = splitLines(text)
         if lines.last == "" { lines.removeLast() }
+        var terminator = "\n"
+        if lines.first?.hasSuffix("\r") == true {
+            terminator = "\r\n"
+            lines = lines.map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
+        }
 
         var frontmatter: [String]? = nil
-        var bodyStart = lines.startIndex
-        if lines.first == "---", let close = lines[(lines.startIndex + 1)...].firstIndex(of: "---") {
-            frontmatter = lines[(lines.startIndex + 1)..<close].map(String.init)
+        var bodyStart = 0
+        if lines.first == "---", let close = lines[1...].firstIndex(of: "---") {
+            frontmatter = Array(lines[1..<close])
             bodyStart = close + 1
         }
 
@@ -289,48 +369,74 @@ public enum SidecarFormat {
             if let c = parseCommentStart(line) {
                 flush()
                 current = c
-            } else if var c = current, line.hasPrefix("  ") {
-                c.text += "\n" + line.dropFirst(2)
+            } else if var c = current, line.unicodeScalars.starts(with: "  ".unicodeScalars) {
+                c.text += "\n" + string(line.unicodeScalars.dropFirst(2))
                 current = c
             } else {
                 flush()
-                items.append(.raw(String(line)))
+                items.append(.raw(line))
             }
         }
         flush()
-        return SidecarDocument(frontmatter: frontmatter, items: items)
+        var doc = SidecarDocument(frontmatter: frontmatter, items: items)
+        doc.lineTerminator = terminator
+        return doc
+    }
+
+    /// Splits on the LF scalar only. `Character`-based splitting would treat `\r\n` as one
+    /// character and never split a CRLF file.
+    static func splitLines(_ text: String) -> [String] {
+        var out: [String] = []
+        let scalars = text.unicodeScalars
+        var start = scalars.startIndex
+        var i = start
+        while i < scalars.endIndex {
+            if scalars[i] == "\n" {
+                out.append(string(scalars[start..<i]))
+                i = scalars.index(after: i)
+                start = i
+            } else {
+                i = scalars.index(after: i)
+            }
+        }
+        out.append(string(scalars[start..<scalars.endIndex]))
+        return out
+    }
+
+    private static func string(_ slice: Substring.UnicodeScalarView) -> String {
+        String(String.UnicodeScalarView(slice))
     }
 
     /// `- [2026-10-14 22:05] (slide 7) text` → a comment with the first line of its text.
-    static func parseCommentStart(_ line: Substring) -> Comment? {
-        guard line.hasPrefix("- [") else { return nil }
-        let tsStart = line.index(line.startIndex, offsetBy: 3)
-        guard let close = line[tsStart...].firstIndex(of: "]") else { return nil }
-        let ts = String(line[tsStart..<close])
-        guard let date = timestamp(from: ts) else { return nil }
-        let rest = line[line.index(after: close)...]
+    static func parseCommentStart(_ line: String) -> Comment? {
+        let s = line.unicodeScalars
+        guard s.starts(with: "- [".unicodeScalars) else { return nil }
+        let tsStart = s.index(s.startIndex, offsetBy: 3)
+        guard let close = s[tsStart...].firstIndex(of: "]") else { return nil }
+        guard let date = timestamp(from: string(s[tsStart..<close])) else { return nil }
+        let rest = s[s.index(after: close)...]
         if rest.isEmpty { return Comment(timestamp: date, anchor: nil, text: "") }
         guard rest.first == " " else { return nil }
         let body = rest.dropFirst()
         if let (anchor, text) = parseAnchor(body) {
             return Comment(timestamp: date, anchor: anchor, text: text)
         }
-        return Comment(timestamp: date, anchor: nil, text: String(body))
+        return Comment(timestamp: date, anchor: nil, text: string(body))
     }
 
     /// `(kind value) rest` → the anchor and `rest`; nil if `body` does not start with a known anchor.
-    static func parseAnchor(_ body: Substring) -> (FileAnchor, String)? {
+    static func parseAnchor(_ body: Substring.UnicodeScalarView) -> (FileAnchor, String)? {
         guard body.first == "(" else { return nil }
         let inner = body.dropFirst()
         guard let space = inner.firstIndex(of: " "), space > inner.startIndex,
-              let kind = FileAnchor.Kind(rawValue: String(inner[..<space])) else { return nil }
+              let kind = FileAnchor.Kind(rawValue: string(inner[..<space])) else { return nil }
         let valueStart = inner.index(after: space)
         var from = valueStart
         while let close = inner[from...].firstIndex(of: ")") {
             let next = inner.index(after: close)
-            let value = String(inner[valueStart..<close])
+            let value = string(inner[valueStart..<close])
             if next == inner.endIndex { return (FileAnchor(kind: kind, value: value), "") }
-            if inner[next] == " " { return (FileAnchor(kind: kind, value: value), String(inner[inner.index(after: next)...])) }
+            if inner[next] == " " { return (FileAnchor(kind: kind, value: value), string(inner[inner.index(after: next)...])) }
             from = next
         }
         return nil

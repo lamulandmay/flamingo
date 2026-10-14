@@ -15,13 +15,13 @@ public struct FileAnchor: Hashable, Codable, Sendable {
     public var label: String { "\(kind.rawValue) \(value)" }
 
     /// Parses `"slide 7"`, `"Cell Q3!B12"`, `"time 1:23"`. Kind is case-insensitive;
-    /// the value is the rest of the string, trimmed, and must be non-empty.
+    /// the value is the rest of the string, trimmed, must be non-empty and on one line.
     public init?(parsing text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let space = trimmed.firstIndex(where: { $0.isWhitespace }) else { return nil }
         guard let kind = Kind(rawValue: String(trimmed[..<space]).lowercased()) else { return nil }
         let value = trimmed[space...].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return nil }
+        guard !value.isEmpty, !value.contains(where: \.isNewline) else { return nil }
         self.init(kind: kind, value: value)
     }
 

@@ -6,6 +6,9 @@ public struct IndexError: Error, CustomStringConvertible, Sendable {
     public let code: Int32
     public let message: String
     public var description: String { "sqlite \(code): \(message)" }
+    /// The file isn't a usable database (as opposed to busy, locked, or a disk error).
+    var isCorrupt: Bool { code & 0xff == SQLITE_CORRUPT || code & 0xff == SQLITE_NOTADB }
+    var isBusy: Bool { code & 0xff == SQLITE_BUSY || code & 0xff == SQLITE_LOCKED }
 }
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -15,7 +18,16 @@ protocol SQLBindable {
 }
 
 extension String: SQLBindable {
-    func bind(to stmt: OpaquePointer, at index: Int32) -> Int32 { sqlite3_bind_text(stmt, index, self, -1, SQLITE_TRANSIENT) }
+    /// Explicit byte length, so an embedded NUL can't cut the value short.
+    func bind(to stmt: OpaquePointer, at index: Int32) -> Int32 {
+        var s = self
+        return s.withUTF8 { buf in
+            guard let base = buf.baseAddress, !buf.isEmpty else { return sqlite3_bind_text(stmt, index, "", 0, SQLITE_TRANSIENT) }
+            return base.withMemoryRebound(to: CChar.self, capacity: buf.count) {
+                sqlite3_bind_text(stmt, index, $0, Int32(buf.count), SQLITE_TRANSIENT)
+            }
+        }
+    }
 }
 extension Int: SQLBindable {
     func bind(to stmt: OpaquePointer, at index: Int32) -> Int32 { sqlite3_bind_int64(stmt, index, Int64(self)) }
@@ -58,16 +70,25 @@ final class Database {
         }
     }
 
-    /// Prepared statements are cached by SQL text and reset on reuse.
+    /// Prepared statements are cached by SQL text and reset on reuse. If the cached one is
+    /// mid-query (a row closure running the same SQL), a fresh uncached one is returned.
     func prepare(_ sql: String) throws -> Statement {
-        if let s = cache[sql] { s.reset(); return s }
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v3(handle, sql, -1, UInt32(SQLITE_PREPARE_PERSISTENT), &stmt, nil) == SQLITE_OK, let stmt else {
-            throw lastError
+        if let s = cache[sql] {
+            if !s.busy { s.reset(); return s }
+            return try compile(sql, persistent: false)
         }
-        let s = Statement(stmt, db: self)
+        let s = try compile(sql, persistent: true)
         cache[sql] = s
         return s
+    }
+
+    private func compile(_ sql: String, persistent: Bool) throws -> Statement {
+        var stmt: OpaquePointer?
+        let flags = persistent ? UInt32(SQLITE_PREPARE_PERSISTENT) : 0
+        guard sqlite3_prepare_v3(handle, sql, -1, flags, &stmt, nil) == SQLITE_OK, let stmt else {
+            throw lastError
+        }
+        return Statement(stmt, db: self)
     }
 
     func run(_ sql: String, _ values: (any SQLBindable)?...) throws {
@@ -82,27 +103,35 @@ final class Database {
         try prepare(sql).query(values) { $0.int(0) }.first ?? 0
     }
 
+    /// `BEGIN IMMEDIATE`, or a savepoint when already inside a transaction.
     func transaction<T>(_ body: () throws -> T) throws -> T {
-        try exec("BEGIN IMMEDIATE")
+        let nested = sqlite3_get_autocommit(handle) == 0
+        try exec(nested ? "SAVEPOINT nested" : "BEGIN IMMEDIATE")
         do {
             let result = try body()
-            try exec("COMMIT")
+            try exec(nested ? "RELEASE nested" : "COMMIT")
             return result
         } catch {
-            try? exec("ROLLBACK")
+            try? exec(nested ? "ROLLBACK TO nested; RELEASE nested" : "ROLLBACK")
             throw error
         }
     }
 
-    var userVersion: Int {
-        get { (try? scalarInt("PRAGMA user_version")) ?? 0 }
+    /// A consistent snapshot across several reads (WAL readers see one commit throughout).
+    func snapshot<T>(_ body: () throws -> T) throws -> T {
+        guard sqlite3_get_autocommit(handle) != 0 else { return try body() }
+        try exec("BEGIN DEFERRED")
+        defer { try? exec("COMMIT") }
+        return try body()
     }
-    func setUserVersion(_ v: Int) throws { try exec("PRAGMA user_version = \(v)") }
+
+    func userVersion() throws -> Int { try scalarInt("PRAGMA user_version") }
 }
 
 final class Statement {
     let handle: OpaquePointer
     unowned let db: Database
+    private(set) var busy = false
 
     init(_ handle: OpaquePointer, db: Database) { self.handle = handle; self.db = db }
     deinit { sqlite3_finalize(handle) }
@@ -121,14 +150,16 @@ final class Statement {
     }
 
     func run(_ values: [(any SQLBindable)?]) throws {
-        defer { reset() }
+        busy = true
+        defer { reset(); busy = false }
         try bind(values)
         let rc = sqlite3_step(handle)
         guard rc == SQLITE_DONE || rc == SQLITE_ROW else { throw db.lastError }
     }
 
     func query<T>(_ values: [(any SQLBindable)?], row: (Row) throws -> T) throws -> [T] {
-        defer { reset() }
+        busy = true
+        defer { reset(); busy = false }
         try bind(values)
         var out: [T] = []
         while true {

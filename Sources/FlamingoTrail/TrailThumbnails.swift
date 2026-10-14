@@ -13,6 +13,12 @@ final class TrailThumbnails {
 
     private init() { cache.countLimit = 400 }
 
+    // `missing` only grows by one entry per failed (file, version); trim it if it gets large.
+    private func noteMissing(_ k: String) {
+        if missing.count > 2000 { missing.removeAll() }
+        missing.insert(k)
+    }
+
     func cached(_ url: URL, side: CGFloat) -> NSImage? {
         cache.object(forKey: key(url, side) as NSString)
     }
@@ -34,9 +40,14 @@ final class TrailThumbnails {
         inFlight[k] = task
         let img = await task.value
         inFlight[k] = nil
-        if let img { cache.setObject(img, forKey: k as NSString) } else { missing.insert(k) }
+        if let img { cache.setObject(img, forKey: k as NSString) } else { noteMissing(k) }
         return img
     }
 
-    private func key(_ url: URL, _ side: CGFloat) -> String { "\(Int(side))|\(url.path)" }
+    /// Includes the modification date, so an edited file gets a fresh thumbnail and a file
+    /// that failed once (still being written, say) is tried again once it changes.
+    private func key(_ url: URL, _ side: CGFloat) -> String {
+        let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        return "\(Int(side))|\(modified?.timeIntervalSinceReferenceDate ?? 0)|\(url.path)"
+    }
 }

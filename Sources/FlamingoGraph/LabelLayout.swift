@@ -6,8 +6,9 @@ import CoreGraphics
 /// here in priority order every frame.
 ///
 /// A label sits centered under its node with its top edge `gap` points below the node's screen
-/// radius, so it can never overlap its own node. Placement is greedy: a label is skipped when its
-/// rect, grown by `padding`, overlaps a label placed before it.
+/// radius, so it can never overlap its own node. If that spot is taken it tries over the node,
+/// then right, then left. Placement is greedy: a label is skipped when every spot, grown by
+/// `padding`, overlaps a label placed before it.
 enum LabelLayout {
     struct Candidate: Equatable {
         var node: Int
@@ -49,6 +50,21 @@ enum LabelLayout {
         rect(center: candidate.center, radius: candidate.radius, size: candidate.size, gap: gap)
     }
 
+    /// Where a label may go, in order of preference: under its node, over it, to its right,
+    /// to its left. None of them touch the node. A label that loses the spot under its node to
+    /// a busier neighbor still gets shown somewhere nearby.
+    @inline(__always)
+    static func rects(center: CGPoint, radius: CGFloat, size: CGSize, gap: CGFloat) -> [CGRect] {
+        let below = rect(center: center, radius: radius, size: size, gap: gap)
+        let side = radius + gap + 1
+        return [
+            below,
+            CGRect(x: below.minX, y: center.y - radius - gap - size.height, width: size.width, height: size.height),
+            CGRect(x: center.x + side, y: center.y - size.height / 2, width: size.width, height: size.height),
+            CGRect(x: center.x - side - size.width, y: center.y - size.height / 2, width: size.width, height: size.height),
+        ]
+    }
+
     /// Greedy placement, the same procedure the renderer runs each frame.
     ///
     /// `candidates` must already be in priority order (first wins). The first `priorityCount`
@@ -64,9 +80,10 @@ enum LabelLayout {
             if k == priorityCount {
                 for o in obstacles { placer.insertObstacle(obstacleRect(center: o.center, radius: o.radius), owner: o.node) }
             }
-            let r = rect(for: c, gap: gap)
-            if let b = bounds, !LabelPlacer.overlaps(r, b) { continue }
-            if placer.tryPlace(r, padding: padding, owner: c.node) { out.append(Placement(node: c.node, rect: r)) }
+            for r in rects(center: c.center, radius: c.radius, size: c.size, gap: gap) {
+                if let b = bounds, !LabelPlacer.overlaps(r, b) { continue }
+                if placer.tryPlace(r, padding: padding, owner: c.node) { out.append(Placement(node: c.node, rect: r)); break }
+            }
         }
         return out
     }

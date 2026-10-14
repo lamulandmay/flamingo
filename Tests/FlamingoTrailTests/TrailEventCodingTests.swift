@@ -156,4 +156,10 @@ final class TrailEventCodingTests: XCTestCase {
         let noID = #"{"at":"2026-10-14T20:05:12Z","kind":"searched","text":"x"}"#
         XCTAssertEqual(try decode(line).id, try decode(noID).id)
     }
+
+    func testAnchorKindIsCaseInsensitiveLikeCore() throws {
+        let line = #"{"at":"2026-10-14T20:05:12Z","kind":"opened","file":"q3.pptx","anchor":"Slide 7"}"#
+        let e = try JSONDecoder().decode(TrailEvent.self, from: Data(line.utf8))
+        XCTAssertEqual(e.anchor, FileAnchor(kind: .slide, value: "7"))
+    }
 }

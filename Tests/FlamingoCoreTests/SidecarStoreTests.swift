@@ -158,7 +158,7 @@ final class SidecarStoreTests: XCTestCase {
         try store.append(Comment(text: "b"), to: b)
         let orphan = FileRef(relativePath: "gone/c.docx")
         try store.append(Comment(text: "c"), to: orphan)
-        try "---\ntarget: hidden\n---\n".write(to: tv.vault.notesDir.appendingPathComponent(".hidden.md"), atomically: true, encoding: .utf8)
+        try "leftover".write(to: tv.vault.notesDir.appendingPathComponent(".flamingo-abcd1234.tmp"), atomically: true, encoding: .utf8)
         try "not a note".write(to: tv.vault.notesDir.appendingPathComponent("stray.txt"), atomically: true, encoding: .utf8)
         let all = try store.all()
         XCTAssertEqual(Set(all.keys), [a, b, orphan])
