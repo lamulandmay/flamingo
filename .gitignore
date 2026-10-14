@@ -6,5 +6,6 @@ build/
 # Flamingo state is only committed for the demo vault, and only the hand-made parts.
 fixtures/vault/.flamingo/index.sqlite*
 fixtures/vault/.flamingo/graph.json
+fixtures/vault/.flamingo/graph-layout.json
 docs/screens/*.tmp.png
 __pycache__/

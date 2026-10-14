@@ -52,6 +52,7 @@ Everything Flamingo knows lives in `<vault>/.flamingo/`, as files you can read w
   trail-names.json                      names you gave your thought chains
   index.sqlite                          full-text index (rebuildable)
   graph.json                            links and trail edges (rebuildable)
+  graph-layout.json                     where you left the graph's nodes
 ```
 
 A thought looks like this:
@@ -60,8 +61,9 @@ A thought looks like this:
 - [2026-10-13 14:11] (slide 7) Pricing contradicts [[q3-model.xlsx]]. The model still carries Arc at $229.
 ```
 
-Delete `.flamingo/` and your files are exactly as they were. File identity is kept in an
-extended attribute (`com.flamingo.id`), so thoughts follow a file when you rename it.
+Flamingo never changes a file's contents. Its one mark on a file is an extended attribute,
+`com.flamingo.id`, holding an id. That id lets thoughts follow a file when you rename or move
+it, even while Flamingo is open. Delete `.flamingo/` and everything else Flamingo knew is gone.
 
 ## Obsidian
 
