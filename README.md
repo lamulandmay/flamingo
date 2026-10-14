@@ -26,8 +26,9 @@ decision builds itself without you typing the links. It never writes into your f
 
 ## Build and run
 
-Requires macOS 14 or later and Xcode (the scripts point `DEVELOPER_DIR` at Xcode-beta; edit
-`scripts/env.sh` if yours lives elsewhere). There are no dependencies to install.
+Requires macOS 14 or later and Xcode, not just the Command Line Tools. `scripts/env.sh` finds
+Xcode-beta or Xcode in `/Applications`; set `DEVELOPER_DIR` to use another. There are no
+dependencies to install.
 
 ```
 make demo      # build, copy the demo vault to a temp folder, open it

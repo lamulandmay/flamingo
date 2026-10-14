@@ -22,6 +22,7 @@ to the bottom. Screens are in `docs/screens/`.
 - [ ] (04) Heads-up: Quick Look thumbnailing of any `.usdz` (ours, and Apple's `shaderball.usdz`) never returns from `qlmanage -t`. Put a timeout on usdz thumbnails and fall back to the glyph.
 
 ## Working
+- A fresh `git clone` followed by `make demo` builds in about 9s, launches the clone's own binary, and opens Kestrel Works with comments in the rail (pass 3).
 - Build is green. All 7 test bundles pass: Core, Extract, Index, Graph, Trail, Capture, Ask.
 - The demo opens the vault straight into Files mode. pptx previews render, and the rail shows each comment with a time, an anchor chip and coral links.
 - ⌘⇧C → type → Return appends to `.flamingo/notes/decks/arc-launch-plan.pptx.md` in the contract format, records a `commented` trail event, and the rail updates immediately. See `docs/screens/capture.png`.
