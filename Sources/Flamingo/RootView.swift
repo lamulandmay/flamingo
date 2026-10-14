@@ -27,9 +27,9 @@ struct RootView: View {
                     HStack(spacing: 0) {
                         content
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        if state.railVisible {
+                        if state.railShown {
                             VHairline()
-                            Rail()
+                            Rail(file: state.selected)
                                 .frame(width: Theme.Size.rail)
                                 .transition(.move(edge: .trailing))
                         }
@@ -99,7 +99,7 @@ struct TopBar: View {
                     .disabled(state.vault == nil)
                     .opacity(state.vault == nil ? Theme.Opacity.disabled : 1)
                 Spacer()
-                IconButton("sidebar.right", help: state.railVisible ? "Hide Comments" : "Show Comments") {
+                IconButton("sidebar.right", help: state.railShown ? "Hide Comments" : "Show Comments") {
                     state.toggleRail()
                 }
             }
@@ -165,21 +165,32 @@ struct SidebarDivider: View {
     }
 }
 
-/// The comments rail for the selected file.
+/// The comments rail for one file, with the file's neighbourhood beneath it.
+/// `file` is fixed when the view is built, so an edit that commits while the selection is
+/// already moving still lands on the file it was made on.
 struct Rail: View {
     @EnvironmentObject var state: AppState
+    let file: FileRef?
 
     var body: some View {
-        CommentsRail(
-            comments: state.comments,
-            onJump: { state.jumpToAnchor($0) },
-            onEdit: { c in if let f = state.selected { state.updateComment(c, in: f) } },
-            onDelete: { c in if let f = state.selected { state.deleteComment(c, from: f) } }
-        )
-        .onOpenLink { state.openLink($0) }
-        .onRestore { state.restoreComment($0) }
-        .id(state.selected)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            CommentsRail(
+                comments: state.comments,
+                onJump: { state.jumpToAnchor($0) },
+                onEdit: { c in if let file { state.updateComment(c, in: file) } },
+                onDelete: { c in if let file { state.deleteComment(c, from: file) } }
+            )
+            .onOpenLink { state.openLink($0) }
+            .onRestore { c in state.restoreComment(c, to: file) }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let file, state.graph.nodes.contains(where: { $0.id == file.relativePath }) {
+                Hairline()
+                LocalGraphView(graph: state.graph, center: file, depth: 1) { state.jump(to: $0, anchor: nil) }
+                    .frame(height: 220)
+                    .clipped()
+            }
+        }
+        .id(file)
         .background(Theme.Color.bg)
     }
 }

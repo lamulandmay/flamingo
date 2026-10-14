@@ -118,10 +118,10 @@ enum MainMenu {
     static func refreshRecents() {
         guard let menu = recentMenu else { return }
         menu.removeAllItems()
-        let recents = Defaults.recentVaults
-        for path in recents {
+        let recents = Defaults.recentVaultTitles()
+        for (path, title) in recents {
             let url = URL(fileURLWithPath: path)
-            let item = NSMenuItem(title: url.lastPathComponent, action: #selector(AppDelegate.openRecent(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: title, action: #selector(AppDelegate.openRecent(_:)), keyEquivalent: "")
             item.representedObject = url
             item.toolTip = url.path
             let icon = NSWorkspace.shared.icon(forFile: path)
@@ -157,7 +157,7 @@ extension AppDelegate: NSMenuItemValidation {
     @objc func openExternally(_ sender: Any?) { state.openExternally() }
     @objc func revealInFinder(_ sender: Any?) { state.revealInFinder() }
     @objc func copyPath(_ sender: Any?) { state.copyPath() }
-    @objc func reindex(_ sender: Any?) { state.reindex() }
+    @objc func reindex(_ sender: Any?) { state.reindex(force: true) }
     @objc func setMode(_ sender: NSMenuItem) {
         if let m = AppState.Mode(rawValue: sender.tag) { state.mode = m }
     }
@@ -177,7 +177,7 @@ extension AppDelegate: NSMenuItemValidation {
             item.state = item.tag == state.mode.rawValue ? .on : .off
             return hasVault
         case #selector(toggleRail(_:)):
-            item.state = state.railVisible ? .on : .off
+            item.state = state.railShown ? .on : .off
             return true
         case #selector(toggleGlobalCapture(_:)):
             item.state = state.captureGlobal ? .on : .off

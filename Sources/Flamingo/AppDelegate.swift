@@ -11,6 +11,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let state = AppState()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // QA hook: `-FlamingoAppearance dark|light` pins the appearance for screenshots.
+        if let a = UserDefaults.standard.string(forKey: "FlamingoAppearance") {
+            NSApp.appearance = NSAppearance(named: a == "dark" ? .darkAqua : .aqua)
+        }
         Extract.registerDefaults()
         MainMenu.install()
         AppIcon.installFallbackIfNeeded()
@@ -40,6 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.delegate = self
         window = w
         state.hostWindow = w
+        state.windowWidth = w.frame.width
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
@@ -70,7 +75,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.session?.stop()
     }
 
+    func windowDidResize(_ notification: Notification) {
+        if let w = window, state.windowWidth != w.frame.width { state.windowWidth = w.frame.width }
+    }
+
+    /// Keyboard focus starts in the sidebar, but a field or preview the user clicked keeps it.
     func windowDidBecomeKey(_ notification: Notification) {
+        guard let w = window, w.firstResponder === w || w.firstResponder === w.contentView else { return }
         state.focusSidebar?()
     }
 }

@@ -67,6 +67,14 @@ final class AppState: ObservableObject {
     /// `nil` when no reindex is running.
     @Published private(set) var indexProgress: Double?
     @Published var railVisible = Defaults.railVisible { didSet { Defaults.railVisible = railVisible } }
+    /// Set when the user shows the rail on a window too narrow to show it by itself.
+    @Published private(set) var railPinned = false
+    /// Tracked by the app delegate; the rail hides itself below `narrowWindow` unless pinned.
+    @Published var windowWidth: CGFloat = 1200
+    static let narrowWindow: CGFloat = 1100
+
+    /// What the layout actually shows: the user's choice, unless the window is too narrow.
+    var railShown: Bool { railVisible && (windowWidth >= AppState.narrowWindow || railPinned) }
     @Published var sidebarWidth = Defaults.sidebarWidth { didSet { Defaults.sidebarWidth = sidebarWidth } }
     @Published private(set) var jumpRequest: JumpRequest?
     @Published private(set) var revealRequest: RevealRequest?
@@ -260,7 +268,9 @@ final class AppState: ObservableObject {
             openedTask?.cancel()
             return
         }
-        if recordInHistory { history.push(History.Entry(file: ref, anchor: pendingAnchor)) }
+        if recordInHistory {
+            history.push(History.Entry(file: ref, anchor: pendingAnchor, transient: selectionFromSidebar))
+        }
         if let a = pendingAnchor { jumpToAnchor(a) }
         if !selectionFromSidebar { revealRequest = RevealRequest(file: ref) }
         Task { await refreshComments() }
@@ -351,11 +361,19 @@ final class AppState: ObservableObject {
     // MARK: Modes
 
     private func modeChanged() {
-        if mode == .graph, graphStale { Task { await refreshGraph() } }
+        if mode == .graph, graphStale { graphTask?.cancel(); Task { await refreshGraph() } }
     }
 
     func toggleRail() {
-        withAnimation(Theme.Motion.normal) { railVisible.toggle() }
+        withAnimation(Theme.Motion.normal) {
+            if railShown {
+                railVisible = false
+                railPinned = false
+            } else {
+                railVisible = true
+                railPinned = windowWidth < AppState.narrowWindow
+            }
+        }
     }
 
     // MARK: Comments
@@ -426,11 +444,12 @@ final class AppState: ObservableObject {
 
     // MARK: Index, graph, trail
 
-    func reindex() {
+    /// Incremental at launch and after changes; `force` (the menu command) re-extracts everything.
+    func reindex(force: Bool = false) {
         guard let s = session, indexProgress == nil else { return }
         indexProgress = 0
         Task { [weak self] in
-            await s.reindex { [weak self] p in
+            await s.reindex(force: force) { [weak self] p in
                 guard let self, self.session === s else { return }
                 self.indexProgress = p
             }
@@ -445,13 +464,14 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// The graph is rebuilt lazily: now if it is on screen, otherwise next time it is.
+    /// The graph feeds Graph mode and the local graph under the rail, so it is rebuilt
+    /// whenever it goes stale, coalescing bursts; at once when Graph mode is on screen.
     private func markGraphStale() {
         graphStale = true
-        guard mode == .graph else { return }
         graphTask?.cancel()
+        let delay: UInt64 = mode == .graph ? 300_000_000 : 1_500_000_000
         graphTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 600_000_000)
+            try? await Task.sleep(nanoseconds: delay)
             guard !Task.isCancelled else { return }
             await self?.refreshGraph()
         }
@@ -541,7 +561,7 @@ final class AppState: ObservableObject {
             list.append(PaletteCommand(id: m.title.lowercased(), title: m.title, keys: "⌘\(m.rawValue + 1)", symbol: m.symbol, enabled: hasVault) { [weak self] in self?.mode = m })
         }
         list += [
-            PaletteCommand(id: "rail", title: railVisible ? "Hide Comments" : "Show Comments", keys: "⌘⌥I", symbol: "sidebar.right") { [weak self] in self?.toggleRail() },
+            PaletteCommand(id: "rail", title: railShown ? "Hide Comments" : "Show Comments", keys: "⌘⌥I", symbol: "sidebar.right") { [weak self] in self?.toggleRail() },
             PaletteCommand(id: "back", title: "Back", keys: "⌘[", symbol: "chevron.left", enabled: canGoBack) { [weak self] in self?.goBack() },
             PaletteCommand(id: "forward", title: "Forward", keys: "⌘]", symbol: "chevron.right", enabled: canGoForward) { [weak self] in self?.goForward() },
             PaletteCommand(id: "prev", title: "Previous Page", keys: "⌘↑", symbol: "arrow.up", enabled: hasAnchors) { [weak self] in self?.stepAnchor(-1) },
@@ -549,7 +569,7 @@ final class AppState: ObservableObject {
             PaletteCommand(id: "openwith", title: "Open in " + (defaultAppName(for: selected) ?? "Default App"), keys: "⌘↩", symbol: "arrow.up.forward.app", enabled: hasFile) { [weak self] in self?.openExternally() },
             PaletteCommand(id: "reveal", title: "Reveal in Finder", keys: "⌘⇧R", symbol: "finder", enabled: hasFile) { [weak self] in self?.revealInFinder() },
             PaletteCommand(id: "copypath", title: "Copy Path", keys: nil, symbol: "doc.on.doc", enabled: hasFile) { [weak self] in self?.copyPath() },
-            PaletteCommand(id: "reindex", title: "Reindex Vault", keys: nil, symbol: "arrow.clockwise", enabled: hasVault && indexProgress == nil) { [weak self] in self?.reindex() },
+            PaletteCommand(id: "reindex", title: "Reindex Vault", keys: nil, symbol: "arrow.clockwise", enabled: hasVault && indexProgress == nil) { [weak self] in self?.reindex(force: true) },
             PaletteCommand(id: "global", title: captureGlobal ? "Stop Capturing From Other Apps" : "Capture From Other Apps", keys: captureGlobalKeys, symbol: "keyboard") { [weak self] in
                 self?.captureGlobal.toggle()
             },
@@ -557,9 +577,9 @@ final class AppState: ObservableObject {
                 self?.trailEnabled.toggle()
             },
         ]
-        for path in Defaults.recentVaults where path != vault?.root.path {
+        for (path, title) in Defaults.recentVaultTitles() where path != vault?.root.path {
             let url = URL(fileURLWithPath: path)
-            list.append(PaletteCommand(id: "recent:" + path, title: "Open " + url.lastPathComponent, keys: nil, symbol: "clock") { [weak self] in self?.open(url) })
+            list.append(PaletteCommand(id: "recent:" + path, title: "Open " + title, keys: nil, symbol: "clock") { [weak self] in self?.open(url) })
         }
         return list
     }

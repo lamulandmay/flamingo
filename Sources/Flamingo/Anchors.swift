@@ -23,14 +23,6 @@ extension FileAnchor {
         return parts.compactMap { $0 }.reduce(0) { $0 * 60 + $1 }
     }
 
-    /// Short form for chips and the top bar: `page 12`, `slide 7`, `1:23`.
-    var label: String {
-        switch kind {
-        case .time: return value
-        default: return "\(kind.rawValue) \(value)"
-        }
-    }
-
     static func clock(_ seconds: Double) -> String {
         let s = max(0, Int(seconds.rounded(.down)))
         let h = s / 3600, m = (s % 3600) / 60, sec = s % 60

@@ -219,8 +219,9 @@ final class PaletteController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// Empty query: recent files, newest first. Otherwise the best file and command matches
-    /// merged by score; ties go to the shorter name, then alphabetical.
+    /// Empty query: recent files, newest first, or the commands when nothing is recent yet
+    /// (a fresh launch offers Open Vault… and the recent vaults). Otherwise the best file and
+    /// command matches merged by score; ties go to the shorter name, then alphabetical.
     private func commandItems(for query: String, state: AppState) -> [PaletteItem] {
         let q = Fuzzy.Query(query)
         if q.isEmpty {
@@ -231,7 +232,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
                 recents.append(.file(entry.file))
                 if recents.count == Self.recentLimit { break }
             }
-            return recents
+            return recents.isEmpty ? commands.map(PaletteItem.command) : recents
         }
         var scored: [(score: Int, name: String, item: PaletteItem)] = []
         if let table {

@@ -5,6 +5,16 @@ import FlamingoTrail
 import FlamingoAsk
 import FlamingoExtract
 
+/// stderr diagnostics, on when `FLAMINGO_DEBUG` is set in the environment.
+enum Log {
+    static let enabled = ProcessInfo.processInfo.environment["FLAMINGO_DEBUG"] != nil
+    static func debug(_ message: @autoclosure () -> String) {
+        guard enabled else { return }
+        let stamp = String(format: "%.3f", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1000))
+        FileHandle.standardError.write("flamingo \(stamp) \(message())\n".data(using: .utf8)!)
+    }
+}
+
 /// Everything that exists only while a vault is open: the stores, the watcher,
 /// and the queues that keep their work off the main thread. Plan 01 owns.
 @MainActor
@@ -40,7 +50,9 @@ final class VaultSession {
     func stop() {
         isStopped = true
         watcher.onChange = nil
+        watcher.onSidecarChange = nil
         watcher.stop()
+        trail.flush()
     }
 
     // MARK: Queue helpers
@@ -69,16 +81,25 @@ final class VaultSession {
 
     // MARK: Index
 
-    /// Full reindex. `progress` is delivered on the main actor, throttled.
-    func reindex(progress: @escaping @MainActor (Double) -> Void) async {
+    /// Full reindex (`force` re-extracts unchanged files too). `progress` is delivered on
+    /// the main actor, throttled.
+    func reindex(force: Bool = false, progress: @escaping @MainActor (Double) -> Void) async {
         guard let index else { return }
         var last = -1.0
-        try? await onIndex {
-            try index.reindex { p in
-                guard p - last >= 0.01 || p >= 1 else { return }
-                last = p
-                Task { @MainActor in progress(p) }
+        let started = Date()
+        Log.debug("reindex: start")
+        do {
+            try await onIndex {
+                try index.reindex(force: force) { p in
+                    guard p - last >= 0.01 || p >= 1 else { return }
+                    last = p
+                    Log.debug("reindex: \(Int(p * 100))% at \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
+                    Task { @MainActor in progress(p) }
+                }
             }
+            Log.debug("reindex: done in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
+        } catch {
+            Log.debug("reindex: failed after \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \(error)")
         }
     }
 

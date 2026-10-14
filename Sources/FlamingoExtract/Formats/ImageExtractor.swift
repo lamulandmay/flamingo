@@ -5,6 +5,12 @@ import FlamingoCore
 
 /// Images: descriptive metadata (IPTC, TIFF, EXIF, PNG text) plus Vision OCR of the primary image
 /// (a GIF's first frame) when it's larger than an icon. Section-less; `title` is the IPTC object name.
+///
+/// OCR is `.accurate`, the only level that reads CJK, Cyrillic, Arabic, and the rest (`.fast` knows
+/// six Latin-script languages). The first time an executable uses it, Vision compiles its models,
+/// ~12 s on the first image and ~12 s more on the first with text, cached per executable name in
+/// `~/Library/Caches/<name>/com.apple.e5rt.e5bundlecache`. After that an image takes ~0.1 s. Vision
+/// runs one request at a time, so warming up in the background wouldn't let other OCR through.
 public struct ImageExtractor: Extractor {
     public static let extensions: Set<String> = ["png", "jpg", "jpeg", "heic", "heif", "tiff", "tif", "gif", "bmp", "webp"]
     public init() {}

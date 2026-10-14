@@ -6,7 +6,14 @@ struct History {
     struct Entry: Equatable {
         var file: FileRef
         var anchor: FileAnchor?
+        /// When it was pushed and whether it came from scrubbing the sidebar, so a run of
+        /// arrow-key hops collapses into the file the user rested on.
+        var pushedAt = Date()
+        var transient = false
     }
+
+    /// Sidebar hops closer together than this replace the previous hop instead of stacking.
+    static let coalesceWindow: TimeInterval = 0.7
 
     private(set) var entries: [Entry] = []
     private(set) var index: Int = -1
@@ -16,13 +23,20 @@ struct History {
     var canGoBack: Bool { index > 0 }
     var canGoForward: Bool { index >= 0 && index < entries.count - 1 }
 
-    /// Records a new place. Drops any forward entries. Consecutive duplicates collapse.
+    /// Records a new place. Drops any forward entries. Consecutive duplicates collapse, and a
+    /// transient entry that was pushed moments ago is replaced rather than kept.
     mutating func push(_ entry: Entry) {
         if let c = current, c.file == entry.file {
             entries[index].anchor = entry.anchor ?? c.anchor
+            entries[index].transient = false
             return
         }
         if index < entries.count - 1 { entries.removeSubrange((index + 1)...) }
+        if entry.transient, let c = current, c.transient, index > 0,
+           entry.pushedAt.timeIntervalSince(c.pushedAt) < History.coalesceWindow {
+            entries[index] = entry
+            return
+        }
         entries.append(entry)
         if entries.count > cap { entries.removeFirst(entries.count - cap) }
         index = entries.count - 1
