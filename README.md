@@ -7,7 +7,7 @@ thoughts with `[[wikilinks]]`. The graph then shows how your real work connects.
 also records a trail of what you opened, said and searched, so the chain of thought behind a
 decision builds itself without you typing the links. It never writes into your files.
 
-![Flamingo on the demo vault](docs/screens/files.png)
+![Flamingo on the demo vault](docs/screens/graph-dark.png)
 
 ## Keys
 
