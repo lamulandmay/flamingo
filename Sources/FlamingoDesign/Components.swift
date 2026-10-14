@@ -116,6 +116,7 @@ public struct Chip: View {
             .font(mono ? Theme.Font.monoSmall : Theme.Font.small)
             .foregroundStyle(Theme.Color.textSecondary)
             .lineLimit(1)
+            .truncationMode(.middle)
             .padding(.horizontal, 6)
             .frame(height: 18)
             .background(shape.fill(Theme.Color.fill))

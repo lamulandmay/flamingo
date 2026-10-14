@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import FlamingoCore
 import FlamingoDesign
 
@@ -116,7 +117,7 @@ public struct CommentsRail: View {
         if let s = selection, !newSet.contains(s) { selection = nil }
         if let e = editing, !newSet.contains(e) { editing = nil }
         // Anything but the delete itself landing means the undo may target the wrong file.
-        if let d = deletion, newSet != d.expected { endDeletion() }
+        if let d = deletion, newSet.subtracting(hidden) != d.expected { endDeletion() }
         guard !newSet.subtracting(oldSet).isEmpty, let last = rows.last?.id else { return }
         if oldSet.isDisjoint(with: newSet) {
             proxy.scrollTo(last, anchor: .bottom)
@@ -164,7 +165,14 @@ public struct CommentsRail: View {
         selection = c.id
         draft = c.text
         editing = c.id
-        DispatchQueue.main.async { editorFocused = true }
+        DispatchQueue.main.async {
+            editorFocused = true
+            // The field editor selects everything on focus; a thought is appended to, not replaced.
+            DispatchQueue.main.async {
+                guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.string == draft else { return }
+                editor.moveToEndOfDocument(nil)
+            }
+        }
     }
 
     private func commitEdit() {
@@ -190,17 +198,14 @@ public struct CommentsRail: View {
     // MARK: Delete and undo
 
     private func delete(_ c: Comment) {
-        let before = rows
-        if selection == c.id, let i = before.firstIndex(where: { $0.id == c.id }) {
-            let next = i + 1 < before.count ? before[i + 1] : (i > 0 ? before[i - 1] : nil)
-            selection = next?.id
-        }
+        // Nothing stays selected, so a second ⌫ can't take a neighbor past the one-level undo.
+        if selection == c.id { selection = nil }
         if editing == c.id { editing = nil }
         hidden.insert(c.id)
         endDeletion()
         onDelete(c)
         guard restore != nil else { return }
-        let d = RailDeletion(comment: c, expected: Set(comments.map(\.id)).subtracting([c.id]))
+        let d = RailDeletion(comment: c, expected: Set(comments.map(\.id)).subtracting(hidden))
         if let undoManager {
             undoManager.registerUndo(withTarget: d.token) { _ in
                 MainActor.assumeIsolated { undoDeletion(fromUndoManager: true) }
@@ -264,7 +269,7 @@ private enum RailKeys {
 private struct RailDeletion: Equatable {
     let id = UUID()
     let comment: Comment
-    /// The ids the shell should report once the delete lands.
+    /// The visible ids once the delete lands. Any other change ends the undo.
     let expected: Set<UUID>
     /// Undo-manager target, so only this delete's action is removed when it expires.
     let token = RailUndoToken()

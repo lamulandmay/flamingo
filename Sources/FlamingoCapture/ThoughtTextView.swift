@@ -3,13 +3,11 @@ import SwiftUI
 import FlamingoCore
 import FlamingoDesign
 
-/// AppKit mirrors of the `Theme` tokens a text view needs. `Theme.Font` is SwiftUI-only;
-/// these sizes track `Theme.Font.body`.
 enum ThoughtStyle {
-    static let fontSize: CGFloat = 13
     static let maxLines = 8
-    static var font: NSFont { .systemFont(ofSize: fontSize) }
-    static var accent: NSColor { NSColor(Theme.Color.accent) }
+    static var font: NSFont { Theme.NS.body }
+    static var text: NSColor { Theme.NS.text }
+    static var accent: NSColor { Theme.NS.accent }
 }
 
 /// State shared by the text view and the `[[` completion list.
@@ -107,7 +105,7 @@ struct ThoughtTextView: NSViewRepresentable {
         tv.drawsBackground = false
         tv.usesFindBar = false
         tv.font = ThoughtStyle.font
-        tv.textColor = .labelColor
+        tv.textColor = ThoughtStyle.text
         tv.insertionPointColor = ThoughtStyle.accent
         tv.textContainerInset = .zero
         tv.isVerticallyResizable = true
@@ -149,7 +147,7 @@ struct ThoughtTextView: NSViewRepresentable {
         init(_ parent: ThoughtTextView) { self.parent = parent }
 
         var baseAttributes: [NSAttributedString.Key: Any] {
-            [.font: ThoughtStyle.font, .foregroundColor: NSColor.labelColor]
+            [.font: ThoughtStyle.font, .foregroundColor: ThoughtStyle.text]
         }
 
         func textDidChange(_ notification: Notification) { textChanged() }

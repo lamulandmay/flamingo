@@ -70,4 +70,9 @@ enum Schema {
 
     PRAGMA user_version = 1;
     """
+
+    static let v2 = """
+    CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    PRAGMA user_version = 2;
+    """
 }

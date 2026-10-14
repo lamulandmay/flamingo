@@ -160,28 +160,34 @@ final class Retriever {
                                     excluding: Set(sections.map { Self.key($0.file, $0.anchor) }))
         sections.insert(contentsOf: linked, at: min(3, sections.count))
 
-        // Pack.
+        // Pack: comments that match the question, then sections by rank, then comments that only
+        // sit on a matching place or link to one, if there's room.
         var out: [Passage] = []
         var used = 0
         let commentBudget = sections.isEmpty ? budgetTokens : budgetTokens * 45 / 100
-        for (file, c, _) in comments.prefix(40) {
-            let key = "c:\(c.id.uuidString)"
-            guard !seen.contains(key) else { continue }
-            let p = Passage(id: nextID, kind: .comment, file: file, anchor: c.anchor,
-                            text: Self.excerpt(c.text, terms: terms, max: maxCommentChars), timestamp: c.timestamp)
+        func add(_ p: Passage, key: String, within budget: Int) {
+            guard !seen.contains(key) else { return }
             let cost = Self.tokens(p)
-            guard used + cost <= commentBudget else { continue }
-            out.append(p); used += cost; nextID += 1; seen.insert(key)
+            guard used + cost <= budget else { return }
+            out.append(Passage(id: nextID, kind: p.kind, file: p.file, anchor: p.anchor, title: p.title,
+                               text: p.text, timestamp: p.timestamp))
+            used += cost; nextID += 1; seen.insert(key)
+        }
+        func comment(_ file: FileRef, _ c: Comment) -> Passage {
+            Passage(id: 0, kind: .comment, file: file, anchor: c.anchor,
+                    text: Self.excerpt(c.text, terms: terms, max: maxCommentChars), timestamp: c.timestamp)
+        }
+        for r in comments.filter(\.direct).prefix(40) {
+            add(comment(r.file, r.comment), key: "c:\(r.comment.id.uuidString)", within: commentBudget)
         }
         for s in sections {
-            let key = Self.key(s.file, s.anchor)
-            guard !seen.contains(key) else { continue }
             let text = Self.excerpt(s.text, terms: terms, max: maxSectionChars)
             guard !text.isEmpty else { continue }
-            let p = Passage(id: nextID, kind: .section, file: s.file, anchor: s.anchor, title: s.title, text: text)
-            let cost = Self.tokens(p)
-            guard used + cost <= budgetTokens else { continue }
-            out.append(p); used += cost; nextID += 1; seen.insert(key)
+            add(Passage(id: 0, kind: .section, file: s.file, anchor: s.anchor, title: s.title, text: text),
+                key: Self.key(s.file, s.anchor), within: budgetTokens)
+        }
+        for r in comments.filter({ !$0.direct }).prefix(20) {
+            add(comment(r.file, r.comment), key: "c:\(r.comment.id.uuidString)", within: budgetTokens)
         }
         return out
     }
@@ -210,9 +216,11 @@ final class Retriever {
             .map { ($0.hit, $0.score) }
     }
 
+    /// `direct`: the comment matches the question itself. Otherwise it's context: it sits on a
+    /// matching place or links to a matching file.
     private func rankComments(terms: [String], boost: [UUID: Double], hitFiles: Set<FileRef>,
-                              hitPlaces: Set<String>) -> [(file: FileRef, comment: Comment, score: Double)] {
-        var out: [(file: FileRef, comment: Comment, score: Double)] = []
+                              hitPlaces: Set<String>) -> [(file: FileRef, comment: Comment, score: Double, direct: Bool)] {
+        var out: [(file: FileRef, comment: Comment, score: Double, direct: Bool)] = []
         for (file, comments) in allComments {
             for c in comments {
                 let matched = Self.matchCount(terms, in: c.text)
@@ -227,8 +235,7 @@ final class Retriever {
                 if hitFiles.contains(file) { score += 0.5 }
                 if onHit { score += 0.3 }
                 if linksToHit { score += 0.5 }
-                if !direct { score *= 0.5 }
-                out.append((file, c, score))
+                out.append((file, c, score, direct))
             }
         }
         return out.sorted {

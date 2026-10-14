@@ -333,7 +333,9 @@ public final class TrailStore: @unchecked Sendable {
     /// O_APPEND write. If a previous run died mid-line, start on a fresh line so the
     /// damage stays confined to the one corrupted line.
     static func append(_ data: Data, to url: URL) throws {
-        let fd = open(url.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
+        // Read-write, not write-only: the last-byte check below needs `pread`, which fails
+        // with EBADF on an O_WRONLY descriptor. O_APPEND still sends every write to the end.
+        let fd = open(url.path, O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC, 0o644)
         guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         defer { close(fd) }
         var payload = data

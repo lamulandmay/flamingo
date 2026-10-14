@@ -3,8 +3,8 @@ import FlamingoCore
 import FlamingoDesign
 
 enum TrailMetrics {
-    static let header: CGFloat = 26
-    static let gutter: CGFloat = 156
+    static let header: CGFloat = Theme.Size.row
+    static let chevron: CGFloat = 12
     static let rail: CGFloat = 20
     static let dot: CGFloat = 5
     static let thumb: CGFloat = 32
@@ -14,6 +14,14 @@ enum TrailMetrics {
     static let searchMax: CGFloat = 168
     static let searchLink: CGFloat = 16
     static let gap: CGFloat = 6
+
+    /// Wide enough for the longest time range on screen, so the rail is one straight line.
+    static func gutter(for ranges: [String]) -> CGFloat {
+        let widest = ranges.reduce(0) { w, r in
+            max(w, (r as NSString).size(withAttributes: [.font: Theme.NS.monoSmall]).width)
+        }
+        return (chevron + Theme.Space.xs + widest + Theme.Space.m).rounded(.up)
+    }
 }
 
 /// The list: newest session on top, one row each, a hairline rail on the left joining them.
@@ -32,50 +40,62 @@ struct TrailTimeline: View {
     @State private var titles: [UUID: String] = [:]   // set by rename before the store reloads; "" clears
     @State private var editing: UUID?
     @State private var draft = ""
-    @State private var hovered: UUID?
     @FocusState private var focus: Focus?
 
-    private var ordered: [TrailSession] {
-        sessions.sorted { $0.start != $1.start ? $0.start > $1.start : $0.id.uuidString < $1.id.uuidString }
+    private struct Row: Identifiable {
+        var session: TrailSession
+        var range: String
+        var topGap: CGFloat
+        var isFirst: Bool
+        var isLast: Bool
+        var id: UUID { session.id }
+    }
+
+    private func rows(now: Date, calendar: Calendar) -> [Row] {
+        let ordered = sessions.sorted {
+            $0.start != $1.start ? $0.start > $1.start : $0.id.uuidString < $1.id.uuidString
+        }
+        return ordered.enumerated().map { i, s in
+            Row(session: s,
+                range: TrailPresentation.timeRange(start: s.start, end: s.end, now: now, calendar: calendar),
+                topGap: i > 0 && !calendar.isDate(ordered[i - 1].start, inSameDayAs: s.start) ? Theme.Space.l : 0,
+                isFirst: i == 0,
+                isLast: i == ordered.count - 1)
+        }
     }
 
     var body: some View {
-        let rows = ordered
+        let calendar = Calendar.current
+        let rows = rows(now: Date(), calendar: calendar)
         Group {
             if rows.isEmpty {
-                if showsPaused {
-                    Text("Trail paused")
-                        .font(Theme.Font.small)
-                        .foregroundStyle(Theme.Color.textTertiary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    Color.clear
-                }
+                if showsPaused { EmptyState("Trail paused") } else { Color.clear }
             } else {
-                list(rows)
+                list(rows, calendar: calendar)
             }
         }
         .background(Theme.Color.bg)
     }
 
-    private func list(_ rows: [TrailSession]) -> some View {
-        let calendar = Calendar.current
-        let now = Date()
+    private func list(_ rows: [Row], calendar: Calendar) -> some View {
+        let gutter = TrailMetrics.gutter(for: rows.map(\.range))
+        let ordered = rows.map(\.session)
         return ScrollViewReader { proxy in
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(rows.enumerated()), id: \.element.id) { i, s in
+                    ForEach(rows) { row in
+                        let s = row.session
                         SessionRow(
                             session: s,
                             title: title(of: s),
-                            range: TrailPresentation.timeRange(start: s.start, end: s.end, now: now, calendar: calendar),
+                            range: row.range,
+                            gutter: gutter,
                             expanded: isExpanded(s, calendar: calendar),
                             selected: selection == s.id,
-                            hovered: hovered == s.id,
                             editing: editing == s.id,
-                            topGap: i > 0 && !calendar.isDate(rows[i - 1].start, inSameDayAs: s.start) ? Theme.Space.l : 0,
-                            isFirst: i == 0,
-                            isLast: i == rows.count - 1,
+                            topGap: row.topGap,
+                            isFirst: row.isFirst,
+                            isLast: row.isLast,
                             vaultRoot: vaultRoot,
                             draft: $draft,
                             focus: $focus,
@@ -86,10 +106,7 @@ struct TrailTimeline: View {
                             onCommitRename: commitRename,
                             onCancelRename: cancelRename,
                             onResume: { resume(s) },
-                            onOpen: { file, anchor in select(s.id); onOpen(file, anchor) },
-                            onHover: { inside in
-                                if inside { hovered = s.id } else if hovered == s.id { hovered = nil }
-                            }
+                            onOpen: { file, anchor in select(s.id); onOpen(file, anchor) }
                         )
                         .id(s.id)
                     }
@@ -110,7 +127,7 @@ struct TrailTimeline: View {
             if old == .title, new != .title, editing != nil { commitRename() }
         }
         .onKeyPress(keys: [.upArrow, .downArrow, .leftArrow, .rightArrow, .space, .return, .escape]) { press in
-            handle(press.key, rows: rows, calendar: calendar)
+            handle(press.key, ordered: ordered, calendar: calendar)
         }
         .background {
             Button("", action: resumeSelected)
@@ -177,17 +194,16 @@ struct TrailTimeline: View {
         resume(s)
     }
 
-    private func handle(_ key: KeyEquivalent, rows: [TrailSession], calendar: Calendar) -> KeyPress.Result {
+    private func handle(_ key: KeyEquivalent, ordered: [TrailSession], calendar: Calendar) -> KeyPress.Result {
         guard editing == nil else { return .ignored }
-        let ids = rows.map(\.id)
-        let current = selection.flatMap { ids.firstIndex(of: $0) }
-        let session = current.map { rows[$0] }
+        let current = selection.flatMap { id in ordered.firstIndex { $0.id == id } }
+        let session = current.map { ordered[$0] }
         switch key {
         case .downArrow, .upArrow:
-            guard !ids.isEmpty else { return .ignored }
+            guard !ordered.isEmpty else { return .ignored }
             let step = key == .downArrow ? 1 : -1
-            let next = current.map { max(0, min(ids.count - 1, $0 + step)) } ?? 0
-            selection = ids[next]
+            let next = current.map { max(0, min(ordered.count - 1, $0 + step)) } ?? 0
+            selection = ordered[next].id
             return .handled
         case .rightArrow:
             guard let s = session, !isExpanded(s, calendar: calendar) else { return .ignored }
@@ -220,9 +236,9 @@ struct SessionRow: View {
     let session: TrailSession
     let title: String?
     let range: String
+    let gutter: CGFloat
     let expanded: Bool
     let selected: Bool
-    let hovered: Bool
     let editing: Bool
     let topGap: CGFloat
     let isFirst: Bool
@@ -238,14 +254,14 @@ struct SessionRow: View {
     let onCancelRename: () -> Void
     let onResume: () -> Void
     let onOpen: (FileRef, FileAnchor?) -> Void
-    let onHover: (Bool) -> Void
+    @State private var hovered = false
 
     private typealias M = TrailMetrics
 
     var body: some View {
         let stops = TrailPresentation.stops(for: session)
         HStack(alignment: .top, spacing: 0) {
-            gutter
+            gutterView
             Color.clear.frame(width: M.rail, height: M.header)
             VStack(alignment: .leading, spacing: Theme.Space.s) {
                 header(stops)
@@ -261,7 +277,7 @@ struct SessionRow: View {
         .background(alignment: .topLeading) { rail }
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
-        .onHover(perform: onHover)
+        .onHover { hovered = $0 }
         .contextMenu {
             if canResume {
                 Button("Resume", action: onResume).keyboardShortcut("r", modifiers: .command)
@@ -271,24 +287,25 @@ struct SessionRow: View {
         }
     }
 
-    private var gutter: some View {
+    private var gutterView: some View {
         HStack(spacing: Theme.Space.xs) {
             Image(systemName: "chevron.right")
                 .font(Theme.Font.small)
                 .imageScale(.small)
                 .foregroundStyle(Theme.Color.textTertiary)
                 .rotationEffect(.degrees(expanded ? 90 : 0))
-                .frame(width: 12, height: M.header)
+                .frame(width: M.chevron, height: M.header)
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onToggle)
             Text(range)
                 .font(Theme.Font.monoSmall)
                 .foregroundStyle(Theme.Color.textTertiary)
                 .lineLimit(1)
+                .fixedSize()
                 .gesture(TapGesture(count: 2).onEnded(onBeginRename))
                 .simultaneousGesture(TapGesture().onEnded(onSelect))
         }
-        .frame(width: M.gutter, height: M.header, alignment: .leading)
+        .frame(width: gutter, height: M.header, alignment: .leading)
     }
 
     @ViewBuilder
@@ -318,17 +335,9 @@ struct SessionRow: View {
                 }
             }
             if canResume, !editing {
-                Button(action: onResume) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(Theme.Font.small)
-                        .foregroundStyle(Theme.Color.textSecondary)
-                        .frame(width: 20, height: M.header)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("Resume")
-                .opacity(hovered || selected ? 1 : 0)
-                .animation(Theme.Motion.fast, value: hovered || selected)
+                IconButton("arrow.clockwise", help: "Resume", action: onResume)
+                    .opacity(hovered || selected ? 1 : 0)
+                    .animation(Theme.Motion.fast, value: hovered || selected)
             }
         }
     }
@@ -337,7 +346,7 @@ struct SessionRow: View {
     /// that starts at the newest dot and ends at the oldest.
     private var rail: some View {
         let dotY = topGap + M.header / 2
-        let x = M.gutter + M.rail / 2
+        let x = gutter + M.rail / 2
         return ZStack(alignment: .topLeading) {
             if selected {
                 RoundedRectangle(cornerRadius: Theme.Radius.s)
@@ -347,11 +356,10 @@ struct SessionRow: View {
                     .padding(.horizontal, -Theme.Space.xs)
             }
             VStack(spacing: 0) {
-                Rectangle().fill(isFirst ? Color.clear : Theme.Color.hairline).frame(width: 1, height: dotY)
-                Rectangle().fill(isLast ? Color.clear : Theme.Color.hairline).frame(width: 1)
-                    .frame(maxHeight: .infinity)
+                VHairline().frame(height: dotY).opacity(isFirst ? 0 : 1)
+                VHairline().frame(maxHeight: .infinity).opacity(isLast ? 0 : 1)
             }
-            .padding(.leading, x - 0.5)
+            .padding(.leading, x - Theme.Size.hairline / 2)
             Circle()
                 .fill(selected ? Theme.Color.accent : Theme.Color.textTertiary)
                 .frame(width: M.dot, height: M.dot)
@@ -398,7 +406,6 @@ struct TrailFileStop: View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             HStack(spacing: TrailMetrics.gap) {
                 TrailThumb(file: file, vaultRoot: vaultRoot)
-                    .opacity(hover ? 1 : 0.92)
                     .onTapGesture { onOpen(file, anchor) }
                 if links { Hairline() } else { Spacer(minLength: 0) }
             }
@@ -484,7 +491,7 @@ struct TrailCompactChain: View {
                 switch stop.kind {
                 case let .file(file, anchor, _):
                     HStack(spacing: Theme.Space.xs) {
-                        FileGlyph(ext: file.ext, size: 11)
+                        FileGlyph(ext: file.ext, size: Theme.Size.iconSmall - 2)
                         Text(file.name)
                             .font(Theme.Font.small)
                             .foregroundStyle(Theme.Color.textSecondary)
@@ -500,7 +507,8 @@ struct TrailCompactChain: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        // minWidth 0 lets the title beside it win; the chain clips instead.
+        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         .clipped()
         .mask {
             HStack(spacing: 0) {
@@ -518,6 +526,16 @@ struct TrailThumb: View {
     let vaultRoot: URL?
     @Environment(\.displayScale) private var scale
     @State private var image: NSImage?
+
+    init(file: FileRef, vaultRoot: URL?) {
+        self.file = file
+        self.vaultRoot = vaultRoot
+        // Rows are recreated as the list scrolls; start from the cache so they don't flash.
+        if let root = vaultRoot {
+            _image = State(initialValue: TrailThumbnails.shared.cached(root.appendingPathComponent(file.relativePath),
+                                                                      side: TrailMetrics.thumbMaxWidth))
+        }
+    }
 
     var body: some View {
         Group {
@@ -537,11 +555,10 @@ struct TrailThumb: View {
             }
         }
         .task(id: file.relativePath) {
-            guard let root = vaultRoot else { return }
+            // Quick Look's audio "thumbnail" is a generic note; the family glyph says more.
+            guard image == nil, let root = vaultRoot, !FileFamily.audio.contains(file.ext) else { return }
             let url = root.appendingPathComponent(file.relativePath)
-            let side = TrailMetrics.thumbMaxWidth
-            if let hit = TrailThumbnails.shared.cached(url, side: side) { image = hit; return }
-            image = await TrailThumbnails.shared.image(for: url, side: side, scale: scale)
+            image = await TrailThumbnails.shared.image(for: url, side: TrailMetrics.thumbMaxWidth, scale: scale)
         }
     }
 }
@@ -578,8 +595,7 @@ struct TrailFlowLayout: Layout {
         var line = Line()
         for i in subviews.indices {
             let size = subviews[i].sizeThatFits(.unspecified)
-            let needed = line.items.isEmpty ? size.width : line.width + spacing + size.width
-            if !line.items.isEmpty, needed > width {
+            if !line.items.isEmpty, line.width + spacing + size.width > width {
                 lines.append(line)
                 line = Line()
             }

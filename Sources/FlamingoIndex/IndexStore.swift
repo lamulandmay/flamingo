@@ -55,7 +55,10 @@ public final class IndexStore: @unchecked Sendable {
     public var databaseURL: URL { vault.stateDir.appendingPathComponent("index.sqlite") }
     public var graphURL: URL { vault.stateDir.appendingPathComponent("graph.json") }
 
-    static let schemaVersion = 1
+    static let schemaVersion = 2
+    /// Changes whenever extraction output may differ, so files indexed by older extractors
+    /// are re-extracted even though they haven't changed on disk.
+    static var extractVersion: String { "1" }
     static let batchSize = 200
     static let extractionWidth = min(8, max(4, ProcessInfo.processInfo.activeProcessorCount / 2))
     static let commentBoost = 1.5
@@ -85,6 +88,13 @@ public final class IndexStore: @unchecked Sendable {
     public var lastReindex: ReindexReport? { cacheLock.lock(); defer { cacheLock.unlock() }; return report }
 
     // MARK: - Writing
+
+    /// `reindex`, re-extracting every file when `force` is set.
+    public func reindex(force: Bool, progress: ((Double) -> Void)? = nil) throws {
+        writeLock.lock(); defer { writeLock.unlock() }
+        if force { try writer.exec("UPDATE files SET mtime = -1") }
+        try reindex(progress: progress)
+    }
 
     /// Full reindex. Reports progress 0...1 on the calling thread.
     /// Unchanged files (same mtime and size) are skipped, so re-running is cheap.
@@ -161,8 +171,7 @@ public final class IndexStore: @unchecked Sendable {
                 }
             }
         }
-        if missing.contains(where: { FileManager.default.fileExists(atPath: sidecars.sidecarURL(for: FileRef(relativePath: $0)).path) }),
-           let moves = try? sidecars.reconcile() {
+        if missing.contains(where: hasSidecars), let moves = try? sidecars.reconcile() {
             for m in moves { commentTargets.insert(m.from); commentTargets.insert(m.to) }
         }
         let afterRename = try stamps(for: present.map(\.0.relativePath))
@@ -196,6 +205,7 @@ public final class IndexStore: @unchecked Sendable {
 
     /// Replaces every indexed comment with these. `reindex` calls it with `SidecarStore.all()`.
     func replaceAllComments(_ all: [FileRef: [Comment]]) throws {
+        writeLock.lock(); defer { writeLock.unlock() }
         try writer.transaction {
             try writer.exec("DELETE FROM comments")
             for (ref, comments) in all { try insertComments(comments, for: ref) }
@@ -208,33 +218,27 @@ public final class IndexStore: @unchecked Sendable {
     /// section's anchor). All terms must match; if nothing does, any term may.
     public func search(_ query: String, limit: Int = 50) throws -> [SearchHit] {
         guard limit > 0 else { return [] }
-        for any in [false, true] {
-            guard let q = FTSQuery.build(query, any: any) else { return [] }
-            let content = Self.bestPerFile(try rawSectionHits(q, limit: max(limit * 4, 100)))
-            let comments = try rawCommentHits(q, limit: limit).map {
+        return try firstNonEmpty(query) { match in
+            let content = Self.bestPerFile(try sectionHits(match, limit: max(limit * 4, 100)))
+            let comments = try commentHits(match, limit: limit).map {
                 SearchHit(file: $0.file, anchor: $0.comment.anchor, snippet: $0.snippet, score: $0.score, commentID: $0.comment.id)
             }
             var seen = Set<String>()
             let merged = (content + comments).sorted { $0.score > $1.score }.filter { seen.insert($0.id).inserted }
-            if !merged.isEmpty || any || FTSQuery.terms(query).count < 2 { return Array(merged.prefix(limit)) }
+            return Array(merged.prefix(limit))
         }
-        return []
     }
 
     /// Every matching section, ranked, not grouped by file. For retrieval (plan 09).
     public func searchSections(_ query: String, limit: Int = 50) throws -> [SearchHit] {
-        guard limit > 0, let q = FTSQuery.build(query) else { return [] }
-        let hits = try rawSectionHits(q, limit: limit)
-        if !hits.isEmpty || FTSQuery.terms(query).count < 2 { return hits }
-        return try rawSectionHits(FTSQuery.build(query, any: true)!, limit: limit)
+        guard limit > 0 else { return [] }
+        return try firstNonEmpty(query) { try sectionHits($0, limit: limit) }
     }
 
     /// Matching comments, ranked.
     public func searchComments(_ query: String, limit: Int = 50) throws -> [CommentHit] {
-        guard limit > 0, let q = FTSQuery.build(query) else { return [] }
-        let hits = try rawCommentHits(q, limit: limit)
-        if !hits.isEmpty || FTSQuery.terms(query).count < 2 { return hits }
-        return try rawCommentHits(FTSQuery.build(query, any: true)!, limit: limit)
+        guard limit > 0 else { return [] }
+        return try firstNonEmpty(query) { try commentHits($0, limit: limit) }
     }
 
     /// Most recently modified files.
@@ -304,9 +308,13 @@ public final class IndexStore: @unchecked Sendable {
         var mtime: Double
         var size: Int
         init(mtime: Double, size: Int) { self.mtime = mtime; self.size = size }
+        /// `nil` unless a regular file or a folder (packages): never a pipe or a device,
+        /// which would block extraction forever.
         init?(url: URL) {
             var st = stat()
             guard stat(url.path, &st) == 0 else { return nil }
+            let type = st.st_mode & S_IFMT
+            guard type == S_IFREG || type == S_IFDIR else { return nil }
             mtime = Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9
             size = Int(st.st_size)
         }
@@ -365,6 +373,14 @@ public final class IndexStore: @unchecked Sendable {
         let v = db.userVersion
         if v > schemaVersion { throw IndexError(code: 0, message: "index.sqlite schema \(v) is newer than \(schemaVersion)") }
         if v < 1 { try db.transaction { try db.exec(Schema.v1) } }
+        if v < 2 { try db.transaction { try db.exec(Schema.v2) } }
+        let stored = try db.query("SELECT value FROM meta WHERE key = 'extract_version'") { $0.string(0) }.first
+        if stored != extractVersion {
+            try db.transaction {
+                try db.exec("UPDATE files SET mtime = -1")   // stale; keep serving old text until reindexed
+                try db.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('extract_version', ?)", extractVersion)
+            }
+        }
         return db
     }
 
@@ -454,6 +470,13 @@ public final class IndexStore: @unchecked Sendable {
         try writer.run("DELETE FROM files WHERE substr(path, 1, length(?1)) = ?1", prefix)
     }
 
+    /// A note for this path, or (for a folder) notes for anything under it.
+    private func hasSidecars(_ path: String) -> Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: sidecars.sidecarURL(for: FileRef(relativePath: path)).path)
+            || fm.fileExists(atPath: vault.notesDir.appendingPathComponent(path, isDirectory: true).path)
+    }
+
     private func replaceComments(for ref: FileRef) throws {
         let comments: [Comment]
         if !FileManager.default.fileExists(atPath: sidecars.sidecarURL(for: ref).path) {
@@ -474,6 +497,71 @@ public final class IndexStore: @unchecked Sendable {
                 """, ref.relativePath, c.id.uuidString, c.timestamp.timeIntervalSince1970,
                 c.anchor?.kind.rawValue, c.anchor?.value, c.text)
         }
+    }
+
+    enum Match: Equatable {
+        case fts(String)
+        /// Plain substrings, for scripts written without spaces (Chinese, Japanese, Thai),
+        /// which the unicode61 tokenizer can't split into words.
+        case substring([String])
+    }
+
+    /// All terms, then any term, then substrings when the query is in an unspaced script.
+    static func plan(_ query: String) -> [Match] {
+        guard let all = FTSQuery.build(query) else { return [] }
+        let terms = FTSQuery.terms(query)
+        var plan: [Match] = [.fts(all)]
+        if terms.count > 1, let any = FTSQuery.build(query, any: true) { plan.append(.fts(any)) }
+        if FTSQuery.isUnspaced(query) { plan.append(.substring(terms.map(\.text))) }
+        return plan
+    }
+
+    private func firstNonEmpty<T>(_ query: String, _ run: (Match) throws -> [T]) throws -> [T] {
+        for match in Self.plan(query) {
+            let hits = try run(match)
+            if !hits.isEmpty { return hits }
+        }
+        return []
+    }
+
+    private func sectionHits(_ match: Match, limit: Int) throws -> [SearchHit] {
+        switch match {
+        case .fts(let q): return try rawSectionHits(q, limit: limit)
+        case .substring(let terms):
+            let rows = try substringRows("sections", columns: "path, anchor_kind, anchor_value, title, text",
+                                         textColumns: ["text", "coalesce(title, '')"], order: "path, ord", terms: terms, limit: limit) {
+                (FileRef(relativePath: $0.string(0)), Self.anchor($0, 1), $0.string(3), $0.string(4))
+            }
+            return rows.enumerated().map { i, r in
+                let body = r.3.range(of: terms[0], options: .caseInsensitive) != nil ? r.3 : r.2
+                return SearchHit(file: r.0, anchor: r.1, snippet: Self.substringSnippet(body, terms), score: 1 - Double(i) * 1e-6)
+            }
+        }
+    }
+
+    private func commentHits(_ match: Match, limit: Int) throws -> [CommentHit] {
+        switch match {
+        case .fts(let q): return try rawCommentHits(q, limit: limit)
+        case .substring(let terms):
+            let rows = try substringRows("comments", columns: "path, id, ts, anchor_kind, anchor_value, text",
+                                         textColumns: ["text"], order: "ts DESC", terms: terms, limit: limit) {
+                (FileRef(relativePath: $0.string(0)), Self.comment($0, 1))
+            }
+            return rows.enumerated().map { i, r in
+                CommentHit(file: r.0, comment: r.1, snippet: Self.substringSnippet(r.1.text, terms),
+                           score: (1 - Double(i) * 1e-6) * Self.commentBoost)
+            }
+        }
+    }
+
+    private func substringRows<T>(_ table: String, columns: String, textColumns: [String], order: String,
+                                  terms: [String], limit: Int, row: (Row) throws -> T) throws -> [T] {
+        let test = { (t: Int) in textColumns.map { "instr(lower(\($0)), lower(?\(t + 1))) > 0" }.joined(separator: " OR ") }
+        let sql = "SELECT \(columns) FROM \(table) WHERE "
+            + terms.indices.map { "(\(test($0)))" }.joined(separator: " AND ")
+            + " ORDER BY \(order) LIMIT ?\(terms.count + 1)"
+        let values: [(any SQLBindable)?] = terms.map { $0 } + [limit]
+        return try read { db in try db.prepare(sql).query(values, row: row) }
     }
 
     private func rawSectionHits(_ q: String, limit: Int) throws -> [SearchHit] {
@@ -550,6 +638,22 @@ public final class IndexStore: @unchecked Sendable {
         let t = clean(title), x = clean(text)
         if x.contains("«") || t.isEmpty { return x }
         return x.isEmpty ? t : t + " — " + x
+    }
+
+    /// A window around the first match, every term marked «…».
+    static func substringSnippet(_ text: String, _ terms: [String]) -> String {
+        let flat = clean(text)
+        guard let first = terms.lazy.compactMap({ flat.range(of: $0, options: .caseInsensitive) }).first else {
+            return String(flat.prefix(80))
+        }
+        let start = flat.index(first.lowerBound, offsetBy: -24, limitedBy: flat.startIndex) ?? flat.startIndex
+        let end = flat.index(first.upperBound, offsetBy: 48, limitedBy: flat.endIndex) ?? flat.endIndex
+        var window = String(flat[start..<end])
+        for t in terms {
+            guard let re = try? NSRegularExpression(pattern: NSRegularExpression.escapedPattern(for: t), options: .caseInsensitive) else { continue }
+            window = re.stringByReplacingMatches(in: window, range: NSRange(window.startIndex..., in: window), withTemplate: "«$0»")
+        }
+        return (start > flat.startIndex ? "…" : "") + window + (end < flat.endIndex ? "…" : "")
     }
 
     /// Snippets keep the text's own line breaks; a result row wants one line.

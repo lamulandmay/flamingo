@@ -62,6 +62,15 @@ public struct FileRef: Hashable, Codable, Sendable {
     }
     /// Path components, `["decks", "q3.pptx"]`.
     public var components: [String] { relativePath.split(separator: "/", omittingEmptySubsequences: true).map(String.init) }
+
+    /// Folder (relative to the vault) whose "files" are notes with no user file behind
+    /// them: a thought captured with nothing in front lands in `_inbox/<yyyy-MM-dd>`.
+    /// Such refs appear in `SidecarStore.all()` and in `graph.json` but never on disk
+    /// outside `.flamingo/notes`.
+    public static let inboxDirectory = "_inbox"
+
+    /// True for `_inbox/...` refs (see `inboxDirectory`): a note, not a missing file.
+    public var isInbox: Bool { relativePath.hasPrefix(FileRef.inboxDirectory + "/") }
 }
 
 extension FileRef: Comparable {

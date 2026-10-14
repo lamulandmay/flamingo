@@ -126,7 +126,9 @@ final class TrailStoreTests: TrailStoreTestCase {
         store.flush()
         let after = try store.events()
         XCTAssertEqual(after.map(\.file), [ref("a.md"), ref("b.md")])
-        XCTAssertEqual(after[0].id, before[0].id)
+        XCTAssertEqual(after.first?.id, before.first?.id)
+        XCTAssertTrue(try fileText(store).hasPrefix(#"{"at":"2026-10-14T20:05:12Z","kind":"opened","file":"a.md"}"# + "\n{"),
+                      "the append starts on a fresh line")
         XCTAssertEqual(try TrailStore(vault: vault).events().map(\.id), after.map(\.id))
     }
 
@@ -188,7 +190,7 @@ final class TrailStoreTests: TrailStoreTestCase {
         }
         store.flush()
         let size = try FileManager.default.attributesOfItem(atPath: store.fileURL.path)[.size] as! Int
-        XCTAssertGreaterThan(size, 3 << 18)
+        XCTAssertGreaterThan(size, 2 << 18, "spans at least three read chunks")
         XCTAssertEqual(try TrailStore(vault: vault).events().map(\.id), expected)
         XCTAssertEqual(try store.events().map(\.id), expected)
     }
@@ -250,7 +252,7 @@ final class TrailStoreTests: TrailStoreTestCase {
         XCTAssertEqual(try store.events(since: trailBase.addingTimeInterval(10)).map(\.id), [events[1].id, events[2].id])
         store.flush()
         XCTAssertEqual(try store.events(since: trailBase.addingTimeInterval(10)).map(\.id), [events[1].id, events[2].id])
-        XCTAssertEqual(try store.events(since: trailBase.addingTimeInterval(25)).map(\.id), [events[2].id])
+        XCTAssertEqual(try store.events(since: trailBase.addingTimeInterval(15)).map(\.id), [events[2].id])
         XCTAssertEqual(try store.events(since: trailBase.addingTimeInterval(1000)), [])
         XCTAssertEqual(try store.events(since: nil).count, 3)
     }

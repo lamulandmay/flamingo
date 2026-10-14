@@ -99,6 +99,7 @@ public final class AskEngine: @unchecked Sendable {
         self.keyProvider = key
     }
 
+    /// Retrieve, then let the model search up to `Prompt.maxSearches` times before it answers.
     private func run(_ question: String, yield: @escaping @Sendable (Delta) -> Void) async throws {
         let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
@@ -107,19 +108,99 @@ public final class AskEngine: @unchecked Sendable {
         let retriever = Retriever(source: source)
         let passages = try retriever.retrieve(question)
         yield(.passages(passages))
-        let sources = Dictionary(uniqueKeysWithValues: passages.map { ($0.id, $0.citation) })
+        var sources = Dictionary(uniqueKeysWithValues: passages.map { ($0.id, $0.citation) })
 
         let model = self.model
-        let messages: [JSON] = [Prompt.question(question, passages: passages, today: Date())]
-        let message = try await client.send(Prompt.body(model: model, messages: messages),
-                                            key: key, betas: Prompt.betas(model: model)) { yield(.text($0)) }
-        try Self.check(message)
-        yield(.answer(CitationParser.answer(text: message.text, sources: sources)))
+        var messages: [JSON] = [Prompt.question(question, passages: passages, today: Date())]
+        var searches = 0
+        for turn in 0... {
+            try Task.checkCancellation()
+            let body = Prompt.body(model: model, messages: messages, canSearch: searches < Prompt.maxSearches)
+            let message = try await client.send(body, key: key, betas: Prompt.betas(model: model)) { yield(.text($0)) }
+            try Self.check(message)
+
+            let calls = Self.toolCalls(in: message)
+            // One turn past the searches is the most an answer needs; past that, answer with what came back.
+            guard message.stopReason == "tool_use", !calls.isEmpty, turn <= Prompt.maxSearches + 1 else {
+                yield(.answer(CitationParser.answer(text: message.text, sources: sources)))
+                return
+            }
+            if !message.text.isEmpty { yield(.discard) }
+
+            messages.append(["role": "assistant", "content": .array(Self.replayable(message.content))])
+            var results: [JSON] = []
+            for call in calls {
+                if let raw = call.invalidInput {
+                    let error: JSON = ["INVALID_JSON": .string(raw)]
+                    results.append(Prompt.toolError(id: call.id, String(decoding: try error.encoded(), as: UTF8.self)))
+                } else if call.name.lowercased() != "search" {
+                    results.append(Prompt.toolError(id: call.id, "Unknown tool \(call.name). The only tool is `search`."))
+                } else if searches >= Prompt.maxSearches {
+                    results.append(Prompt.toolError(id: call.id, "No searches left. Answer from the passages you have."))
+                } else if let query = call.input["query"]?.string?.trimmingCharacters(in: .whitespacesAndNewlines),
+                          !query.isEmpty {
+                    searches += 1
+                    yield(.searching(query))
+                    let found = (try? retriever.retrieve(query, budgetTokens: 4000)) ?? []
+                    for p in found { sources[p.id] = p.citation }
+                    if !found.isEmpty { yield(.passages(found)) }
+                    results.append(Prompt.searchResult(id: call.id, passages: found))
+                } else {
+                    results.append(Prompt.toolError(id: call.id, "`query` must be a non-empty string."))
+                }
+            }
+            messages.append(["role": "user", "content": .array(results)])
+        }
     }
 
-    /// Stop reasons that mean there's no usable answer.
+    struct ToolCall {
+        var id: String
+        var name: String
+        var input: JSON
+        /// Set when the streamed input wasn't valid JSON; the tool doesn't run.
+        var invalidInput: String?
+    }
+
+    /// The `tool_use` blocks to answer: those after the last fallback boundary, since a model
+    /// that declined mid-turn doesn't get its calls run.
+    static func toolCalls(in message: StreamedMessage) -> [ToolCall] {
+        let start = (message.content.lastIndex { $0["type"]?.string == "fallback" } ?? -1) + 1
+        return message.content.indices.dropFirst(start).compactMap { i in
+            let block = message.content[i]
+            guard block["type"]?.string == "tool_use", let id = block["id"]?.string else { return nil }
+            return ToolCall(id: id, name: block["name"]?.string ?? "", input: block["input"] ?? [:],
+                            invalidInput: message.invalidInputs[i])
+        }
+    }
+
+    /// The assistant turn as it goes back. Thinking blocks travel unchanged (signature and all,
+    /// even when empty). Before a fallback boundary only text survives; the marker itself is dropped.
+    static func replayable(_ content: [JSON]) -> [JSON] {
+        let boundary = content.lastIndex { $0["type"]?.string == "fallback" } ?? -1
+        return content.enumerated().compactMap { i, block in
+            let type = block["type"]?.string
+            if type == "fallback" || block == .null { return nil }
+            if i < boundary, type != "text" { return nil }
+            switch type {
+            case "text":
+                return ["type": "text", "text": block["text"] ?? ""]
+            case "thinking":
+                return ["type": "thinking", "thinking": block["thinking"] ?? "", "signature": block["signature"] ?? ""]
+            case "redacted_thinking":
+                return ["type": "redacted_thinking", "data": block["data"] ?? ""]
+            case "tool_use":
+                return ["type": "tool_use", "id": block["id"] ?? "", "name": block["name"] ?? "", "input": block["input"] ?? [:]]
+            default:
+                return block
+            }
+        }
+    }
+
+    /// Stop reasons that mean there's no usable answer. A refusal can cut a tool call off
+    /// mid-input, so its tools never run either.
     static func check(_ message: StreamedMessage) throws {
         if message.stopReason == "refusal" { throw AskError.refused }
+        if message.stopReason == "max_tokens", message.text.isEmpty { throw AskError.stream("Answer cut off") }
     }
 }
 

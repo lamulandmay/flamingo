@@ -12,6 +12,6 @@ cp .build/$CONFIG/Flamingo $APP/Contents/MacOS/Flamingo
 cp Resources/Info.plist $APP/Contents/Info.plist
 # SwiftPM resource bundles, if any module declares resources.
 for b in .build/$CONFIG/*.bundle(N); do cp -R $b $APP/Contents/Resources/; done
-# App icon from plan 08, once it exists.
-for i in Resources/Assets/*.icns(N); do cp $i $APP/Contents/Resources/; done
+# App icon and compiled asset catalog (AppIcon, AccentColor) from plan 08.
+for i in Resources/Assets/*.icns(N) Resources/Assets/*.car(N); do cp $i $APP/Contents/Resources/; done
 codesign --force --options runtime --entitlements Resources/Flamingo.entitlements --sign - $APP

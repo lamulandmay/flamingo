@@ -85,7 +85,8 @@ public final class CaptureController {
         globalShortcuts = []
         guard on else { return }
 
-        let fire = { CaptureController.shared.captureFromFrontmost() }
+        // Leave the Carbon callback before probing: AppleScript waits on replies.
+        let fire = { DispatchQueue.main.async { CaptureController.shared.captureFromFrontmost() } }
         let primary = GlobalHotkey.capture(fire)
         if primary.register() { globalHotkeys.append(primary); globalShortcuts.append("⌃⌥Space") }
         if !primary.isRegistered
@@ -229,10 +230,16 @@ public final class CaptureController {
         }
     }
 
+    /// A non-activating panel hands key focus back to the frontmost app on its own; this is
+    /// the safety net if Flamingo is somehow still active a beat later.
     private func restoreFocus(_ p: Presentation?) {
         guard let p else { return }
         if let app = p.returnTo {
-            if NSApp.isActive { app.activate() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                guard let self, NSApp.isActive, !self.host.isVisible, !app.isTerminated else { return }
+                NSApp.yieldActivation(to: app)
+                app.activate()
+            }
         } else if let w = p.previousKeyWindow, w.isVisible {
             w.makeKey()
         }

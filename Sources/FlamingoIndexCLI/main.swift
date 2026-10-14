@@ -19,6 +19,7 @@ usage: flamingo-index <vault> [options]
   --bench             reindex from scratch, then time searches
   --watch             keep running and apply changes as they happen
   --no-reindex        query the existing index as is
+  --force             re-extract every file, changed or not
   --limit N           cap results (default 20)
 
 """
@@ -44,12 +45,13 @@ func line(_ hit: SearchHit) -> String {
 
 // MARK: - Arguments
 
+setvbuf(stdout, nil, _IOLBF, 0)
 var args = Array(CommandLine.arguments.dropFirst())
 if args.isEmpty || args.contains("-h") || args.contains("--help") { print(usage, terminator: ""); exit(args.isEmpty ? 2 : 0) }
 
 var vaultPath: String?
 var actions: [(String, String?)] = []
-var watch = false, reindexFirst = true, bench = false
+var watch = false, reindexFirst = true, bench = false, force = false
 var limit = 20
 let takesValue: Set<String> = ["--search", "--sections", "--comments", "--files", "--backlinks", "--text"]
 var i = 0
@@ -62,6 +64,7 @@ while i < args.count {
     switch a {
     case "--watch": watch = true
     case "--no-reindex": reindexFirst = false
+    case "--force": force = true
     case "--bench": bench = true
     case "--recent", "--graph": actions.append((a, nil))
     case "--limit":
@@ -81,27 +84,13 @@ guard FileManager.default.fileExists(atPath: vaultPath, isDirectory: &isDir), is
 }
 
 let vault = Vault(root: URL(fileURLWithPath: vaultPath))
-let store: IndexStore
-do { store = try IndexStore(vault: vault) } catch { fail("cannot open index: \(error)") }
 
-// MARK: - Reindex
+// MARK: - Bench
 
-func reindex() throws {
-    let interactive = isatty(STDERR_FILENO) != 0
-    var last = -1
-    try store.reindex { p in
-        let pct = Int(p * 100)
-        if interactive, pct != last { last = pct; err("\r\(pct)%", terminator: "") }
-    }
-    if interactive { err("\r", terminator: "") }
-    let r = store.lastReindex!
-    let s = try store.stats()
-    print("\(s.files) files · \(r.extracted) extracted · \(r.removed) removed · \(s.sections) sections · \(s.comments) comments · \(fmt(r.seconds, 2))s")
-}
-
-do {
-    if bench {
-        for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: store.databaseURL.path + suffix) }
+if bench {
+    do {
+        let db = vault.stateDir.appendingPathComponent("index.sqlite").path
+        for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: db + suffix) }
         let fresh = try IndexStore(vault: vault)
         try fresh.reindex()
         let r = fresh.lastReindex!
@@ -125,7 +114,30 @@ do {
         let g = try fresh.buildGraph()
         print("graph: \(g.nodes.count) nodes, \(g.edges.count) edges in \(fmt(ms(since: t), 1))ms")
         exit(0)
+    } catch {
+        fail("flamingo-index: \(error)")
     }
+}
+
+let store: IndexStore
+do { store = try IndexStore(vault: vault) } catch { fail("cannot open index: \(error)") }
+
+// MARK: - Reindex
+
+func reindex() throws {
+    let interactive = isatty(STDERR_FILENO) != 0
+    var last = -1
+    try store.reindex(force: force) { p in
+        let pct = Int(p * 100)
+        if interactive, pct != last { last = pct; err("\r\(pct)%", terminator: "") }
+    }
+    if interactive { err("\r", terminator: "") }
+    let r = store.lastReindex!
+    let s = try store.stats()
+    print("\(s.files) files · \(r.extracted) extracted · \(r.removed) removed · \(s.sections) sections · \(s.comments) comments · \(fmt(r.seconds, 2))s")
+}
+
+do {
 
     if reindexFirst { try reindex() }
     let graph = try store.buildGraph()
@@ -197,6 +209,5 @@ if watch {
     }
     watcher.start()
     err("watching \(vault.root.path)  (ctrl-c to stop)")
-    setvbuf(stdout, nil, _IOLBF, 0)
     dispatchMain()
 }

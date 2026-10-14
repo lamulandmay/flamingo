@@ -56,9 +56,26 @@ enum TrailPresentation {
             }
         }
         for (f, i) in index {
-            out[i].kind = .file(f, anchor: anchors[f], notes: notes[f] ?? [])
+            out[i].kind = .file(f, anchor: anchors[f], notes: withoutEchoedLinks(notes[f] ?? []))
         }
         return out
+    }
+
+    /// A `linked` event usually repeats a `[[link]]` already visible in a comment on the same
+    /// file. Show it only when it adds something.
+    private static func withoutEchoedLinks(_ notes: [TrailNote]) -> [TrailNote] {
+        func key(_ target: String) -> String { (target as NSString).deletingPathExtension.lowercased() }
+        let isLinkOnly: (TrailNote) -> Bool = { n in
+            let t = n.text.trimmingCharacters(in: .whitespaces)
+            return t.hasPrefix("[[") && t.hasSuffix("]]") && Wikilink.parse(t).count == 1
+                && t.dropFirst(2).dropLast(2).range(of: "]]") == nil
+        }
+        let mentioned = Set(notes.filter { !isLinkOnly($0) }.flatMap { Wikilink.parse($0.text) }.map(key))
+        var seen = Set<String>()
+        return notes.filter { n in
+            guard isLinkOnly(n), let target = Wikilink.parse(n.text).first.map(key) else { return true }
+            return !mentioned.contains(target) && seen.insert(target).inserted
+        }
     }
 
     /// `Tue 14:05 – 15:40` within the last week, `Oct 3 14:05 – 15:40` this year,

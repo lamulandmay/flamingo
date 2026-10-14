@@ -108,6 +108,22 @@ final class IndexStoreTests: IndexTestCase {
         XCTAssertEqual(review.file, ref("decks/q3.fltest"))
     }
 
+    func testUnspacedScriptsMatchInsideWords() throws {
+        try write("zh.fltest", "== page 2: 定价\n我们的定价策略在第三季度调整。")
+        try write("ja.fltest", "価格改定のお知らせ")
+        try store.reindex()
+        XCTAssertEqual(store.lastReindex?.extracted, 2)
+        let hit = try XCTUnwrap(try store.search("定价策略").first)
+        XCTAssertEqual(hit.file, ref("zh.fltest"))
+        XCTAssertEqual(hit.anchor?.value, "2")
+        XCTAssertTrue(hit.snippet.contains("«定价策略»"), hit.snippet)
+        XCTAssertEqual(try store.search("価格").first?.file, ref("ja.fltest"))
+        XCTAssertEqual(try store.searchSections("第三季度").count, 1)
+        try store.replaceAllComments([ref("zh.fltest"): [Comment(text: "这个定价和模型矛盾")]])
+        XCTAssertEqual(try store.searchComments("矛盾").first?.file, ref("zh.fltest"))
+        XCTAssertEqual(try store.search("不存在").count, 0)
+    }
+
     func testFileNameIsSearchable() throws {
         try write("finance/q3-model.fltest", "")
         try store.reindex()
@@ -176,6 +192,13 @@ final class IndexStoreTests: IndexTestCase {
         try FileManager.default.removeItem(at: root.appendingPathComponent("dir"))
         try store.update([ref("dir")])
         XCTAssertEqual(try store.indexedFiles(), [])
+    }
+
+    func testUpdateSkipsPipes() throws {
+        XCTAssertEqual(mkfifo(root.appendingPathComponent("pipe").path, 0o644), 0)
+        try store.update([ref("pipe")])   // would block forever if extracted
+        try store.reindex()
+        XCTAssertEqual(try store.stats().files, 0)
     }
 
     func testUpdateIgnoresStateAndHiddenPaths() throws {
@@ -398,6 +421,18 @@ final class RenameTests: IndexTestCase {
         XCTAssertEqual(try store.searchComments("follow").first?.file, b)
     }
 
+    func testRenamedFolderTakesItsSidecarsAlong() throws {
+        let a = try write("decks/q3.fltest", "deck")
+        let sidecars = SidecarStore(vault: vault)
+        try sidecars.append(Comment(text: "folder moves too"), to: a)
+        guard (try? FileIdentity.existingID(for: vault.url(for: a))) != nil else { throw XCTSkip("FileIdentity not ready") }
+        try store.reindex()
+        try FileManager.default.moveItem(at: root.appendingPathComponent("decks"), to: root.appendingPathComponent("slides"))
+        try store.update([ref("decks"), ref("slides")])
+        XCTAssertEqual(try store.indexedFiles(), [ref("slides/q3.fltest")])
+        XCTAssertEqual(try store.commentCounts(), [ref("slides/q3.fltest"): 1])
+    }
+
     func testRenameWhileClosedHealsOnReindex() throws {
         let a = try write("old.fltest", "deck")
         let sidecars = SidecarStore(vault: vault)
@@ -484,5 +519,37 @@ final class LiveIndexTests: IndexTestCase {
         wait(for: [found], timeout: 3)
         let elapsed = Date().timeIntervalSince(started)
         XCTAssertLessThan(elapsed, 1.0, "indexed after \(elapsed)s")
+    }
+}
+
+final class MigrationTests: IndexTestCase {
+    func testV1IndexMigratesAndReextracts() throws {
+        try write("a.fltest", "migrated words")
+        store = nil
+        let path = vault.stateDir.appendingPathComponent("index.sqlite").path
+        for s in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: path + s) }
+        do {
+            let db = try Database(path: path)
+            try db.exec(Schema.v1)
+            let st = IndexStore.Stamp(url: root.appendingPathComponent("a.fltest"))!
+            try db.run("INSERT INTO files(path, mtime, size, ext, indexed_at) VALUES ('a.fltest', ?, ?, 'fltest', 0)", st.mtime, st.size)
+        }
+        store = try IndexStore(vault: vault)
+        try store.reindex()
+        XCTAssertEqual(store.lastReindex?.extracted, 1, "an index from older extractors is refreshed")
+        XCTAssertEqual(try store.search("migrated").count, 1)
+        store = nil
+        store = try IndexStore(vault: vault)
+        try store.reindex()
+        XCTAssertEqual(store.lastReindex?.extracted, 0)
+    }
+
+    func testForceReextractsEverything() throws {
+        try write("a.fltest", "one")
+        try write("b.fltest", "two")
+        try store.reindex()
+        try store.reindex(force: true)
+        XCTAssertEqual(store.lastReindex?.extracted, 2)
+        XCTAssertEqual(try store.search("two").count, 1)
     }
 }

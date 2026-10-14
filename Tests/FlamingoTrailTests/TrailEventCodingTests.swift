@@ -80,6 +80,9 @@ final class TrailEventCodingTests: XCTestCase {
     func testDecodesStringDates() throws {
         XCTAssertEqual(try decode(#"{"at":"2026-10-14T20:05:12Z","kind":"searched","text":"x"}"#).at, trailBase)
         XCTAssertEqual(try decode(#"{"at":"2026-10-14T20:05:12.000Z","kind":"searched","text":"x"}"#).at, trailBase)
+        XCTAssertEqual(try decode(#"{"at":"2026-10-14T22:05:12+02:00","kind":"searched","text":"x"}"#).at, trailBase)
+        XCTAssertEqual(try decode(#"{"at":"2026-10-14T20:05:12.123456Z","kind":"searched","text":"x"}"#)
+            .at.timeIntervalSince(trailBase), 0.123456, accuracy: 1e-5)
 
         // Sidecar-style local time.
         var cal = Calendar(identifier: .gregorian)

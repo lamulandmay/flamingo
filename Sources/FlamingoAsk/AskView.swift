@@ -43,6 +43,8 @@ final class AskSession: ObservableObject {
     private weak var engine: AskEngine?
     private var task: Task<Void, Never>?
     private var recall: Int?
+    /// The question that was waiting when the key turned out to be missing or rejected.
+    private var pending: String?
 
     private static var sessions: [ObjectIdentifier: AskSession] = [:]
 
@@ -60,7 +62,7 @@ final class AskSession: ObservableObject {
         let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, let engine else { return }
         task?.cancel()
-        if let current { history.append(current) }
+        if let current, !current.text.isEmpty { history.append(current) }
         current = Exchange(question: question)
         recall = nil
         waiting = true
@@ -102,6 +104,10 @@ final class AskSession: ObservableObject {
         current?.error = ask?.errorDescription ?? error.localizedDescription
         current?.done = true
         if ask == .noKey || (ask == .keyRejected && !KeyStore.fromEnvironment) {
+            pending = current?.question
+            current = nil
+            draft = ""
+            keyError = ask == .keyRejected ? ask?.errorDescription : nil
             hasKey = false
         }
     }
@@ -109,9 +115,10 @@ final class AskSession: ObservableObject {
     func saveKey() {
         do {
             try AskEngine.setKey(draft)
-            draft = ""
             keyError = nil
             hasKey = true
+            draft = pending ?? ""
+            if pending != nil { pending = nil; submit() }
         } catch {
             keyError = (error as? AskError)?.errorDescription ?? error.localizedDescription
         }
@@ -123,7 +130,7 @@ final class AskSession: ObservableObject {
         task?.cancel()
         waiting = false
         history.remove(at: i)
-        if let current { history.append(current) }
+        if let current, !current.text.isEmpty { history.append(current) }
         current = exchange
         draft = exchange.question
         recall = nil

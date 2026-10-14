@@ -22,8 +22,6 @@ public struct CommentPanel: View {
 
     @StateObject private var model = ThoughtEditorModel()
 
-    public static let width: CGFloat = 560
-
     public init(target: FileRef, anchor: FileAnchor? = nil, onSubmit: @escaping (Comment) -> Void, onCancel: @escaping () -> Void) {
         self.target = target; self.anchor = anchor; self.onSubmit = onSubmit; self.onCancel = onCancel
     }
@@ -61,8 +59,9 @@ public struct CommentPanel: View {
                 LinkCompletionList(model: model)
             }
         }
-        .frame(width: Self.width, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .fixedSize(horizontal: false, vertical: true)
+        .modifier(PanelChromeModifier(windowed: onHeightChange != nil))
         .background(GeometryReader { proxy in
             Color.clear.preference(key: PanelHeightKey.self, value: proxy.size.height)
         })
@@ -80,6 +79,14 @@ public struct CommentPanel: View {
     }
 }
 
+/// `PanelChrome` at panel width. In the capture window the window draws the shadow.
+private struct PanelChromeModifier: ViewModifier {
+    var windowed: Bool
+    func body(content: Content) -> some View {
+        PanelChrome(shadow: !windowed) { content }
+    }
+}
+
 private struct PanelHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
@@ -88,7 +95,6 @@ private struct PanelHeightKey: PreferenceKey {
 /// Vault files matching the link being typed. Arrow keys move, Enter or a click completes.
 struct LinkCompletionList: View {
     @ObservedObject var model: ThoughtEditorModel
-    static let rowHeight: CGFloat = 26
 
     var body: some View {
         VStack(spacing: 0) {
@@ -108,7 +114,7 @@ struct LinkCompletionList: View {
                         .truncationMode(.head)
                 }
                 .padding(.horizontal, Theme.Space.s)
-                .frame(height: Self.rowHeight)
+                .frame(height: Theme.Size.row)
                 .background(
                     RoundedRectangle(cornerRadius: Theme.Radius.s)
                         .fill(i == model.selection ? Theme.Color.selection : Color.clear)
