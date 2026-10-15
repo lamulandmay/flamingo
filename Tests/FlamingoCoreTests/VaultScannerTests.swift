@@ -123,14 +123,14 @@ final class VaultScannerTests: XCTestCase {
 
     func testDefaultIgnoreFileIsWrittenOnceAndThenEditable() throws {
         try touch("a.log")
-        try touch("node_modules/m.js")
+        try touch(".cache/m.js")
         XCTAssertTrue(VaultScanner.writeDefaultIgnoreFile(in: vault))
         XCTAssertEqual(try String(contentsOf: vault.ignoreURL, encoding: .utf8), IgnoreRules.defaultText)
         XCTAssertFalse(VaultScanner.writeDefaultIgnoreFile(in: vault))
         XCTAssertEqual(scan(), ["a.log"])
         try "*.log\n".write(to: vault.ignoreURL, atomically: true, encoding: .utf8)
         XCTAssertFalse(VaultScanner.writeDefaultIgnoreFile(in: vault), "never overwrites the user's edits")
-        XCTAssertEqual(scan(), ["node_modules/m.js"])
+        XCTAssertEqual(scan(), [".cache/m.js"])
     }
 
     func testAdmitsMatchesTheScanner() throws {

@@ -119,7 +119,8 @@ enum Fuzzy {
 
     /// Every file of a vault as one contiguous lowercased byte table. Build once per file list
     /// (the palette caches it against `AppState.files`), then `rank` per keystroke.
-    final class FileTable {
+    /// Immutable once built, so `rank` may run on any thread, several at once.
+    final class FileTable: @unchecked Sendable {
         struct Match {
             let index: Int
             let score: Int

@@ -17,6 +17,17 @@ struct PaletteView: View {
                     Hairline()
                     results
                 }
+                if let status = model.status {
+                    Hairline()
+                    Text(status)
+                        .font(Theme.Font.small)
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.Color.textTertiary)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, Theme.Space.m)
+                        .frame(height: PaletteController.statusHeight)
+                }
             }
             .frame(maxHeight: .infinity, alignment: .top)
         }

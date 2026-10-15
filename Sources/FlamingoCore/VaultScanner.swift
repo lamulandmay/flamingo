@@ -40,10 +40,12 @@ public struct TreeNode: Identifiable, Hashable, Sendable {
 /// ignore rules exclude, symlinks, and the insides of packages (which are returned as single
 /// files). Built to walk a whole disk: `scan` streams, `children(of:)` reads one folder.
 public enum VaultScanner {
-    /// Names skipped at any depth whatever the ignore file says. Folders are not descended into.
-    /// Everything else that used to be hard-coded (`.git`, `node_modules`, ...) is in
-    /// `IgnoreRules.defaultText`, which the user can edit.
-    public static let ignoredNames: Set<String> = [".flamingo", ".DS_Store"]
+    /// Names skipped at any depth whatever the ignore file says: Flamingo's own state and
+    /// machine-made trees nobody wants indexed. Folders are not descended into. Everything
+    /// else is in `IgnoreRules.defaultText`, which the user can edit.
+    public static let ignoredNames: Set<String> = [
+        ".flamingo", ".git", "node_modules", ".DS_Store", "__pycache__", "DerivedData", ".build", ".Trash",
+    ]
 
     /// Names skipped only directly under the vault root. Empty since the vault became the
     /// whole Mac: `~/Library` is indexed, minus its caches (see `IgnoreRules.defaultText`).

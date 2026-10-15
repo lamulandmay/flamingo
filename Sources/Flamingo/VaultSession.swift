@@ -15,6 +15,14 @@ enum Log {
     }
 }
 
+/// A thread-safe one-way switch.
+final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    func set() { lock.lock(); value = true; lock.unlock() }
+}
+
 /// Everything that exists only while a vault is open: the stores, the watcher,
 /// and the queues that keep their work off the main thread. Plan 01 owns.
 @MainActor
@@ -26,7 +34,10 @@ final class VaultSession {
     let watcher: VaultWatcher
     let ask: AskEngine?
 
-    /// Long-running index work (reindex, update). Serial.
+    /// The full reindex, which can run for hours on a first pass over `~`. Serial.
+    private let reindexQueue = DispatchQueue(label: "com.flamingo.reindex", qos: .utility)
+    /// Incremental index writes (a comment, a changed file). Serial, separate from the reindex
+    /// so a new thought reaches the index between two reindex batches, not after the reindex.
     private let indexQueue = DispatchQueue(label: "com.flamingo.index", qos: .utility)
     /// Short reads and sidecar writes (comments, search, graph, trail). Serial, separate so a
     /// reindex never blocks a search.
@@ -49,6 +60,7 @@ final class VaultSession {
 
     func stop() {
         isStopped = true
+        cancelled.set()
         watcher.onChange = nil
         watcher.onSidecarChange = nil
         watcher.stop()
@@ -71,35 +83,147 @@ final class VaultSession {
 
     // MARK: Files
 
-    func scan() async -> ([FileRef], FileTree) {
+    /// Set by `stop()`; walks and the reindex check it between files.
+    let cancelled = Flag()
+
+    /// Every user file, walked at `.utility` QoS. Unsorted. Empty if the session stops first.
+    /// `partial` gets what has been found so far every couple of seconds, so ⌘K can reach
+    /// files before a whole-disk walk ends.
+    func listFiles(partial: (@MainActor ([FileRef]) -> Void)? = nil) async -> [FileRef] {
         let v = vault
-        return (try? await onStore {
-            let files = VaultScanner.files(in: v)
-            return (files, FileTree(files: files))
-        }) ?? ([], .empty)
+        let cancelled = cancelled
+        return await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .utility).async {
+                var out: [FileRef] = []
+                var lastPartial = Date()
+                VaultScanner.scan(in: v, ignore: VaultScanner.ignoreRules(in: v)) { ref in
+                    out.append(ref)
+                    if let partial, out.count % 1024 == 0, Date().timeIntervalSince(lastPartial) > 2 {
+                        lastPartial = Date()
+                        let snapshot = out
+                        Task { @MainActor in partial(snapshot) }
+                    }
+                    return !cancelled.isSet
+                }
+                cont.resume(returning: cancelled.isSet ? [] : out)
+            }
+        }
+    }
+
+    /// How the file list changes for these watcher refs, worked out off the main thread:
+    /// files to add (a new folder brings everything under it) and listed files to drop (a
+    /// vanished folder takes its contents). `known` and `files` are the current list.
+    func diskChanges(for refs: [FileRef], known: Set<FileRef>, files: [FileRef]) async -> (added: [FileRef], removed: Set<FileRef>) {
+        let v = vault
+        return await withCheckedContinuation { cont in
+            DispatchQueue.global(qos: .utility).async {
+                let rules = VaultScanner.ignoreRules(in: v)
+                var added: [FileRef] = [], removed = Set<FileRef>(), goneFolders: [String] = []
+                for ref in refs {
+                    let url = v.url(for: ref)
+                    var isDir: ObjCBool = false
+                    let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
+                    let folder = exists && isDir.boolValue && !VaultScanner.isPackage(url)
+                    if !exists || !VaultScanner.admits(ref.relativePath, isDirectory: folder, ignore: rules) {
+                        if known.contains(ref) { removed.insert(ref) } else { goneFolders.append(ref.relativePath + "/") }
+                    } else if folder {
+                        VaultScanner.scan(in: v, ignore: rules, under: ref.relativePath) { f in
+                            if !known.contains(f) { added.append(f) }
+                            return true
+                        }
+                    } else if !known.contains(ref) {
+                        added.append(ref)
+                    }
+                }
+                if !goneFolders.isEmpty {
+                    for f in files where goneFolders.contains(where: { f.relativePath.hasPrefix($0) }) { removed.insert(f) }
+                }
+                cont.resume(returning: (added, removed))
+            }
+        }
     }
 
     // MARK: Index
 
-    /// Full reindex (`force` re-extracts unchanged files too). `progress` is delivered on
-    /// the main actor, throttled.
-    func reindex(force: Bool = false, progress: @escaping @MainActor (Double) -> Void) async {
+    /// Where a reindex is. `fraction` is set only by a forced reindex, which knows its total.
+    struct IndexStatus: Equatable {
+        var files = 0
+        var perSecond = 0.0
+        var fraction: Double?
+    }
+
+    static let reindexBatch = 200
+
+    /// Brings the index up to date with the disk at `.utility` QoS. Streams the vault walk
+    /// into `IndexStore.update` `reindexBatch` files at a time, so each batch is committed
+    /// and searchable before the walk ends, then drops indexed paths the walk didn't see.
+    /// Stops between batches when the session stops. `force` (the menu command) re-extracts
+    /// everything through `IndexStore.reindex(force:)`. `progress` runs on the main actor.
+    func reindex(force: Bool = false, progress: @escaping @MainActor (IndexStatus) -> Void) async {
         guard let index else { return }
-        var last = -1.0
         let started = Date()
         Log.debug("reindex: start")
-        do {
-            try await onIndex {
-                try index.reindex(force: force) { p in
+        if force {
+            var last = -1.0
+            try? await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                reindexQueue.async { cont.resume(with: Result {
+                try index.reindex(force: true) { p in
                     guard p - last >= 0.01 || p >= 1 else { return }
                     last = p
-                    Log.debug("reindex: \(Int(p * 100))% at \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
-                    Task { @MainActor in progress(p) }
+                    Task { @MainActor in progress(IndexStatus(fraction: p)) }
                 }
+                }) }
             }
-            Log.debug("reindex: done in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
-        } catch {
-            Log.debug("reindex: failed after \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \(error)")
+            Log.debug("reindex: forced, done in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
+            return
+        }
+        let v = vault
+        let sidecar = sidecar
+        let cancelled = cancelled
+        let finished: Int = await withCheckedContinuation { cont in
+            reindexQueue.async {
+                let known = Set((try? index.indexedFiles())?.map(\.relativePath) ?? [])
+                let rules = VaultScanner.ignoreRules(in: v)
+                var seen = Set<String>()
+                var batch: [FileRef] = []
+                var done = 0
+                var lastReport = Date.distantPast
+                func flush() {
+                    guard !batch.isEmpty else { return }
+                    do { try index.update(batch) } catch { Log.debug("reindex: batch failed: \(error)") }
+                    done += batch.count
+                    batch.removeAll(keepingCapacity: true)
+                    let now = Date()
+                    guard now.timeIntervalSince(lastReport) >= 0.25 else { return }
+                    lastReport = now
+                    let status = IndexStatus(files: done, perSecond: Double(done) / max(now.timeIntervalSince(started), 0.001))
+                    Task { @MainActor in progress(status) }
+                }
+                VaultScanner.scan(in: v, ignore: rules) { ref in
+                    guard !cancelled.isSet else { return false }
+                    seen.insert(ref.relativePath)
+                    batch.append(ref)
+                    if batch.count >= Self.reindexBatch { flush() }
+                    return !cancelled.isSet
+                }
+                guard !cancelled.isSet else { cont.resume(returning: -1); return }
+                flush()
+                let gone = known.subtracting(seen).map(FileRef.init(relativePath:))
+                try? index.remove(gone)
+                // Notes whose file was renamed while we weren't looking, and notes with no
+                // file behind them (the inbox): their comments still belong in the index.
+                _ = try? sidecar.reconcile()
+                let notes = ((try? sidecar.sidecarRefs()) ?? []).filter { !seen.contains($0.relativePath) }
+                try? index.update(notes)
+                cont.resume(returning: done)
+            }
+        }
+        let seconds = Date().timeIntervalSince(started)
+        if finished < 0 {
+            Log.debug("reindex: cancelled after \(String(format: "%.2f", seconds))s")
+        } else {
+            Log.debug("reindex: \(finished) files in \(String(format: "%.2f", seconds))s, \(Int(Double(finished) / max(seconds, 0.001)))/s")
+            progress(IndexStatus(files: finished, perSecond: Double(finished) / max(seconds, 0.001)))
         }
     }
 

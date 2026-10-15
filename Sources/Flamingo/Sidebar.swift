@@ -3,9 +3,11 @@ import SwiftUI
 import FlamingoCore
 import FlamingoDesign
 
-/// The vault as a folder tree under sidebar material. An `NSOutlineView` so arrow keys,
-/// ←/→, type-to-select and 20k-row scrolling are the system's; each visible row hosts a
-/// `SidebarRow` so glyphs and type come from `FlamingoDesign`. Plan 01 owns.
+/// The pinned folders as trees under sidebar material, each folder listed from disk when it
+/// is first opened. An `NSOutlineView` so arrow keys, ←/→, type-to-select, scrolling and drag
+/// and drop are the system's; each visible row hosts a `SidebarRow` so glyphs and type come
+/// from `FlamingoDesign`. Drag a pin to reorder, drag a folder in (from Finder or from inside
+/// a pin) to pin it, ⌫ on a pin unpins it. Plan 01 owns.
 ///
 /// Sits at the window's left edge under the transparent title bar; `topInset` is the
 /// title bar's height, so the first row starts below the traffic lights and rows scroll
@@ -15,7 +17,7 @@ struct Sidebar: View {
     let topInset: CGFloat
 
     var body: some View {
-        SidebarOutline(state: state, tree: state.tree, vault: state.vault, selected: state.selected,
+        SidebarOutline(state: state, tree: state.tree, revision: state.treeRevision, selected: state.selected,
                        reveal: state.revealRequest, topInset: topInset)
     }
 }
@@ -25,7 +27,7 @@ struct Sidebar: View {
 private struct SidebarOutline: NSViewRepresentable {
     let state: AppState
     let tree: FileTree
-    let vault: Vault?
+    let revision: Int
     let selected: FileRef?
     let reveal: RevealRequest?
     let topInset: CGFloat
@@ -60,6 +62,10 @@ private struct SidebarOutline: NSViewRepresentable {
         outline.backgroundColor = .clear
         outline.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         outline.setAccessibilityLabel("Files")
+        outline.registerForDraggedTypes([SidebarCoordinator.folderType, .fileURL])
+        outline.setDraggingSourceOperationMask(.move, forLocal: true)
+        outline.setDraggingSourceOperationMask([], forLocal: false)
+        outline.draggingDestinationFeedbackStyle = .gap
 
         let column = NSTableColumn(identifier: SidebarCoordinator.columnID)
         column.resizingMask = .autoresizingMask
@@ -90,16 +96,17 @@ private struct SidebarOutline: NSViewRepresentable {
         material.addSubview(scroll)
 
         coordinator.install(outline: outline, scroll: scroll)
+        outline.onDelete = { [weak coordinator] in coordinator?.unpinSelected() ?? false }
         state.focusSidebar = { [weak outline] in
             guard let outline, let window = outline.window else { return }
             window.makeFirstResponder(outline)
         }
-        coordinator.apply(tree: tree, vault: vault, selected: selected, reveal: reveal, topInset: topInset)
+        coordinator.apply(tree: tree, revision: revision, selected: selected, reveal: reveal, topInset: topInset)
         return material
     }
 
     func updateNSView(_ view: NSVisualEffectView, context: Context) {
-        context.coordinator.apply(tree: tree, vault: vault, selected: selected, reveal: reveal, topInset: topInset)
+        context.coordinator.apply(tree: tree, revision: revision, selected: selected, reveal: reveal, topInset: topInset)
     }
 }
 
@@ -108,6 +115,8 @@ private struct SidebarOutline: NSViewRepresentable {
 @MainActor
 final class SidebarCoordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
     static let columnID = NSUserInterfaceItemIdentifier("sidebar.name")
+    /// A folder dragged inside the sidebar; the string is its relative path.
+    static let folderType = NSPasteboard.PasteboardType("com.flamingo.sidebar.folder")
     private static let cellID = NSUserInterfaceItemIdentifier("sidebar.cell")
     private static let rowID = NSUserInterfaceItemIdentifier("sidebar.row")
 
@@ -116,7 +125,8 @@ final class SidebarCoordinator: NSObject, NSOutlineViewDataSource, NSOutlineView
     private var scroll: NSScrollView!
 
     private var tree = FileTree.empty
-    private var vault: Vault?
+    private var vault: Vault? { tree.vault }
+    private var revision = 0
     /// Expanded folder paths. Kept across rebuilds and persisted per vault.
     private var expanded: Set<String> = []
     private var lastSelected: FileRef?
@@ -137,13 +147,17 @@ final class SidebarCoordinator: NSObject, NSOutlineViewDataSource, NSOutlineView
     }
 
     /// Called from `makeNSView` and every `updateNSView`. Cheap unless something changed.
-    func apply(tree: FileTree, vault: Vault?, selected: FileRef?, reveal: RevealRequest?, topInset: CGFloat) {
+    func apply(tree: FileTree, revision: Int, selected: FileRef?, reveal: RevealRequest?, topInset: CGFloat) {
         let top = topInset + Theme.Space.s
         if scroll.contentInsets.top != top {
             scroll.contentInsets = NSEdgeInsets(top: top, left: 0, bottom: Theme.Space.s, right: 0)
         }
-        if tree.root !== self.tree.root {
-            reload(tree: tree, vault: vault, selected: selected)
+        if tree !== self.tree {
+            self.revision = revision
+            reload(tree: tree, selected: selected)
+        } else if revision != self.revision {
+            self.revision = revision
+            refresh(state.changedFolders)
         }
         if let reveal, reveal.id != lastRevealID {
             lastRevealID = reveal.id
@@ -152,14 +166,20 @@ final class SidebarCoordinator: NSObject, NSOutlineViewDataSource, NSOutlineView
         if selected != lastSelected {
             lastSelected = selected
             if let selected {
-                if selectedNode?.ref != selected { self.reveal(selected, scroll: true) }
-            } else if let node = selectedNode, !node.isFolder {
-                // Cleared from outside (vault switch, file gone). A selected folder stays:
-                // that is the sidebar's own doing, and the preview is empty either way.
-                suppressSelection = true
-                outline.deselectAll(nil)
-                suppressSelection = false
+                if selectedNode?.ref != selected, !self.reveal(selected, scroll: true) { deselectFile() }
+            } else {
+                deselectFile()
             }
+        }
+    }
+
+    /// Clears a file selection made from outside (vault switch, file gone, a file under no
+    /// pin). A selected folder stays: that is the sidebar's own doing.
+    private func deselectFile() {
+        if let node = selectedNode, !node.isFolder {
+            suppressSelection = true
+            outline.deselectAll(nil)
+            suppressSelection = false
         }
     }
 
@@ -170,24 +190,39 @@ final class SidebarCoordinator: NSObject, NSOutlineViewDataSource, NSOutlineView
 
     // MARK: Reload, expansion, reveal
 
-    private func reload(tree: FileTree, vault: Vault?, selected: FileRef?) {
+    private func reload(tree: FileTree, selected: FileRef?) {
         self.tree = tree
-        self.vault = vault
         restoring = true
         suppressSelection = true
         outline.reloadData()
-        let remembered = vault.flatMap { Defaults.expandedFolders(in: $0) } ?? tree.defaultExpanded
-        expanded = remembered.filter { tree.node(at: $0)?.isFolder == true }
+        // Pins start open; whatever the user opened or closed since is remembered.
+        expanded = vault.flatMap { Defaults.expandedFolders(in: $0) } ?? Set(tree.root.children.map(\.id))
         // Top level only; `outlineViewItemDidExpand` carries the remembered state inward.
-        for child in tree.root.children where child.isFolder && expanded.contains(child.id) {
-            outline.expandItem(child)
+        for pin in tree.root.children where expanded.contains(pin.id) {
+            outline.expandItem(pin)
         }
-        var row = -1
-        if let selected, let node = tree.node(for: selected) { row = outline.row(forItem: node) }
-        if row >= 0 {
-            outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        } else {
-            outline.deselectAll(nil)
+        if let selected { _ = reveal(selected, scroll: true) } else { outline.deselectAll(nil) }
+        suppressSelection = false
+        restoring = false
+    }
+
+    /// Re-lists loaded folders whose contents changed on disk. `""` means every one.
+    private func refresh(_ folders: Set<String>) {
+        guard !folders.isEmpty else { return }
+        let targets = folders.contains("") ? tree.loadedFolders : folders.flatMap { tree.loadedNodes(at: $0) }
+        var changed = false
+        restoring = true
+        suppressSelection = true
+        for node in targets where tree.refresh(node) {
+            changed = true
+            outline.reloadItem(node, reloadChildren: true)
+            for child in node.children where child.isFolder && expanded.contains(child.id) && !outline.isItemExpanded(child) {
+                outline.expandItem(child)
+            }
+        }
+        if changed, let ref = state.selected, let node = tree.node(for: ref) {
+            let row = outline.row(forItem: node)
+            if row >= 0, outline.selectedRow != row { outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
         }
         suppressSelection = false
         restoring = false
@@ -199,18 +234,24 @@ final class SidebarCoordinator: NSObject, NSOutlineViewDataSource, NSOutlineView
     }
 
     /// Expands the file's ancestors (outermost first), selects its row and, if asked,
-    /// scrolls it into view. Never calls back into `state.select`.
-    private func reveal(_ ref: FileRef, scroll shouldScroll: Bool) {
-        guard let node = tree.node(for: ref) else { return }
-        for folder in node.ancestors.reversed() where !outline.isItemExpanded(folder) {
+    /// scrolls it into view. Never calls back into `state.select`. `false` when no pin
+    /// shows the file.
+    @discardableResult
+    private func reveal(_ ref: FileRef, scroll shouldScroll: Bool) -> Bool {
+        guard let node = tree.node(for: ref) else { return false }
+        var ancestors: [FileNode] = []
+        var p = node.parent
+        while let n = p, n.depth >= 0 { ancestors.append(n); p = n.parent }
+        for folder in ancestors.reversed() where !outline.isItemExpanded(folder) {
             outline.expandItem(folder)
         }
         let row = outline.row(forItem: node)
-        guard row >= 0 else { return }
+        guard row >= 0 else { return false }
         suppressSelection = true
         outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         suppressSelection = false
         if shouldScroll { scrollRowIntoView(row) }
+        return true
     }
 
     /// `scrollRowToVisible` ignores the title-bar inset; this keeps the row clear of it,
@@ -248,15 +289,70 @@ final class SidebarCoordinator: NSObject, NSOutlineViewDataSource, NSOutlineView
     // MARK: Data source
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        ((item as? FileNode) ?? tree.root).children.count
+        guard let node = item as? FileNode else { return tree.root.children.count }
+        return node.isFolder ? tree.load(node).count : 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        ((item as? FileNode) ?? tree.root).children[index]
+        guard let node = item as? FileNode else { return tree.root.children[index] }
+        return tree.load(node)[index]
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         (item as? FileNode)?.isFolder ?? false
+    }
+
+    // MARK: Drag and drop
+
+    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
+        guard let node = item as? FileNode, node.isFolder else { return nil }
+        let pb = NSPasteboardItem()
+        pb.setString(node.id, forType: Self.folderType)
+        return pb
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?,
+                     proposedChildIndex index: Int) -> NSDragOperation {
+        let fromSidebar = info.draggingPasteboard.string(forType: Self.folderType) != nil
+        guard fromSidebar || !droppedFolders(info).isEmpty else { return [] }
+        // Only between pins: a drop onto or inside a pin lands just before that pin.
+        let pins = tree.root.children
+        var target = index
+        if let node = item as? FileNode, let pin = node.pin, let i = pins.firstIndex(of: pin) { target = i }
+        else if target == NSOutlineViewDropOnItemIndex { target = pins.count }
+        outlineView.setDropItem(nil, dropChildIndex: target)
+        return fromSidebar ? .move : .link
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+        let at = index == NSOutlineViewDropOnItemIndex ? nil : index
+        if let path = info.draggingPasteboard.string(forType: Self.folderType) {
+            state.pin(path: path, at: at)
+            return true
+        }
+        var pinned = false
+        for (k, url) in droppedFolders(info).enumerated() {
+            pinned = state.pin(url, at: at.map { $0 + k }) || pinned
+        }
+        return pinned
+    }
+
+    /// Folders inside the vault among dropped file URLs.
+    private func droppedFolders(_ info: NSDraggingInfo) -> [URL] {
+        guard let vault else { return [] }
+        let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        return urls.filter { url in
+            var isDir: ObjCBool = false
+            return vault.contains(url) && !vault.isState(url) && !VaultScanner.isPackage(url)
+                && FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
+        }
+    }
+
+    /// ⌫ on a selected pin. `false` (so the key beeps) on anything else.
+    func unpinSelected() -> Bool {
+        guard let node = selectedNode, node.isPin else { return false }
+        state.unpin(path: node.id)
+        return true
     }
 
     // MARK: Delegate
@@ -342,8 +438,23 @@ final class SidebarCoordinator: NSObject, NSOutlineViewDataSource, NSOutlineView
             menu.addItem(.separator())
             add("Leave a Thought", #selector(leaveThought(_:)))
         } else {
+            if node.isPin {
+                add("Unpin", #selector(unpin(_:)))
+            } else if !state.pins.contains(node.id) {
+                add("Pin", #selector(pin(_:)))
+            }
             add("Reveal in Finder", #selector(revealInFinder(_:)))
         }
+    }
+
+    @objc private func pin(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? FileNode else { return }
+        state.pin(path: node.id)
+    }
+
+    @objc private func unpin(_ sender: NSMenuItem) {
+        guard let node = sender.representedObject as? FileNode else { return }
+        state.unpin(path: node.id)
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -388,6 +499,14 @@ final class SidebarCoordinator: NSObject, NSOutlineViewDataSource, NSOutlineView
 final class SidebarOutlineView: NSOutlineView {
     /// The row a context menu is open for, else -1.
     private(set) var contextRow = -1
+    /// ⌫ / ⌦ with nothing held. Returns `false` to let the key through (it beeps).
+    var onDelete: (() -> Bool)?
+
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .shift, .control])
+        if (event.keyCode == 51 || event.keyCode == 117), modifiers.isEmpty, onDelete?() == true { return }
+        super.keyDown(with: event)
+    }
 
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
         var frame = super.frameOfOutlineCell(atRow: row)

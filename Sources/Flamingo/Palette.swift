@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import FlamingoCore
 import FlamingoDesign
@@ -13,6 +14,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
     private(set) var isVisible = false
 
     static let fieldHeight: CGFloat = 40
+    static let statusHeight: CGFloat = 26
     static let recentLimit = 8
     static let matchLimit = 12
     static let hitLimit = 50
@@ -27,6 +29,13 @@ final class PaletteController: NSObject, NSWindowDelegate {
     private var commands: [PaletteCommand] = []
     private var table: Fuzzy.FileTable?
     private var tableFiles: [FileRef] = []
+    /// `AppState.filesVersion` the table was built from; -1 before the first build.
+    private var tableVersion = -1
+    private var tableTask: Task<Void, Never>?
+    private var rankTask: Task<Void, Never>?
+    private var statusSubscription: AnyCancellable?
+    /// Above this many files, building the table and ranking it run off the main thread.
+    static let asyncTableThreshold = 20_000
     private var searchTask: Task<Void, Never>?
     private var mouseMonitor: Any?
     private var observers: [NSObjectProtocol] = []
@@ -58,9 +67,10 @@ final class PaletteController: NSObject, NSWindowDelegate {
         self.state = state
         host = state.hostWindow ?? NSApp.mainWindow
         commands = state.commands.filter(\.enabled)
-        if table == nil || tableFiles != state.files {
-            tableFiles = state.files
-            table = Fuzzy.FileTable(paths: state.files.map(\.relativePath))
+        refreshTable(state: state)
+        statusSubscription = state.$indexStatus.sink { [weak self] status in
+            self?.model.status = Self.statusLine(status)
+            self?.layout()
         }
         let panel = self.panel ?? makePanel()
         generation += 1
@@ -93,6 +103,8 @@ final class PaletteController: NSObject, NSWindowDelegate {
         let gen = generation
         searchTask?.cancel()
         searchTask = nil
+        rankTask?.cancel()
+        statusSubscription = nil
         removeMonitors()
         // Hand key status back only if we still hold it; another panel may have taken it.
         if panel.isKeyWindow, let host, host.isVisible { host.makeKey() }
@@ -158,6 +170,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
         if !items.isEmpty {
             height += Theme.Size.hairline + Theme.Space.xs * 2 + items.reduce(0) { $0 + $1.rowHeight }
         }
+        if model.status != nil { height += Theme.Size.hairline + PaletteController.statusHeight }
         height = min(height, (area.height * 0.6).rounded(.down))
         let top = area.maxY - (area.height * 0.18).rounded()
         let frame = NSRect(x: (area.midX - Theme.Size.panel / 2).rounded(), y: (top - height).rounded(),
@@ -208,12 +221,61 @@ final class PaletteController: NSObject, NSWindowDelegate {
 
     // MARK: Content
 
+    /// Rebuilds the file table when the vault's file list changed since the last build. Big
+    /// lists build off the main thread; the palette ranks against the old table meanwhile.
+    private func refreshTable(state: AppState) {
+        guard tableVersion != state.filesVersion else { return }
+        let version = state.filesVersion
+        let files = state.files
+        tableTask?.cancel()
+        if files.count < Self.asyncTableThreshold {
+            tableVersion = version
+            tableFiles = files
+            table = Fuzzy.FileTable(paths: files.map(\.relativePath))
+            return
+        }
+        tableTask = Task { [weak self] in
+            let built = await Task.detached(priority: .userInitiated) { Fuzzy.FileTable(paths: files.map(\.relativePath)) }.value
+            guard !Task.isCancelled, let self else { return }
+            self.tableVersion = version
+            self.tableFiles = files
+            self.table = built
+            if self.isVisible, self.model.mode == .commands, !self.model.query.isEmpty { self.refreshItems() }
+        }
+    }
+
+    /// `Indexing  12,345 files  410/s`, or nil when no reindex runs.
+    static func statusLine(_ status: VaultSession.IndexStatus?) -> String? {
+        guard let status else { return nil }
+        if let f = status.fraction { return "Reindexing  \(Int(f * 100))%" }
+        guard status.files > 0 else { return "Indexing" }
+        let n = status.files.formatted(.number)
+        let rate = Int(status.perSecond.rounded()).formatted(.number)
+        return "Indexing  \(n) files  \(rate)/s"
+    }
+
     private func refreshItems() {
         guard let state else { model.setItems([]); return }
         switch model.mode {
         case .commands:
             searchTask?.cancel()
-            model.setItems(commandItems(for: model.query, state: state))
+            rankTask?.cancel()
+            let query = model.query
+            if let table, table.count >= Self.asyncTableThreshold, !Fuzzy.Query(query).isEmpty {
+                // Commands show at once; files join when the ranking lands.
+                let files = tableFiles
+                let q = Fuzzy.Query(query)
+                let limit = Self.matchLimit
+                rankTask = Task { [weak self] in
+                    let matches = await Task.detached(priority: .userInitiated) { table.rank(q, limit: limit) }.value
+                    guard !Task.isCancelled, let self, self.isVisible, self.model.query == query else { return }
+                    self.model.setItems(self.commandItems(for: query, state: state,
+                                                          files: matches.map { (files[$0.index], $0.score) }))
+                }
+                model.setItems(commandItems(for: query, state: state, files: []))
+            } else {
+                model.setItems(commandItems(for: query, state: state, files: nil))
+            }
         case .search:
             scheduleSearch(state: state)
         }
@@ -222,7 +284,8 @@ final class PaletteController: NSObject, NSWindowDelegate {
     /// Empty query: recent files, newest first, or the commands when nothing is recent yet
     /// (a fresh launch offers Open Vault… and the recent vaults). Otherwise the best file and
     /// command matches merged by score; ties go to the shorter name, then alphabetical.
-    private func commandItems(for query: String, state: AppState) -> [PaletteItem] {
+    /// `files`: ranked matches computed elsewhere; `nil` ranks the table here.
+    private func commandItems(for query: String, state: AppState, files: [(FileRef, Int)]?) -> [PaletteItem] {
         let q = Fuzzy.Query(query)
         if q.isEmpty {
             var seen: Set<FileRef> = []
@@ -235,7 +298,9 @@ final class PaletteController: NSObject, NSWindowDelegate {
             return recents.isEmpty ? commands.map(PaletteItem.command) : recents
         }
         var scored: [(score: Int, name: String, item: PaletteItem)] = []
-        if let table {
+        if let files {
+            for (ref, score) in files { scored.append((score, ref.name, .file(ref))) }
+        } else if let table {
             for match in table.rank(q, limit: Self.matchLimit) {
                 let ref = tableFiles[match.index]
                 scored.append((match.score, ref.name, .file(ref)))
@@ -321,6 +386,8 @@ final class PaletteModel: ObservableObject {
     @Published private(set) var highlight = 0
     /// Bumped whenever `items` are replaced, so the list scrolls back to the top.
     @Published private(set) var version = 0
+    /// One tertiary line at the foot of the panel while the vault indexes.
+    @Published var status: String?
 
     weak var field: NSTextField?
     var queryDidChange: (() -> Void)?
@@ -331,6 +398,7 @@ final class PaletteModel: ObservableObject {
     func setItems(_ new: [PaletteItem]) {
         var seen: Set<String> = []
         items = new.filter { seen.insert($0.id).inserted }
+        Log.debug("palette: \(items.prefix(5).map(\.id))\(status.map { " | " + $0 } ?? "")")
         highlight = 0
         version &+= 1
         onItems?()

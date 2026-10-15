@@ -21,7 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
+        QAHook.install()
+        MainWindow.isGraphMode = { [weak self] in self?.state.mode == .graph }
+        let w = MainWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                          backing: .buffered, defer: false)
         w.title = "Flamingo"
@@ -55,6 +57,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             state.open(URL(fileURLWithPath: args[i + 1]))
         } else {
             state.restoreLastVault()
+        }
+        // The rail's local graph takes first responder as it appears; keys start in the sidebar.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, let w = self.window, !(w.firstResponder is NSText) else { return }
+            self.state.focusSidebar?()
         }
     }
 
@@ -110,5 +117,26 @@ enum AppIcon {
             return true
         }
         NSApp.applicationIconImage = image
+    }
+}
+
+/// The main window. Plan 06's graph canvas takes first responder whenever it enters a window,
+/// and the rail rebuilds its local graph on every selection, so the sidebar would lose the
+/// keyboard after one arrow press. Outside Graph mode the canvas gets focus only by a click.
+final class MainWindow: NSWindow {
+    static var isGraphMode: () -> Bool = { false }
+
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        if let view = responder as? NSView, String(describing: type(of: view)) == "GraphInputNSView",
+           !Self.isGraphMode(), !Self.isClick(in: view) {
+            return false
+        }
+        return super.makeFirstResponder(responder)
+    }
+
+    private static func isClick(in view: NSView) -> Bool {
+        guard let e = NSApp.currentEvent, [.leftMouseDown, .rightMouseDown, .otherMouseDown].contains(e.type),
+              e.window === view.window else { return false }
+        return view.bounds.contains(view.convert(e.locationInWindow, from: nil))
     }
 }

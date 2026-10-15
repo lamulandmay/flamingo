@@ -193,7 +193,7 @@ extension AppDelegate: NSMenuItemValidation {
             item.title = "Open in " + (state.defaultAppName(for: state.selected) ?? "Default App")
             return hasFile
         case #selector(reindex(_:)):
-            return hasVault && state.indexProgress == nil
+            return hasVault && state.indexStatus == nil
         case #selector(previousAnchor(_:)), #selector(nextAnchor(_:)):
             let prev = item.action == #selector(previousAnchor(_:))
             let kind = state.navigator?.anchorKind ?? state.sections.first?.anchor.kind

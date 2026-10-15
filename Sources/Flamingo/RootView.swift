@@ -21,12 +21,18 @@ struct RootView: View {
                 SidebarDivider()
                 VStack(spacing: 0) {
                     TopBar(height: titlebar)
-                    Hairline().overlay(alignment: .top) {
-                        if let p = state.indexProgress { ProgressHairline(value: p) }
-                    }
+                    Hairline()
                     HStack(spacing: 0) {
                         content
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .overlay(alignment: .bottom) {
+                                if let toast = state.toast {
+                                    Toast(toast.text, action: toast.action, perform: toast.perform)
+                                        .frame(maxWidth: 360)
+                                        .padding(Theme.Space.l)
+                                        .id(toast.id)
+                                }
+                            }
                         if state.railShown {
                             VHairline()
                             Rail(file: state.selected)

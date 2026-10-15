@@ -60,12 +60,28 @@ final class AppState: ObservableObject {
     // MARK: Shell state
 
     @Published private(set) var tree = FileTree.empty
+    /// Folders (relative paths) whose listing changed on disk; `""` among them means all.
+    /// The sidebar re-lists the ones it has loaded when `treeRevision` moves.
+    @Published private(set) var treeRevision = 0
+    private(set) var changedFolders: Set<String> = []
+    @Published private(set) var pins = Pins()
+    /// `files` as a set, for membership on a whole-disk vault.
+    private(set) var fileSet: Set<FileRef> = []
+    /// Bumped whenever `files` is replaced, so the palette rebuilds its table only then.
+    private(set) var filesVersion = 0
+    /// `false` until the first full walk of the vault lands; `files` is partial until then.
+    private var listed = false
+    /// One line over the content with at most one action, such as Undo after an unpin.
+    @Published private(set) var toast: ToastMessage?
+    private var toastTask: Task<Void, Never>?
+    /// `true` when `~/Library/Mail` or `~/Library/Messages` exists but can't be read.
+    @Published private(set) var needsFullDiskAccess = false
     @Published private(set) var comments: [Comment] = []
     @Published private(set) var commentCounts: [FileRef: Int] = [:]
     @Published private(set) var graph = Graph()
     @Published private(set) var sections: [FlamingoExtract.Section] = []
-    /// `nil` when no reindex is running.
-    @Published private(set) var indexProgress: Double?
+    /// `nil` when no reindex is running. The palette shows it; nothing else on screen does.
+    @Published private(set) var indexStatus: VaultSession.IndexStatus?
     @Published var railVisible = Defaults.railVisible { didSet { Defaults.railVisible = railVisible } }
     /// Set when the user shows the rail on a window too narrow to show it by itself.
     @Published private(set) var railPinned = false
@@ -120,10 +136,15 @@ final class AppState: ObservableObject {
         if v == vault { rescan(); return }
 
         session?.stop()
+        indexStatus = nil
         let s = VaultSession(vault: v)
         session = s
         vault = v
-        files = []; tree = .empty
+        VaultScanner.writeDefaultIgnoreFile(in: v)
+        pins = Pins.loadOrCreate(in: v)
+        listed = false
+        setFiles([])
+        tree = FileTree(vault: v, pins: pins)
         selected = nil; anchor = nil
         comments = []; commentCounts = [:]; graph = Graph(); sections = []
         history = History()
@@ -145,26 +166,68 @@ final class AppState: ObservableObject {
             Task { @MainActor in self?.sidecarsChanged(targets, in: s) }
         }
 
+        if let last = Defaults.lastSelected(in: v), v.exists(last) {
+            select(last, source: .other)
+        }
+        s.watcher.start()
+        checkFullDiskAccess()
         Task { [weak self] in
-            guard let self else { return }
-            let (files, tree) = await s.scan()
-            guard self.session === s else { return }
-            self.tree = tree
-            self.files = files
-            if let last = Defaults.lastSelected(in: v), files.contains(last) {
-                select(last, source: .other)
-            } else if let first = files.first {
-                select(first, source: .other)
+            await self?.refreshCounts()
+            self?.reindex()
+        }
+        Task { [weak self] in
+            let files = await s.listFiles { [weak self] partial in
+                guard let self, self.session === s, !self.listed else { return }
+                self.setFiles(partial)
             }
-            s.watcher.start()
-            await refreshCounts()
-            reindex()
+            guard let self, self.session === s else { return }
+            self.listed = true
+            self.setFiles(files)
+            if self.selected == nil, let first = self.tree.root.children.lazy.compactMap({ self.firstFile(in: $0) }).first {
+                self.select(first, source: .other)
+            }
         }
     }
 
+    private func setFiles(_ list: [FileRef]) {
+        files = list
+        fileSet = Set(list)
+        filesVersion &+= 1
+    }
+
+    /// The first file in the sidebar's order under `node`, without listing deeper than needed.
+    private func firstFile(in node: FileNode, depth: Int = 0) -> FileRef? {
+        guard depth < 4 else { return nil }
+        let kids = tree.load(node)
+        if let f = kids.first(where: { !$0.isFolder })?.ref { return f }
+        for k in kids where k.isFolder { if let f = firstFile(in: k, depth: depth + 1) { return f } }
+        return nil
+    }
+
+    private func checkFullDiskAccess() {
+        Task { [weak self] in
+            let blocked = await Task.detached(priority: .utility) {
+                let home = FileManager.default.homeDirectoryForCurrentUser
+                return ["Library/Mail", "Library/Messages"].contains { sub in
+                    let url = home.appendingPathComponent(sub)
+                    guard FileManager.default.fileExists(atPath: url.path) else { return false }
+                    return (try? FileManager.default.contentsOfDirectory(atPath: url.path)) == nil
+                }
+            }.value
+            self?.needsFullDiskAccess = blocked
+        }
+    }
+
+    func openFullDiskAccessSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// The last vault, or on first launch the home folder.
     func restoreLastVault() {
-        guard vault == nil, let p = Defaults.lastVault else { return }
-        open(URL(fileURLWithPath: p))
+        guard vault == nil else { return }
+        open(Defaults.lastVault.map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser)
     }
 
     func openVaultDialog() {
@@ -173,43 +236,163 @@ final class AppState: ObservableObject {
         p.canChooseFiles = false
         p.allowsMultipleSelection = false
         p.canCreateDirectories = true
+        p.showsHiddenFiles = true
         p.prompt = "Open"
-        if let v = vault { p.directoryURL = v.root.deletingLastPathComponent() }
+        // At the top of the disk, so `/` itself is one click and the home folder is two.
+        p.directoryURL = URL(fileURLWithPath: "/")
         guard p.runModal() == .OK, let url = p.url else { return }
         open(url)
     }
 
-    /// Opens a dropped folder as a vault, or selects a dropped file that lives in the vault.
+    // MARK: Pins
+
+    /// "Pin Folder…": any folder inside the vault, hidden ones included.
+    func pinFolderDialog() {
+        guard let v = vault else { return }
+        let p = NSOpenPanel()
+        p.canChooseDirectories = true
+        p.canChooseFiles = false
+        p.allowsMultipleSelection = true
+        p.showsHiddenFiles = true
+        p.prompt = "Pin"
+        p.directoryURL = v.root
+        guard p.runModal() == .OK else { return }
+        var pinned = false
+        for url in p.urls { pinned = pin(url) || pinned }
+        if !pinned { NSSound.beep() }
+    }
+
+    /// Pins a folder given by URL. `false` when it is outside the vault or not a folder.
+    @discardableResult
+    func pin(_ url: URL, at index: Int? = nil) -> Bool {
+        guard let v = vault, let rel = v.relativePath(of: url) else { return false }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue,
+              !VaultScanner.isPackage(url), !v.isState(url) else { return false }
+        pin(path: rel, at: index)
+        return true
+    }
+
+    /// Pins the folder at `path`; an existing pin moves to `index` instead.
+    func pin(path: String, at index: Int? = nil) {
+        var p = pins
+        if let from = p.paths.firstIndex(of: path) {
+            guard let index else { return }
+            p.move(from: from, to: index > from ? index - 1 : index)
+        } else {
+            p.pin(path, at: index)
+        }
+        savePins(p)
+    }
+
+    /// No confirmation; the toast (and ⌘Z) puts it back where it was.
+    func unpin(path: String) {
+        var p = pins
+        guard let index = p.unpin(path) else { return }
+        savePins(p)
+        let name = path.isEmpty ? (vault?.name ?? path) : (path as NSString).lastPathComponent
+        let restore: () -> Void = { [weak self] in
+            guard let self else { return }
+            var p = self.pins
+            p.pin(path, at: index)
+            self.savePins(p)
+            self.dismissToast()
+        }
+        hostWindow?.undoManager?.registerUndo(withTarget: self) { _ in MainActor.assumeIsolated { restore() } }
+        hostWindow?.undoManager?.setActionName("Unpin")
+        showToast(ToastMessage(text: "Unpinned " + name, action: "Undo", perform: restore))
+    }
+
+    func movePin(from: Int, to: Int) {
+        var p = pins
+        p.move(from: from, to: to)
+        savePins(p)
+    }
+
+    private func savePins(_ new: Pins) {
+        guard let v = vault, new != pins else { return }
+        pins = new
+        try? new.save(in: v)
+        tree = FileTree(vault: v, pins: new)
+    }
+
+    // MARK: Toast
+
+    func showToast(_ message: ToastMessage) {
+        toastTask?.cancel()
+        withAnimation(Theme.Motion.fast) { toast = message }
+        toastTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.dismissToast()
+        }
+    }
+
+    func dismissToast() {
+        toastTask?.cancel()
+        withAnimation(Theme.Motion.fast) { toast = nil }
+    }
+
+    /// A dropped folder inside the vault is pinned; one outside it opens as the vault. A
+    /// dropped file inside the vault is shown.
     @discardableResult
     func handleDropped(_ urls: [URL]) -> Bool {
         for url in urls {
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
             if isDir.boolValue, !VaultScanner.isPackage(url) {
-                open(url); return true
+                if vault?.contains(url) == true { pin(url) } else { open(url) }
+                return true
             }
-            if let v = vault, let ref = v.ref(for: url), files.contains(ref) {
+            if let v = vault, let ref = v.ref(for: url), v.exists(ref) {
                 jump(to: ref, anchor: nil); return true
             }
         }
         return false
     }
 
+    /// The whole file list again, after the watcher lost events or the rules changed.
     private func rescan() {
         guard let s = session else { return }
         Task {
-            let (files, tree) = await s.scan()
+            let files = await s.listFiles()
             guard self.session === s else { return }
-            self.tree = tree
-            self.files = files
-            if let sel = selected, !files.contains(sel) { selected = nil }
-            history.prune(keeping: Set(files))
+            self.setFiles(files)
+            if let sel = selected, !vault!.exists(sel) { selected = nil }
+            history.prune(keeping: fileSet)
         }
+    }
+
+    /// Patches `files` and the sidebar's loaded folders for what the watcher saw, without
+    /// walking the vault again (unless it asks for everything).
+    private func applyDiskChanges(_ refs: [FileRef], in s: VaultSession) {
+        if refs.contains(where: { $0.relativePath.isEmpty }) {
+            tree.reloadRules()
+            noteFoldersChanged([""])
+            rescan()
+            return
+        }
+        noteFoldersChanged(Set(refs.map(\.directory)).union(refs.map(\.relativePath)))
+        Task {
+            let (added, removed) = await s.diskChanges(for: refs, known: fileSet, files: files)
+            guard self.session === s, !added.isEmpty || !removed.isEmpty else { return }
+            fileSet.subtract(removed)
+            fileSet.formUnion(added)
+            if !removed.isEmpty { files.removeAll { removed.contains($0) } }
+            files.append(contentsOf: added.filter { !removed.contains($0) })
+            filesVersion &+= 1
+            if let sel = selected, removed.contains(sel) { selected = nil }
+        }
+    }
+
+    private func noteFoldersChanged(_ folders: Set<String>) {
+        changedFolders = folders
+        treeRevision &+= 1
     }
 
     private func filesChanged(_ refs: [FileRef], in s: VaultSession) {
         guard session === s else { return }
-        rescan()
+        applyDiskChanges(refs, in: s)
         let all = refs.contains { $0.relativePath.isEmpty }
         if let sel = selected, all || refs.contains(sel) {
             Task { await refreshSections() }
@@ -332,7 +515,7 @@ final class AppState: ObservableObject {
 
     /// Trail "resume": the files of a session become the history, oldest first.
     func resume(_ files: [FileRef]) {
-        let present = files.filter { self.files.contains($0) }
+        let present = files.filter { self.fileSet.contains($0) || self.vault?.exists($0) == true }
         guard !present.isEmpty else { return }
         history.replace(with: present)
         mode = .files
@@ -446,18 +629,16 @@ final class AppState: ObservableObject {
 
     /// Incremental at launch and after changes; `force` (the menu command) re-extracts everything.
     func reindex(force: Bool = false) {
-        guard let s = session, indexProgress == nil else { return }
-        indexProgress = 0
+        guard let s = session, indexStatus == nil else { return }
+        indexStatus = VaultSession.IndexStatus(fraction: force ? 0 : nil)
         Task { [weak self] in
-            await s.reindex(force: force) { [weak self] p in
-                guard let self, self.session === s else { return }
-                self.indexProgress = p
+            await s.reindex(force: force) { [weak self] status in
+                guard let self, self.session === s, self.indexStatus != nil else { return }
+                self.indexStatus = status
             }
             guard let self, self.session === s else { return }
-            self.indexProgress = 1
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            guard self.session === s else { return }
-            self.indexProgress = nil
+            self.indexStatus = nil
+            self.tree.reloadRules()
             await self.refreshSections()
             await self.refreshCounts()
             self.markGraphStale()
@@ -569,7 +750,8 @@ final class AppState: ObservableObject {
             PaletteCommand(id: "openwith", title: "Open in " + (defaultAppName(for: selected) ?? "Default App"), keys: "⌘↩", symbol: "arrow.up.forward.app", enabled: hasFile) { [weak self] in self?.openExternally() },
             PaletteCommand(id: "reveal", title: "Reveal in Finder", keys: "⌘⇧R", symbol: "finder", enabled: hasFile) { [weak self] in self?.revealInFinder() },
             PaletteCommand(id: "copypath", title: "Copy Path", keys: nil, symbol: "doc.on.doc", enabled: hasFile) { [weak self] in self?.copyPath() },
-            PaletteCommand(id: "reindex", title: "Reindex Vault", keys: nil, symbol: "arrow.clockwise", enabled: hasVault && indexProgress == nil) { [weak self] in self?.reindex(force: true) },
+            PaletteCommand(id: "pin", title: "Pin Folder…", keys: nil, symbol: "pin", enabled: hasVault) { [weak self] in self?.pinFolderDialog() },
+            PaletteCommand(id: "reindex", title: "Reindex Vault", keys: nil, symbol: "arrow.clockwise", enabled: hasVault && indexStatus == nil) { [weak self] in self?.reindex(force: true) },
             PaletteCommand(id: "global", title: captureGlobal ? "Stop Capturing From Other Apps" : "Capture From Other Apps", keys: captureGlobalKeys, symbol: "keyboard") { [weak self] in
                 self?.captureGlobal.toggle()
             },
@@ -577,10 +759,23 @@ final class AppState: ObservableObject {
                 self?.trailEnabled.toggle()
             },
         ]
+        if needsFullDiskAccess {
+            list.append(PaletteCommand(id: "fda", title: "Grant Full Disk Access", keys: nil, symbol: "lock.open") { [weak self] in
+                self?.openFullDiskAccessSettings()
+            })
+        }
         for (path, title) in Defaults.recentVaultTitles() where path != vault?.root.path {
             let url = URL(fileURLWithPath: path)
             list.append(PaletteCommand(id: "recent:" + path, title: "Open " + title, keys: nil, symbol: "clock") { [weak self] in self?.open(url) })
         }
         return list
     }
+}
+
+/// What `AppState.toast` shows: one line and at most one action.
+struct ToastMessage: Identifiable {
+    let id = UUID()
+    let text: String
+    var action: String?
+    var perform: (() -> Void)?
 }
