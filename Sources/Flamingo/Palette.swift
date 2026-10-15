@@ -68,7 +68,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
         host = state.hostWindow ?? NSApp.mainWindow
         commands = state.commands.filter(\.enabled)
         refreshTable(state: state)
-        statusSubscription = state.$indexStatus.sink { [weak self] status in
+        statusSubscription = state.indexing.$status.sink { [weak self] status in
             self?.model.status = Self.statusLine(status)
             self?.layout()
         }

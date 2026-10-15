@@ -96,6 +96,15 @@ final class VaultSession {
     /// Set by `stop()`; walks and the reindex check it between files.
     let cancelled = Flag()
 
+    /// The canonical file list. Touched only on `filesQueue`; the main thread gets snapshots.
+    private final class Listing: @unchecked Sendable {
+        var files: [FileRef] = []
+        var set: Set<FileRef> = []
+        var complete = false
+    }
+    private let listing = Listing()
+    private let filesQueue = DispatchQueue(label: "com.flamingo.files", qos: .utility)
+
     /// Every user file, walked at `.utility` QoS, unsorted, with the same files as a set
     /// (built here so the main thread never hashes a whole disk). Empty if the session stops
     /// first. `partial` gets what has been found so far every couple of seconds, so ⌘K can
@@ -103,6 +112,8 @@ final class VaultSession {
     func listFiles(partial: (@MainActor ([FileRef], Set<FileRef>) -> Void)? = nil) async -> ([FileRef], Set<FileRef>) {
         let v = vault
         let cancelled = cancelled
+        let listing = listing
+        let filesQueue = filesQueue
         return await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .utility).async {
                 var out: [FileRef] = []
@@ -118,18 +129,28 @@ final class VaultSession {
                     }
                     return !cancelled.isSet
                 }
-                cont.resume(returning: cancelled.isSet ? ([], []) : (out, set))
+                if cancelled.isSet { cont.resume(returning: ([], [])); return }
+                filesQueue.async {
+                    let old = (listing.files, listing.set)
+                    (listing.files, listing.set, listing.complete) = (out, set, true)
+                    cont.resume(returning: (out, set))
+                    withExtendedLifetime(old) {}
+                }
             }
         }
     }
 
-    /// How the file list changes for these watcher refs, worked out off the main thread:
-    /// files to add (a new folder brings everything under it) and listed files to drop (a
-    /// vanished folder takes its contents). `known` and `files` are the current list.
-    func diskChanges(for refs: [FileRef], known: Set<FileRef>, files: [FileRef]) async -> (added: [FileRef], removed: Set<FileRef>) {
+    /// Applies watcher refs to the file list off the main thread: files appear (a new folder
+    /// brings everything under it) and vanish (a vanished folder takes its contents). Returns
+    /// the new list and set, or nil when nothing changed or the first walk hasn't finished
+    /// (it will see the change itself). Serialized, so overlapping batches never lose one.
+    func applyDiskChanges(_ refs: [FileRef]) async -> ([FileRef], Set<FileRef>)? {
         let v = vault
+        let listing = listing
+        let filesQueue = filesQueue
         return await withCheckedContinuation { cont in
-            DispatchQueue.global(qos: .utility).async {
+            filesQueue.async {
+                guard listing.complete else { cont.resume(returning: nil); return }
                 let rules = VaultScanner.ignoreRules(in: v)
                 var added: [FileRef] = [], removed = Set<FileRef>(), goneFolders: [String] = []
                 for ref in refs {
@@ -138,20 +159,28 @@ final class VaultSession {
                     let exists = FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir)
                     let folder = exists && isDir.boolValue && !VaultScanner.isPackage(url)
                     if !exists || !VaultScanner.admits(ref.relativePath, isDirectory: folder, ignore: rules) {
-                        if known.contains(ref) { removed.insert(ref) } else { goneFolders.append(ref.relativePath + "/") }
+                        if listing.set.contains(ref) { removed.insert(ref) } else { goneFolders.append(ref.relativePath + "/") }
                     } else if folder {
                         VaultScanner.scan(in: v, ignore: rules, under: ref.relativePath) { f in
-                            if !known.contains(f) { added.append(f) }
+                            if !listing.set.contains(f) { added.append(f) }
                             return true
                         }
-                    } else if !known.contains(ref) {
+                    } else if !listing.set.contains(ref) {
                         added.append(ref)
                     }
                 }
                 if !goneFolders.isEmpty {
-                    for f in files where goneFolders.contains(where: { f.relativePath.hasPrefix($0) }) { removed.insert(f) }
+                    for f in listing.files where goneFolders.contains(where: { f.relativePath.hasPrefix($0) }) { removed.insert(f) }
                 }
-                cont.resume(returning: (added, removed))
+                added = added.filter { !removed.contains($0) }
+                guard !added.isEmpty || !removed.isEmpty else { cont.resume(returning: nil); return }
+                if !removed.isEmpty {
+                    listing.files.removeAll { removed.contains($0) }
+                    listing.set.subtract(removed)
+                }
+                listing.files.append(contentsOf: added)
+                listing.set.formUnion(added)
+                cont.resume(returning: (listing.files, listing.set))
             }
         }
     }

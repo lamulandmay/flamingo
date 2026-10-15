@@ -80,8 +80,10 @@ final class AppState: ObservableObject {
     @Published private(set) var commentCounts: [FileRef: Int] = [:]
     @Published private(set) var graph = Graph()
     @Published private(set) var sections: [FlamingoExtract.Section] = []
-    /// `nil` when no reindex is running. The palette shows it; nothing else on screen does.
-    @Published private(set) var indexStatus: VaultSession.IndexStatus?
+    /// `nil` when no reindex is running. The palette shows it; nothing else on screen does,
+    /// so it lives outside this object's `objectWillChange` and ticks don't redraw the window.
+    let indexing = IndexingModel()
+    var indexStatus: VaultSession.IndexStatus? { indexing.status }
     @Published var railVisible = Defaults.railVisible { didSet { Defaults.railVisible = railVisible } }
     /// Set when the user shows the rail on a window too narrow to show it by itself.
     @Published private(set) var railPinned = false
@@ -136,7 +138,7 @@ final class AppState: ObservableObject {
         if v == vault { rescan(); return }
 
         session?.stop()
-        indexStatus = nil
+        indexing.status = nil
         let s = VaultSession(vault: v)
         session = s
         vault = v
@@ -381,14 +383,10 @@ final class AppState: ObservableObject {
         }
         noteFoldersChanged(Set(refs.map(\.directory)).union(refs.map(\.relativePath)))
         Task {
-            let (added, removed) = await s.diskChanges(for: refs, known: fileSet, files: files)
-            guard self.session === s, !added.isEmpty || !removed.isEmpty else { return }
-            fileSet.subtract(removed)
-            fileSet.formUnion(added)
-            if !removed.isEmpty { files.removeAll { removed.contains($0) } }
-            files.append(contentsOf: added.filter { !removed.contains($0) })
-            filesVersion &+= 1
-            if let sel = selected, removed.contains(sel) { selected = nil }
+            guard let (list, set) = await s.applyDiskChanges(refs), self.session === s else { return }
+            let gone = selected.map { !set.contains($0) } ?? false
+            setFiles(list, set: set)
+            if gone, let sel = selected, !vault!.exists(sel) { selected = nil }
         }
     }
 
@@ -637,14 +635,14 @@ final class AppState: ObservableObject {
     /// Incremental at launch and after changes; `force` (the menu command) re-extracts everything.
     func reindex(force: Bool = false) {
         guard let s = session, indexStatus == nil else { return }
-        indexStatus = VaultSession.IndexStatus(fraction: force ? 0 : nil)
+        indexing.status = VaultSession.IndexStatus(fraction: force ? 0 : nil)
         Task { [weak self] in
             await s.reindex(force: force) { [weak self] status in
                 guard let self, self.session === s, self.indexStatus != nil else { return }
-                self.indexStatus = status
+                self.indexing.status = status
             }
             guard let self, self.session === s else { return }
-            self.indexStatus = nil
+            self.indexing.status = nil
             self.tree.reloadRules()
             await self.refreshSections()
             await self.refreshCounts()
@@ -825,4 +823,10 @@ struct ToastMessage: Identifiable {
     let text: String
     var action: String?
     var perform: (() -> Void)?
+}
+
+/// Reindex progress, observed by the palette only.
+@MainActor
+final class IndexingModel: ObservableObject {
+    @Published var status: VaultSession.IndexStatus?
 }
