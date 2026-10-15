@@ -132,7 +132,7 @@ final class VaultWatcherTests: XCTestCase {
         XCTAssertEqual(c(".flamingoignore", modified)?.ref.relativePath, "")
         XCTAssertNil(c("debug.log", modified))
         XCTAssertNil(c("build/out.txt", modified))
-        XCTAssertNil(c("Library/Preferences/x.plist", modified))
+        XCTAssertEqual(c("Library/Preferences/x.plist", modified)?.ref.relativePath, "Library/Preferences/x.plist", "whole-Mac vaults index ~/Library")
         XCTAssertEqual(c("proj/Library/notes.txt", modified)?.ref.relativePath, "proj/Library/notes.txt")
         XCTAssertEqual(c("notes.txt", modified)?.ref.relativePath, "notes.txt")
         let dropped = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)

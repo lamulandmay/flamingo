@@ -195,7 +195,7 @@ final class IndexStoreTests: IndexTestCase {
     func testUpdateDirectory() throws {
         try write("dir/a.fltest", "apple")
         try write("dir/sub/b.fltest", "banana")
-        try write("dir/.hidden.fltest", "cherry")
+        try write("dir/.git/c.fltest", "cherry")   // ignored by default rules
         try store.update([ref("dir")])
         XCTAssertEqual(try store.indexedFiles().map(\.relativePath), ["dir/a.fltest", "dir/sub/b.fltest"])
         try FileManager.default.removeItem(at: root.appendingPathComponent("dir/sub"))
@@ -622,10 +622,12 @@ final class ReviewRegressionTests: IndexTestCase {
         try write("proj/Library/notes.fltest", "kept")
         try write("proj/x.log", "secret")
         try store.update([ref("debug.log"), ref("Library/prefs.fltest"), ref("build/out.fltest"), ref("build"), ref("proj")])
-        XCTAssertEqual(try store.indexedFiles(), [ref("proj/Library/notes.fltest")])
-        XCTAssertEqual(try store.search("secret").count, 0)
+        // A whole-Mac vault indexes ~/Library, so a root `Library` is kept like any folder.
+        XCTAssertEqual(try store.indexedFiles(), [ref("Library/prefs.fltest"), ref("proj/Library/notes.fltest")])
+        XCTAssertEqual(try store.search("secret").map(\.file), [ref("Library/prefs.fltest")])
         try store.reindex()
-        XCTAssertEqual(try store.indexedFiles(), [ref("proj/Library/notes.fltest")])
+        XCTAssertEqual(try store.indexedFiles(), VaultScanner.files(in: vault), "update and reindex agree with the scanner")
+        XCTAssertFalse(try store.indexedFiles().contains { $0.relativePath.hasSuffix(".log") || $0.relativePath.hasPrefix("build/") })
     }
 
     func testPackagesStayWhole() throws {
