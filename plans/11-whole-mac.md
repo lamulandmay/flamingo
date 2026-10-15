@@ -42,3 +42,16 @@ the user pins. Everything else is reachable by ⌘K and search.
 ## Done means
 Root `~`, hidden folders indexed, Desktop/Documents/Downloads pinned by default, pin any folder
 from the palette, ⌘K finds a file in `~/.config`, the app stays smooth during first index.
+
+## M4 — Ribbon, status bar, graph scope (added 2026-10-15)
+- **Ribbon.** A 40pt icon strip on the far left, like Obsidian's: Files, Search, Graph, Trail,
+  Ask at the top; Pin Folder, Settings at the bottom. Monochrome SF Symbols, accent when
+  active, tooltips only. Clicking Graph/Trail/Ask switches mode (same as ⌘1–4); Files toggles
+  the sidebar. The sidebar material extends behind it.
+- **Status bar.** One 22pt hairline-topped strip at the bottom, tertiary 11pt: backlink count
+  for the selected file (from `IndexStore.backlinks`), comment count, current anchor, and
+  index progress while indexing. Nothing else. No labels, numbers with one-word nouns.
+- **Graph scope.** The graph follows the sidebar: when a pinned folder or subfolder is
+  selected, show only files under it plus their direct neighbours outside it drawn dimmed.
+  A segmented control in the graph's filter row switches `folder | vault`. The selected file
+  is always highlighted (fixed in FlamingoGraph on 2026-10-15; pass `selected:` through).

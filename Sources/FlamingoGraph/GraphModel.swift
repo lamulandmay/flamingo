@@ -81,6 +81,8 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
 
     // Selection, hover, filter
     private(set) var selectedIndex: Int?
+    /// The file the shell asked us to select, kept so it survives graph loads and vault resets.
+    private var requestedSelection: FileRef?
     private var hoverTarget: Int?
     private var hoverShown: Int?
     private var hoverFade = Fade()
@@ -166,6 +168,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
             positions = Array(positions.prefix(topology.count))
         }
         selectedIndex = selectedID.flatMap { topology.index[$0] }
+            ?? requestedSelection.flatMap { topology.index[$0.relativePath] }
         filterMask = filter.mask(for: topology)
         refreshHover()
         invalidate()
@@ -182,7 +185,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         let initial = LayoutStore.initial(for: topology, saved: saved)
         positions = initial.positions
         pinned = initial.pinned
-        selectedIndex = nil
+        selectedIndex = requestedSelection.flatMap { topology.index[$0.relativePath] }
         hoverTarget = nil; hoverShown = nil; hoverFade = Fade()
         filterMask = filter.mask(for: topology)
         autoFit = initial.restored == 0
@@ -239,6 +242,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     // MARK: Inputs from the view
 
     func select(_ ref: FileRef?) {
+        requestedSelection = ref
         let index = ref.flatMap { topology.index[$0.relativePath] }
         guard index != selectedIndex else { return }
         selectedIndex = index
