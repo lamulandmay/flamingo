@@ -115,3 +115,31 @@ final class LocalModelTests: XCTestCase {
         XCTAssertEqual(projector?.lastPathComponent, "mmproj-F16.gguf")
     }
 }
+
+final class DescribeTests: XCTestCase {
+    /// A 2×2 PNG.
+    static let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGP4z8DAwMDAxMDAAAAWEAEC4tP0WgAAAABJRU5ErkJggg==")!
+
+    func testDescriptionBecomesARegionComment() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("describe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Self.png.write(to: dir.appendingPathComponent("board.png"))
+        let vault = Vault(root: dir)
+        let engine = AskEngine(index: try IndexStore(vault: vault), source: Fixture.vault, client: MockAPI.client, key: { nil })
+        engine.chat = ChatClient(session: MockAPI.session)
+        engine.llama = { _ in LocalModelTests.llamaURL }
+        MockAPI.reset([LocalModelTests.chat(["A whiteboard with ", "three price tiers."])])
+
+        let ref = FileRef(relativePath: "board.png")
+        let comment = try await engine.describe(ref)
+        XCTAssertEqual(comment.text, "A whiteboard with three price tiers.")
+        XCTAssertEqual(comment.anchor, FileAnchor(kind: .region, value: "full"))
+        XCTAssertEqual(try SidecarStore(vault: vault).comments(for: ref).map(\.text), ["A whiteboard with three price tiers."])
+
+        let body = try XCTUnwrap(MockAPI.requests.first?.body)
+        let content = try XCTUnwrap(body["messages"]?.array?.first?["content"]?.array)
+        XCTAssertTrue(content[0]["image_url"]?["url"]?.string?.hasPrefix("data:image/jpeg;base64,") ?? false)
+        XCTAssertEqual(body["chat_template_kwargs"], ["enable_thinking": false])
+    }
+}
