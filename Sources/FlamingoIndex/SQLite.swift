@@ -35,6 +35,11 @@ extension Int: SQLBindable {
 extension Double: SQLBindable {
     func bind(to stmt: OpaquePointer, at index: Int32) -> Int32 { sqlite3_bind_double(stmt, index, self) }
 }
+extension Data: SQLBindable {
+    func bind(to stmt: OpaquePointer, at index: Int32) -> Int32 {
+        withUnsafeBytes { sqlite3_bind_blob(stmt, index, $0.baseAddress, Int32($0.count), SQLITE_TRANSIENT) }
+    }
+}
 
 /// One connection. Not thread-safe; `IndexStore` serializes access with locks.
 final class Database {
@@ -179,4 +184,9 @@ struct Row {
     func optionalString(_ i: Int32) -> String? { isNull(i) ? nil : string(i) }
     func int(_ i: Int32) -> Int { Int(sqlite3_column_int64(handle, i)) }
     func double(_ i: Int32) -> Double { sqlite3_column_double(handle, i) }
+    func data(_ i: Int32) -> Data {
+        let n = Int(sqlite3_column_bytes(handle, i))
+        guard n > 0, let p = sqlite3_column_blob(handle, i) else { return Data() }
+        return Data(bytes: p, count: n)
+    }
 }

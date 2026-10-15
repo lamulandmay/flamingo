@@ -7,9 +7,24 @@ extension IndexStore {
 
     /// Best hits across file content and comments, one content hit per file (at its best
     /// section's anchor). All terms must match; if nothing does, any term may.
+    ///
+    /// Hybrid: those keyword hits fused (reciprocal rank) with the files whose sections are
+    /// nearest the query by meaning, once sections are embedded. A file found only by meaning
+    /// opens at its nearest section.
     public func search(_ query: String, limit: Int = 50) throws -> [SearchHit] {
         guard limit > 0 else { return [] }
-        return try firstNonEmpty(query) { match in
+        let keyword = try keywordSearch(query, limit: limit)
+        var seen = Set<String>()
+        let semantic = semanticSections(query, limit: 50)
+            .filter { seen.insert($0.path).inserted }
+            .map { SearchHit(file: FileRef(relativePath: $0.path), anchor: $0.anchor, snippet: semanticSnippet($0), score: Double($0.score)) }
+        guard !semantic.isEmpty else { return keyword }
+        let fused = Fusion.fuse([keyword, semantic], weights: [1, Self.semanticWeight]) { $0.commentID?.uuidString ?? $0.file.relativePath }
+        return fused.prefix(limit).map { var h = $0.item; h.score = $0.score; return h }
+    }
+
+    private func keywordSearch(_ query: String, limit: Int) throws -> [SearchHit] {
+        try firstNonEmpty(query) { match in
             let content = try fileHits(match, limit: limit)
             let comments = try commentHits(match, limit: limit).map {
                 SearchHit(file: $0.file, anchor: $0.comment.anchor, snippet: $0.snippet, score: $0.score, commentID: $0.comment.id)
@@ -21,9 +36,15 @@ extension IndexStore {
     }
 
     /// Every matching section, ranked, not grouped by file. For retrieval (plan 09).
+    /// Keyword and nearest-by-meaning sections, fused by reciprocal rank.
     public func searchSections(_ query: String, limit: Int = 50) throws -> [SearchHit] {
         guard limit > 0 else { return [] }
-        return try firstNonEmpty(query) { try sectionHits($0, limit: limit) }
+        let keyword = try firstNonEmpty(query) { try sectionHits($0, limit: limit) }
+        let semantic = semanticSections(query, limit: 50).map {
+            SearchHit(file: FileRef(relativePath: $0.path), anchor: $0.anchor, snippet: semanticSnippet($0), score: Double($0.score))
+        }
+        guard !semantic.isEmpty else { return keyword }
+        return Fusion.fuse([keyword, semantic], weights: [1, Self.semanticWeight], key: \.id).prefix(limit).map { var h = $0.item; h.score = $0.score; return h }
     }
 
     /// Matching comments, ranked.

@@ -64,7 +64,7 @@ public final class IndexStore: @unchecked Sendable {
     public var databaseURL: URL { vault.stateDir.appendingPathComponent("index.sqlite") }
     public var graphURL: URL { vault.stateDir.appendingPathComponent("graph.json") }
 
-    static let schemaVersion = 2
+    static let schemaVersion = 3
     /// Changes whenever extraction output may differ, so files indexed by older extractors
     /// are re-extracted even though they haven't changed on disk.
     static var extractVersion: String { "\(Extract.version)" }
@@ -75,9 +75,10 @@ public final class IndexStore: @unchecked Sendable {
     static let maxSectionText = 500_000
 
     let sidecars: SidecarStore
-    private let writer: Database
+    let writer: Database
     private let reader: Database
-    private let writeLock = NSRecursiveLock()
+    let writeLock = NSRecursiveLock()
+    let embedding = EmbeddingState()
     private let readLock = NSLock()
     private let cacheLock = NSLock()
     private var pathCache: [String]?
@@ -139,6 +140,7 @@ public final class IndexStore: @unchecked Sendable {
         report = ReindexReport(scanned: seen.count, extracted: todo.count, removed: gone.count,
                                seconds: Date().timeIntervalSince(started))
         cacheLock.unlock()
+        if Self.autoEmbed { scheduleEmbedding() }
         progress?(1)
     }
 
@@ -212,6 +214,7 @@ public final class IndexStore: @unchecked Sendable {
             for ref in commentTargets { try replaceComments(for: ref) }
         }
         invalidateCaches()
+        if Self.autoEmbed, !todo.isEmpty { scheduleEmbedding() }
     }
 
     /// Drops these files (and anything under them) from the index. Their comments keep
@@ -300,6 +303,7 @@ public final class IndexStore: @unchecked Sendable {
 
     private func invalidateCaches() {
         cacheLock.lock(); generation += 1; pathCache = nil; cacheLock.unlock()
+        embedding.lock.withLock { embedding.matrix = nil }
     }
 
     func requireVault() throws {
@@ -350,6 +354,7 @@ public final class IndexStore: @unchecked Sendable {
             if v > schemaVersion { throw SchemaTooNew() }
             if v < 1 { try db.exec(Schema.v1) }
             if v < 2 { try db.exec(Schema.v2) }
+            if v < 3 { try db.exec(Schema.v3) }
             let stored = try db.query("SELECT value FROM meta WHERE key = 'extract_version'") { $0.string(0) }.first
             if stored != extractVersion {
                 try db.exec("UPDATE files SET size = -1")   // stale; keep serving old text until reindexed

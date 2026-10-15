@@ -75,4 +75,21 @@ enum Schema {
     CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
     PRAGMA user_version = 2;
     """
+
+    /// One unit-length Float32 vector per section, keyed by the section's rowid so a rename
+    /// keeps it and re-extraction or an edited title drops it.
+    static let v3 = """
+    CREATE TABLE embeddings(
+        section INTEGER PRIMARY KEY,
+        model TEXT NOT NULL,
+        vector BLOB NOT NULL
+    );
+    CREATE TRIGGER sections_embed_ad AFTER DELETE ON sections BEGIN
+        DELETE FROM embeddings WHERE section = old.rowid;
+    END;
+    CREATE TRIGGER sections_embed_au AFTER UPDATE OF title, text ON sections BEGIN
+        DELETE FROM embeddings WHERE section = old.rowid;
+    END;
+    PRAGMA user_version = 3;
+    """
 }
