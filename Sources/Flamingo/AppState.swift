@@ -54,6 +54,9 @@ final class AppState: ObservableObject {
     @Published var selected: FileRef? { didSet { if selected != oldValue { selectionChanged() } } }
     /// The sidebar's folder, or the selected file's parent. The graph scopes to it.
     @Published var selectedFolder: String?
+    /// Two-finger swipe progress: +1 is a completed back swipe, -1 forward, 0 at rest.
+    @Published var swipeAmount: CGFloat = 0
+    private var restoringHistory = false
     @Published var anchor: FileAnchor? { didSet { if anchor != oldValue { history.updateAnchor(anchor) } } }
     /// Files, Graph, Trail, Ask. The design module's enum, so `SegmentedModes` binds directly.
     typealias Mode = FlamingoMode
@@ -459,7 +462,7 @@ final class AppState: ObservableObject {
             return
         }
         if recordInHistory {
-            history.push(History.Entry(file: ref, anchor: pendingAnchor, transient: selectionFromSidebar))
+            history.push(History.Entry(file: ref, anchor: pendingAnchor, mode: mode, folder: selectedFolder, transient: selectionFromSidebar))
         }
         if let a = pendingAnchor { jumpToAnchor(a) }
         if !selectionFromSidebar { revealRequest = RevealRequest(file: ref) }
@@ -510,14 +513,35 @@ final class AppState: ObservableObject {
 
     func goBack() {
         guard let e = history.goBack() else { return }
-        mode = .files
-        select(e.file, anchor: e.anchor, source: .other, record: false)
+        restore(e)
     }
 
     func goForward() {
         guard let e = history.goForward() else { return }
-        mode = .files
-        select(e.file, anchor: e.anchor, source: .other, record: false)
+        restore(e)
+    }
+
+    /// Puts the app back the way an entry saw it: folder, mode, then file and anchor.
+    private func restore(_ e: History.Entry) {
+        restoringHistory = true
+        defer { restoringHistory = false }
+        if selectedFolder != e.folder { selectedFolder = e.folder }
+        if mode != e.mode { mode = e.mode }
+        if let f = e.file {
+            select(f, anchor: e.anchor, source: .other, record: false)
+        } else if selected != nil {
+            select(nil, source: .other, record: false)
+        }
+    }
+
+    /// The sidebar's selection in one step: the folder (a folder row, or the file's parent)
+    /// and the file, so a folder-only selection is one history entry rather than two.
+    func selectFromSidebar(folder: String?, file: FileRef?) {
+        if selectedFolder != folder { selectedFolder = folder }
+        if file == nil, selected == nil, !restoringHistory {
+            history.push(History.Entry(file: nil, anchor: nil, mode: mode, folder: folder, transient: true))
+        }
+        select(file, source: .sidebar)
     }
 
     /// Trail "resume": the files of a session become the history, oldest first.
@@ -551,6 +575,9 @@ final class AppState: ObservableObject {
     // MARK: Modes
 
     private func modeChanged() {
+        if !restoringHistory {
+            history.push(History.Entry(file: selected, anchor: anchor, mode: mode, folder: selectedFolder))
+        }
         if mode == .graph, graphStale { graphTask?.cancel(); graphTask = nil; Task { await refreshGraph() } }
     }
 

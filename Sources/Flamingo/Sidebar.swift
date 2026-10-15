@@ -385,8 +385,8 @@ final class SidebarCoordinator: NSObject, NSOutlineViewDataSource, NSOutlineView
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard !suppressSelection else { return }
         let node = selectedNode
-        state.selectedFolder = node.map { $0.ref == nil ? $0.id : ($0.id as NSString).deletingLastPathComponent }
-        state.select(node?.ref, source: .sidebar)
+        state.selectFromSidebar(folder: node.map { $0.ref == nil ? $0.id : ($0.id as NSString).deletingLastPathComponent },
+                                file: node?.ref)
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {

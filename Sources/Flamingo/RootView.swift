@@ -25,6 +25,9 @@ struct RootView: View {
                     HStack(spacing: 0) {
                         content
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .offset(x: state.swipeAmount * 24)
+                            .overlay(alignment: .leading) { SwipeChevron(amount: state.swipeAmount, back: true) }
+                            .overlay(alignment: .trailing) { SwipeChevron(amount: state.swipeAmount, back: false) }
                             .overlay(alignment: .bottom) {
                                 if let toast = state.toast {
                                     Toast(toast.text, action: toast.action, perform: toast.perform)

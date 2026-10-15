@@ -1,11 +1,14 @@
 import Foundation
 import FlamingoCore
 
-/// Back/forward over (file, anchor) selections. ⌘[ ⌘]. Plan 01 owns.
+/// Back/forward over places: a file (with anchor), the mode it was seen in, and the sidebar
+/// folder. ⌘[ ⌘] and two-finger swipes. Plan 01 owns.
 struct History {
     struct Entry: Equatable {
-        var file: FileRef
+        var file: FileRef?
         var anchor: FileAnchor?
+        var mode: AppState.Mode = .files
+        var folder: String?
         /// When it was pushed and whether it came from scrubbing the sidebar, so a run of
         /// arrow-key hops collapses into the file the user rested on.
         var pushedAt = Date()
@@ -26,7 +29,7 @@ struct History {
     /// Records a new place. Drops any forward entries. Consecutive duplicates collapse, and a
     /// transient entry that was pushed moments ago is replaced rather than kept.
     mutating func push(_ entry: Entry) {
-        if let c = current, c.file == entry.file {
+        if let c = current, c.file == entry.file, c.mode == entry.mode, c.folder == entry.folder {
             entries[index].anchor = entry.anchor ?? c.anchor
             entries[index].transient = false
             return
@@ -64,7 +67,7 @@ struct History {
     /// Drops entries whose file no longer exists.
     mutating func prune(keeping files: Set<FileRef>) {
         let cur = current
-        entries.removeAll { !files.contains($0.file) }
+        entries.removeAll { $0.file.map { !files.contains($0) } ?? false }
         if let cur, let i = entries.firstIndex(of: cur) { index = i } else { index = entries.count - 1 }
     }
 

@@ -292,8 +292,9 @@ final class PaletteController: NSObject, NSWindowDelegate {
             var seen: Set<FileRef> = []
             var recents: [PaletteItem] = []
             for entry in state.history.entries.reversed() {
-                if entry.file == state.selected || !seen.insert(entry.file).inserted { continue }
-                recents.append(.file(entry.file))
+                guard let file = entry.file else { continue }
+                if file == state.selected || !seen.insert(file).inserted { continue }
+                recents.append(.file(file))
                 if recents.count == Self.recentLimit { break }
             }
             return recents.isEmpty ? commands.map(PaletteItem.command) : recents

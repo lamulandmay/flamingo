@@ -8,6 +8,7 @@ import FlamingoExtract
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
+    private var swipes: SwipeNavigator?
     let state = AppState()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -46,6 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.delegate = self
         window = w
         state.hostWindow = w
+        swipes = SwipeNavigator(state: state, window: w)
         state.windowWidth = w.frame.width
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
