@@ -59,7 +59,6 @@ struct CitationChip: View {
         .padding(.vertical, Theme.Space.xs)
         .background(RoundedRectangle(cornerRadius: Theme.Radius.s).fill(Theme.Color.bgRaised))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s).strokeBorder(Theme.Color.hairline, lineWidth: 1))
-        .shadow(radius: 6, y: 2)
     }
 }
 
