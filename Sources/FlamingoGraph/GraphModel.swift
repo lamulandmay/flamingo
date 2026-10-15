@@ -96,6 +96,10 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     private(set) var filterMask: [Bool]?
     private var filter = GraphFilter("")
     private(set) var dragging: Int?
+    private var pulse: (node: Int, start: TimeInterval)?
+    static let pulseSeconds: TimeInterval = 0.5
+    /// Zoom a click settles at when the graph is further out than this.
+    var clickZoom: CGFloat = 1.8
 
     // MARK: Lifecycle
 
@@ -405,7 +409,12 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
             filterMask: filterMask,
             labelAmount: labelFade.value(at: now),
             pinned: pinned,
-            dragging: dragging)
+            dragging: dragging,
+            pulse: pulse.flatMap { p in
+                let t = (now - p.start) / Self.pulseSeconds
+                return t < 1 ? (p.node, t) : nil
+            })
+        if let p = pulse, now - p.start >= Self.pulseSeconds { pulse = nil }
 
         let animating = needsFrames(at: now)
         if animating != redraw.isAnimating {
@@ -421,7 +430,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
 
     private func needsFrames(at now: TimeInterval) -> Bool {
         if let engine, engine.snapshot().isRunning { return true }
-        if cameraAnimation != nil || dragging != nil { return true }
+        if cameraAnimation != nil || dragging != nil || pulse != nil { return true }
         if !hoverFade.isDone(at: now) || !labelFade.isDone(at: now) { return true }
         if autoFit, size.width > 0, !storedCamera.isClose(to: fitCamera()) { return true }
         return false
@@ -537,9 +546,23 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         invalidate()
     }
 
+    /// Single click: select, a haptic tap, a pulse, and the camera eases onto the node at a
+    /// readable zoom. Nothing opens; that's `activate`.
     func click(_ node: Int) {
+        guard topology.ids.indices.contains(node), positions.indices.contains(node) else { return }
+        selectedIndex = node
+        requestedSelection = topology.isFolder[node] ? nil : FileRef(relativePath: topology.ids[node])
+        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        pulse = (node, CACurrentMediaTime())
+        autoFit = false
+        let zoom = max(storedCamera.zoom, clickZoom)
+        animateCamera(to: GraphCamera(center: positions[node], zoom: min(zoom, GraphCamera.zoomRange.upperBound)))
+    }
+
+    func activate(_ node: Int) {
         guard topology.ids.indices.contains(node) else { return }
         selectedIndex = node
+        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
         open(node)
     }
 

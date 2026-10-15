@@ -130,12 +130,14 @@ final class GraphModelTests: XCTestCase {
         XCTAssertNil(m.node(atScreen: CGPoint(x: s.x, y: s.y + 60)))
     }
 
-    func testClickSelectsAndOpens() {
+    func testClickSelectsWithoutOpeningAndActivateOpens() {
         let m = fixedModel()
         var opened: [String] = []
         m.onSelect = { opened.append($0.relativePath) }
         m.click(2)
         XCTAssertEqual(m.selectedIndex, 2)
+        XCTAssertEqual(opened, [])
+        m.activate(2)
         XCTAssertEqual(opened, ["docs/c.docx"])
         m.openSelection()
         XCTAssertEqual(opened.count, 2)

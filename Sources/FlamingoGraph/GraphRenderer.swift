@@ -499,6 +499,16 @@ final class GraphRenderer {
                            style: StrokeStyle(lineWidth: Style.edgeWidth))
             stats.batches += 2
         }
+        if let p = frame.pulse, visible.indices.contains(p.node), visible[p.node] {
+            // Ease-out ring: grows ~16pt past the node and fades to nothing.
+            let e = 1 - pow(1 - p.progress, 3)
+            let r = sr[p.node] + Style.ringGap + CGFloat(e) * 16
+            let alpha = (1 - e) * 0.7
+            context.stroke(Path(ellipseIn: Self.circle(sx[p.node], sy[p.node], r)),
+                           with: Self.shade(pal.accent, alpha),
+                           style: StrokeStyle(lineWidth: Style.edgeWidth * (1 + CGFloat(1 - e))))
+            stats.batches += 1
+        }
     }
 
     @inline(__always)

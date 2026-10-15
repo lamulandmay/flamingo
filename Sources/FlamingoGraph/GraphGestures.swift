@@ -186,15 +186,12 @@ final class GraphGestureRecognizer {
             lastClick = LastClick(node: node)
             guard let target else { return }
             if isDouble {
-                if let node {
-                    if target.isPinned(node) { target.unpin(node) }
-                } else {
-                    fitAll()
-                }
+                if let node { target.activate(node) } else { fitAll() }
             } else if clickCount <= 2, let node {
                 // clickCount 2 that isn't a double on the same thing (the second press
                 // landed elsewhere) counts as a single click. Triple clicks do nothing.
-                if target.isPinned(node) { deferClick(node) } else { target.click(node) }
+                // Selecting is harmless before a possible second click, so never defer.
+                target.click(node)
             }
         case let .draggingNode(node, _):
             target?.endNodeDrag(node)

@@ -5,7 +5,7 @@ import AppKit
 @MainActor
 private final class RecordingTarget: GraphInteractionTarget {
     enum Call: Equatable {
-        case hover(Int?), click(Int), begin(Int), drag(Int, CGPoint), end(Int), unpin(Int)
+        case hover(Int?), click(Int), activate(Int), begin(Int), drag(Int, CGPoint), end(Int), unpin(Int)
         case fitAll, moved, select(GraphDirection), open, type(String), escape
     }
 
@@ -29,6 +29,7 @@ private final class RecordingTarget: GraphInteractionTarget {
     func isPinned(_ node: Int) -> Bool { pinned.contains(node) }
     func hover(_ node: Int?) { calls.append(.hover(node)) }
     func click(_ node: Int) { calls.append(.click(node)) }
+    func activate(_ node: Int) { calls.append(.activate(node)) }
     func beginNodeDrag(_ node: Int) { calls.append(.begin(node)) }
     func dragNode(_ node: Int, toWorld p: CGPoint) { calls.append(.drag(node, p)) }
     func endNodeDrag(_ node: Int) { calls.append(.end(node)) }
@@ -101,42 +102,36 @@ final class GestureTests: XCTestCase {
 
     // MARK: Clicks
 
-    func testClickUnpinnedNodeOpensImmediately() {
+    func testClickSelectsImmediately() {
         click(center)
         XCTAssertEqual(target.actions, [.click(0)])
         XCTAssertTrue(scheduled.isEmpty)
     }
 
-    func testClickPinnedNodeIsDeferredThenFires() {
+    func testClickPinnedNodeSelectsImmediatelyToo() {
         target.pinned = [0]
         click(center)
-        XCTAssertEqual(target.actions, [])
-        XCTAssertEqual(scheduled.map(\.delay), [0.4])
-        runScheduled(delay: 0.4)
         XCTAssertEqual(target.actions, [.click(0)])
+        XCTAssertTrue(scheduled.isEmpty)
     }
 
-    func testDoubleClickPinnedNodeUnpinsWithoutOpening() {
+    func testDoubleClickSelectsThenActivates() {
+        click(center, count: 1)
+        click(center, count: 2)
+        XCTAssertEqual(target.actions, [.click(0), .activate(0)])
+    }
+
+    func testDoubleClickPinnedNodeActivatesWithoutUnpinning() {
         target.pinned = [0]
         click(center, count: 1)
         click(center, count: 2)
-        XCTAssertEqual(target.actions, [.unpin(0)])
-        runScheduled(delay: 0.4)   // the deferred click was cancelled
-        XCTAssertEqual(target.actions, [.unpin(0)])
+        XCTAssertEqual(target.actions, [.click(0), .activate(0)])
     }
 
-    func testDoubleClickUnpinnedNodeOnlyOpensOnce() {
-        click(center, count: 1)
-        click(center, count: 2)
-        XCTAssertEqual(target.actions, [.click(0)])
-    }
-
-    func testPressElsewhereDeliversPendingPinnedClick() {
+    func testPressElsewhereIsASeparateClick() {
         target.pinned = [0]
         click(center)
         click(other)
-        XCTAssertEqual(target.actions, [.click(0), .click(1)])
-        runScheduled(delay: 0.4)
         XCTAssertEqual(target.actions, [.click(0), .click(1)])
     }
 
@@ -460,10 +455,9 @@ final class GestureTests: XCTestCase {
         target.camera = GraphCamera()
         target.pinned = [1]
         click(other)
-        XCTAssertTrue(recognizer.hasPendingClick)
+        XCTAssertFalse(recognizer.hasPendingClick)
+        XCTAssertTrue(target.calls.contains(.click(1)))
         recognizer.reset()
-        runScheduled(delay: 0.4)
-        XCTAssertFalse(target.calls.contains(.click(1)))
     }
 
     func testTargetIsHeldWeakly() {

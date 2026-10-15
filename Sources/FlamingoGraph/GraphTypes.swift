@@ -197,6 +197,8 @@ struct GraphFrame {
     var pinned: Set<Int>
     /// Node under an active drag, if any.
     var dragging: Int?
+    /// A click just landed on this node: a ring expands and fades over `pulseSeconds`.
+    var pulse: (node: Int, progress: Double)?
 }
 
 // MARK: - Input
@@ -223,6 +225,8 @@ protocol GraphInteractionTarget: AnyObject {
     func hover(_ node: Int?)
     /// A completed single click on a node: open it.
     func click(_ node: Int)
+    /// Double-click: open the file, or scope into the folder.
+    func activate(_ node: Int)
     func beginNodeDrag(_ node: Int)
     /// World position the node's center should move to.
     func dragNode(_ node: Int, toWorld p: CGPoint)
