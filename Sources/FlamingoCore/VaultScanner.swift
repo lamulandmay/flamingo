@@ -36,17 +36,32 @@ public struct TreeNode: Identifiable, Hashable, Sendable {
     }
 }
 
-/// Lists user files in a vault, skipping `.flamingo`, hidden files, well-known junk folders,
-/// symlinks, and the insides of packages (which are returned as single files).
+/// Lists user files in a vault, hidden ones included, skipping `.flamingo`, what the vault's
+/// ignore rules exclude, symlinks, and the insides of packages (which are returned as single
+/// files). Built to walk a whole disk: `scan` streams, `children(of:)` reads one folder.
 public enum VaultScanner {
-    /// Names skipped at any depth. Folders are not descended into.
-    public static let ignoredNames: Set<String> = [
-        ".flamingo", ".git", "node_modules", ".DS_Store", "__pycache__", "DerivedData", ".build", ".Trash",
-    ]
+    /// Names skipped at any depth whatever the ignore file says. Folders are not descended into.
+    /// Everything else that used to be hard-coded (`.git`, `node_modules`, ...) is in
+    /// `IgnoreRules.defaultText`, which the user can edit.
+    public static let ignoredNames: Set<String> = [".flamingo", ".DS_Store"]
 
-    /// Names skipped only when directly under the vault root, so `~` works as a vault without
-    /// indexing `~/Library` while a project's nested `Library` folder is kept.
-    public static let rootOnlyIgnoredNames: Set<String> = ["Library"]
+    /// Names skipped only directly under the vault root. Empty since the vault became the
+    /// whole Mac: `~/Library` is indexed, minus its caches (see `IgnoreRules.defaultText`).
+    public static let rootOnlyIgnoredNames: Set<String> = []
+
+    /// Size limits for what gets indexed.
+    public struct Limits: Sendable, Equatable {
+        /// Files larger than this are indexed by name, extension and size only; their
+        /// contents are never extracted.
+        public var maxExtractableBytes: Int64
+        public init(maxExtractableBytes: Int64) { self.maxExtractableBytes = maxExtractableBytes }
+
+        /// Whether a file of `bytes` may have its contents extracted.
+        public func allowsExtraction(ofSize bytes: Int64) -> Bool { bytes <= maxExtractableBytes }
+    }
+
+    /// 50 MB: above it a file is metadata only.
+    public static let limits = Limits(maxExtractableBytes: 50 * 1024 * 1024)
 
     /// Lowercased extensions of directories that are treated as single files even when
     /// LaunchServices does not flag them as packages (for example on a machine without Keynote).
@@ -62,46 +77,88 @@ public enum VaultScanner {
         return isPackage(url, values: values)
     }
 
-    /// Reads `<root>/.flamingoignore`. Returns `.empty` if the file is absent or unreadable.
+    /// The vault's rules: `<root>/.flamingo/ignore` (or `IgnoreRules.defaultText` while that
+    /// file doesn't exist), followed by `<root>/.flamingoignore` if there is one.
     public static func ignoreRules(in vault: Vault) -> IgnoreRules {
-        let url = vault.root.appendingPathComponent(IgnoreRules.fileName)
-        return (try? IgnoreRules(contentsOf: url)) ?? .empty
+        let own = (try? String(contentsOf: vault.ignoreURL, encoding: .utf8)) ?? IgnoreRules.defaultText
+        let legacy = (try? String(contentsOf: vault.root.appendingPathComponent(IgnoreRules.fileName), encoding: .utf8)) ?? ""
+        return IgnoreRules(text: legacy.isEmpty ? own : own + "\n" + legacy)
     }
 
-    /// Every user file in the vault, honoring `<root>/.flamingoignore`, sorted in Finder order
+    /// Writes `IgnoreRules.defaultText` to `<root>/.flamingo/ignore` unless the file exists.
+    /// Returns `true` if it wrote. The shell calls this when a vault opens.
+    @discardableResult
+    public static func writeDefaultIgnoreFile(in vault: Vault) -> Bool {
+        guard !FileManager.default.fileExists(atPath: vault.ignoreURL.path) else { return false }
+        return (try? AtomicFile.write(Data(IgnoreRules.defaultText.utf8), to: vault.ignoreURL)) != nil
+    }
+
+    /// Whether the scanner would list `relativePath` (a file) or descend into it (a folder),
+    /// judged one path at a time: for watchers and incremental updates. `""` (the root) is
+    /// admitted. Doesn't touch the disk.
+    public static func admits(_ relativePath: String, isDirectory: Bool, ignore: IgnoreRules) -> Bool {
+        let path = IgnoreRules.normalize(relativePath)
+        guard !path.isEmpty else { return true }
+        if path.split(separator: "/").contains(where: { ignoredNames.contains(String($0)) }) { return false }
+        return !ignore.isIgnored(path, isDirectory: isDirectory)
+    }
+
+    /// Every user file in the vault, honoring the vault's ignore rules, sorted in Finder order
     /// (`localizedStandardCompare` on the relative path, so `file2` precedes `file10`).
     public static func files(in vault: Vault) -> [FileRef] {
         files(in: vault, ignore: ignoreRules(in: vault))
     }
 
-    /// Every user file in the vault, honoring `ignore`, sorted in Finder order.
-    ///
-    /// Packages are returned as single files and never descended into. Symlinks are neither
-    /// followed nor listed. Directories named in `ignoredNames` (any depth) and
-    /// `rootOnlyIgnoredNames` (depth 1) are skipped with their contents, as are directories and
-    /// files matched by `ignore`. Permission errors skip the offending entry and continue.
+    /// Every user file under `folder` (a vault-relative folder path; `""` is the whole vault),
+    /// judged by the vault's rules, sorted in Finder order.
+    public static func files(in vault: Vault, under folder: String) -> [FileRef] {
+        var out: [FileRef] = []
+        scan(in: vault, ignore: ignoreRules(in: vault), under: folder) { out.append($0); return true }
+        return out.sorted()
+    }
+
+    /// Every user file in the vault, honoring `ignore`, sorted in Finder order. Collects
+    /// `scan(in:ignore:under:_:)`, so the same rules apply.
     public static func files(in vault: Vault, ignore: IgnoreRules) -> [FileRef] {
+        var out: [FileRef] = []
+        scan(in: vault, ignore: ignore) { out.append($0); return true }
+        return out.sorted()
+    }
+
+    /// Walks the vault and hands each user file to `visit` as it is found, in directory order
+    /// (not sorted). Return `false` from `visit` to stop. Nothing is accumulated, so this is
+    /// what to use on a whole disk.
+    ///
+    /// Packages are visited as single files and never descended into. Symlinks are neither
+    /// followed nor visited. Directories named in `ignoredNames` are skipped with their
+    /// contents, as are directories and files matched by `ignore`. Permission errors skip the
+    /// offending entry and continue. `under` restricts the walk to one folder.
+    public static func scan(in vault: Vault, ignore: IgnoreRules, under folder: String = "",
+                            _ visit: (FileRef) -> Bool) {
+        let folder = IgnoreRules.normalize(folder)
+        guard admits(folder, isDirectory: true, ignore: ignore) else { return }
+        let start = folder.isEmpty ? vault.root : vault.root.appendingPathComponent(folder, isDirectory: true)
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isPackageKey, .isSymbolicLinkKey]
         guard let enumerator = FileManager.default.enumerator(
-            at: vault.root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles],
-            errorHandler: { _, _ in true }
-        ) else { return [] }
+            at: start, includingPropertiesForKeys: Array(keys), options: [], errorHandler: { _, _ in true }
+        ) else { return }
+        let rootPath = vault.root.path.hasSuffix("/") ? vault.root.path : vault.root.path + "/"
 
         // `skipDescendants()` is sticky: called after a non-directory item it skips the *next*
         // directory the enumerator reaches. Only ever call it when the current item is a directory.
-        var out: [FileRef] = []
         for case let url as URL in enumerator {
             let values = try? url.resourceValues(forKeys: keys)
             // The enumerator reports symlinks with lstat semantics and never descends into them.
             if values?.isSymbolicLink == true { continue }
             let isDirectory = values?.isDirectory == true
 
-            let name = url.lastPathComponent
-            if ignoredNames.contains(name) || (enumerator.level == 1 && rootOnlyIgnoredNames.contains(name)) {
-                if isDirectory { enumerator.skipDescendants() }
-                continue
-            }
-            guard let rel = vault.relativePath(of: url), !rel.isEmpty, rel != ".flamingo", !rel.hasPrefix(".flamingo/") else {
+            let path = url.path
+            let rel: String
+            if path.hasPrefix(rootPath) { rel = String(path.dropFirst(rootPath.count)) }
+            else if let r = vault.relativePath(of: url) { rel = r }
+            else { if isDirectory { enumerator.skipDescendants() }; continue }
+
+            if rel.isEmpty || ignoredNames.contains(url.lastPathComponent) {
                 if isDirectory { enumerator.skipDescendants() }
                 continue
             }
@@ -114,9 +171,68 @@ public enum VaultScanner {
             }
             guard values?.isRegularFile == true || package else { continue }
             if ignore.verdict(for: rel, isDirectory: false) { continue }
-            out.append(FileRef(relativePath: rel))
+            if !visit(FileRef(relativePath: rel)) { return }
         }
-        return out.sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
+    }
+
+    /// `scan` as an `AsyncStream`, run on a background thread at `qos`. Ending the consuming
+    /// task (or breaking out of the loop) stops the walk.
+    public static func stream(in vault: Vault, ignore: IgnoreRules? = nil, under folder: String = "",
+                              qos: DispatchQoS.QoSClass = .utility) -> AsyncStream<FileRef> {
+        AsyncStream(bufferingPolicy: .bufferingOldest(4096)) { continuation in
+            let stopped = StopFlag()
+            continuation.onTermination = { _ in stopped.set() }
+            DispatchQueue.global(qos: qos).async {
+                let rules = ignore ?? ignoreRules(in: vault)
+                scan(in: vault, ignore: rules, under: folder) { ref in
+                    // A full buffer drops the file; wait for the consumer instead.
+                    while case .dropped = continuation.yield(ref) {
+                        if stopped.isSet { return false }
+                        usleep(2_000)
+                    }
+                    return !stopped.isSet
+                }
+                continuation.finish()
+            }
+        }
+    }
+
+    /// The direct contents of `folder` (vault-relative; `""` is the root), for a lazy tree:
+    /// folders first, then files, each sorted by `localizedStandardCompare`. Folder nodes have
+    /// no children loaded and a `fileCount` of 0. Same rules as `scan`; packages are files.
+    /// Unreadable or missing folders have no children.
+    public static func children(of folder: String, in vault: Vault, ignore: IgnoreRules) -> [TreeNode] {
+        let folder = IgnoreRules.normalize(folder)
+        let dir = folder.isEmpty ? vault.root : vault.root.appendingPathComponent(folder, isDirectory: true)
+        let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isPackageKey, .isSymbolicLinkKey]
+        guard let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys, options: [])
+        else { return [] }
+        var folders: [TreeNode] = []
+        var files: [TreeNode] = []
+        for url in urls {
+            let name = url.lastPathComponent
+            guard !ignoredNames.contains(name) else { continue }
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            if values?.isSymbolicLink == true { continue }
+            let rel = folder.isEmpty ? name : folder + "/" + name
+            let package = isPackage(url, values: values)
+            if values?.isDirectory == true && !package {
+                guard !ignore.verdict(for: rel, isDirectory: true) else { continue }
+                var node = TreeNode(id: rel, name: name, ref: nil, isFolder: true)
+                node.fileCount = 0
+                folders.append(node)
+            } else if values?.isRegularFile == true || package {
+                guard !ignore.verdict(for: rel, isDirectory: false) else { continue }
+                files.append(TreeNode(id: rel, name: name, ref: FileRef(relativePath: rel), isFolder: false))
+            }
+        }
+        let byName: (TreeNode, TreeNode) -> Bool = { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        return folders.sorted(by: byName) + files.sorted(by: byName)
+    }
+
+    /// `children(of:in:ignore:)` with the vault's own rules.
+    public static func children(of folder: String, in vault: Vault) -> [TreeNode] {
+        children(of: folder, in: vault, ignore: ignoreRules(in: vault))
     }
 
     /// The folder tree of `files(in:)`. Top-level nodes are the root's direct children.
@@ -157,6 +273,13 @@ public enum VaultScanner {
     }
 
     // MARK: - Private
+
+    private final class StopFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set() { lock.lock(); value = true; lock.unlock() }
+    }
 
     /// Packages are always directories; a plain file with a package extension is just a file.
     private static func isPackage(_ url: URL, values: URLResourceValues?) -> Bool {

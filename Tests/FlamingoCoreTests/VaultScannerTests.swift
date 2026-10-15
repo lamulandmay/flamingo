@@ -66,8 +66,9 @@ final class VaultScannerTests: XCTestCase {
         try touch("Tool.app/Contents/Info.plist")
         try touch("nested/Model.xcodeproj/project.pbxproj")
         try touch("plain/readme.txt")
-        let found = scan()
+        let found = paths(VaultScanner.files(in: vault, ignore: .empty))
         XCTAssertEqual(found, ["deck.key", "nested/Model.xcodeproj", "plain/readme.txt", "Tool.app"])
+        XCTAssertEqual(scan(), ["deck.key", "nested/Model.xcodeproj", "plain/readme.txt"], "*.app is a default exclusion")
         XCTAssertFalse(found.contains { $0.hasPrefix("deck.key/") })
     }
 
@@ -81,10 +82,10 @@ final class VaultScannerTests: XCTestCase {
         XCTAssertFalse(VaultScanner.isPackage(url("folder")))
         XCTAssertFalse(VaultScanner.isPackage(url("flat.app")))
         XCTAssertFalse(VaultScanner.isPackage(url("missing.key")))
-        XCTAssertEqual(scan(), ["deck.key", "flat.app", "notes.txt"])
+        XCTAssertEqual(paths(VaultScanner.files(in: vault, ignore: .empty)), ["deck.key", "flat.app", "notes.txt"])
     }
 
-    func testHiddenAndWellKnownJunkIsExcluded() throws {
+    func testHiddenFilesAreListedAndDefaultJunkIsExcluded() throws {
         try touch("keep.txt")
         try touch(".flamingo/notes/x.md")
         try touch(".flamingo/index.sqlite")
@@ -93,18 +94,108 @@ final class VaultScannerTests: XCTestCase {
         try touch("src/node_modules/z.js")
         try touch(".secret")
         try touch("sub/.hidden.txt")
+        try touch(".config/fish/config.fish")
         try touch(".DS_Store")
         try touch("__pycache__/a.pyc")
         try touch("DerivedData/Build/x")
         try touch(".build/debug/x")
         try touch(".Trash/old.txt")
-        XCTAssertEqual(scan(), ["keep.txt"])
+        try touch(".cache/pip/x")
+        try touch(".cargo/registry/index/x")
+        try touch(".cargo/config.toml")
+        try touch("Downloads/big.dmg")
+        try touch("Downloads/notes.txt")
+        try touch("Applications/Thing.app/Contents/Info.plist")
+        XCTAssertEqual(scan(), [".cargo/config.toml", ".config/fish/config.fish", ".secret", "Downloads/notes.txt",
+                                "keep.txt", "sub/.hidden.txt"])
     }
 
-    func testLibraryIsSkippedOnlyAtTheRoot() throws {
+    func testLibraryIsIndexedExceptItsCaches() throws {
         try touch("Library/Preferences/x.plist")
+        try touch("Library/Caches/com.x/blob")
+        try touch("Library/Containers/com.x/Data/y")
+        try touch("Library/Developer/Xcode/z")
+        try touch("Library/Application Support/Google/Chrome/Default/History")
+        try touch("Library/Application Support/Notes/n.txt")
         try touch("proj/Library/x.swift")
-        XCTAssertEqual(scan(), ["proj/Library/x.swift"])
+        XCTAssertEqual(scan(), ["Library/Application Support/Notes/n.txt", "Library/Preferences/x.plist", "proj/Library/x.swift"])
+    }
+
+    func testDefaultIgnoreFileIsWrittenOnceAndThenEditable() throws {
+        try touch("a.log")
+        try touch("node_modules/m.js")
+        XCTAssertTrue(VaultScanner.writeDefaultIgnoreFile(in: vault))
+        XCTAssertEqual(try String(contentsOf: vault.ignoreURL, encoding: .utf8), IgnoreRules.defaultText)
+        XCTAssertFalse(VaultScanner.writeDefaultIgnoreFile(in: vault))
+        XCTAssertEqual(scan(), ["a.log"])
+        try "*.log\n".write(to: vault.ignoreURL, atomically: true, encoding: .utf8)
+        XCTAssertFalse(VaultScanner.writeDefaultIgnoreFile(in: vault), "never overwrites the user's edits")
+        XCTAssertEqual(scan(), ["node_modules/m.js"])
+    }
+
+    func testAdmitsMatchesTheScanner() throws {
+        let rules = VaultScanner.ignoreRules(in: vault)
+        XCTAssertTrue(VaultScanner.admits("", isDirectory: true, ignore: rules))
+        XCTAssertTrue(VaultScanner.admits(".config/fish/config.fish", isDirectory: false, ignore: rules))
+        XCTAssertTrue(VaultScanner.admits("Library/Preferences", isDirectory: true, ignore: rules))
+        XCTAssertFalse(VaultScanner.admits(".flamingo/notes/a.md", isDirectory: false, ignore: rules))
+        XCTAssertFalse(VaultScanner.admits("a/.DS_Store", isDirectory: false, ignore: rules))
+        XCTAssertFalse(VaultScanner.admits("p/node_modules/x/y.js", isDirectory: false, ignore: rules))
+        XCTAssertFalse(VaultScanner.admits("Library/Caches/x", isDirectory: false, ignore: rules))
+        XCTAssertFalse(VaultScanner.admits("Users/me/Library/Caches", isDirectory: true, ignore: rules))
+        XCTAssertFalse(VaultScanner.admits("/Library/Caches/", isDirectory: true, ignore: rules))
+        XCTAssertFalse(VaultScanner.admits("Downloads/x.dmg", isDirectory: false, ignore: rules))
+        XCTAssertTrue(VaultScanner.admits("Documents/x.dmg", isDirectory: false, ignore: rules))
+    }
+
+    func testScanStreamsStopsAndRestrictsToAFolder() throws {
+        for i in 0..<20 { try touch("a/f\(i).txt") }
+        try touch("b/node_modules/x.js")
+        try touch("b/y.txt")
+        var seen = 0
+        VaultScanner.scan(in: vault, ignore: .empty) { _ in seen += 1; return seen < 5 }
+        XCTAssertEqual(seen, 5)
+        XCTAssertEqual(paths(VaultScanner.files(in: vault, under: "b")), ["b/y.txt"])
+        XCTAssertEqual(paths(VaultScanner.files(in: vault, under: "/b/")), ["b/y.txt"])
+        XCTAssertEqual(paths(VaultScanner.files(in: vault, under: "b/node_modules")), [], "an ignored folder has nothing")
+        XCTAssertEqual(VaultScanner.files(in: vault, under: "missing"), [])
+        XCTAssertEqual(VaultScanner.files(in: vault, under: "").count, 21)
+    }
+
+    func testAsyncStreamYieldsEverythingAndCanBeAbandoned() async throws {
+        for i in 0..<50 { try touch("d\(i % 5)/f\(i).txt") }
+        var all: [String] = []
+        for await ref in VaultScanner.stream(in: vault) { all.append(ref.relativePath) }
+        XCTAssertEqual(all.sorted(), scan().sorted())
+        var some = 0
+        for await _ in VaultScanner.stream(in: vault) { some += 1; if some == 3 { break } }
+        XCTAssertEqual(some, 3)
+    }
+
+    func testChildrenListsOneLevelFoldersFirst() throws {
+        try touch("top.txt")
+        try touch(".zshrc")
+        try touch("b/inner.txt")
+        try touch("a10/x.txt")
+        try touch("a2/x.txt")
+        try touch("node_modules/x.js")
+        try touch("deck.key/Index/Slide1.iwa")
+        try touch(".DS_Store")
+        try fm.createSymbolicLink(at: url("link"), withDestinationURL: url("b"))
+        let kids = VaultScanner.children(of: "", in: vault)
+        XCTAssertEqual(kids.map(\.id), ["a2", "a10", "b", ".zshrc", "deck.key", "top.txt"])
+        XCTAssertEqual(kids.map(\.isFolder), [true, true, true, false, false, false])
+        XCTAssertEqual(kids[0].children, [])
+        XCTAssertEqual(kids[0].fileCount, 0)
+        XCTAssertEqual(kids[4].ref, FileRef(relativePath: "deck.key"))
+        XCTAssertEqual(VaultScanner.children(of: "b", in: vault).map(\.id), ["b/inner.txt"])
+        XCTAssertEqual(VaultScanner.children(of: "nope", in: vault), [])
+    }
+
+    func testLimitsAllowExtractionUpTo50MB() {
+        XCTAssertEqual(VaultScanner.limits.maxExtractableBytes, 50 * 1024 * 1024)
+        XCTAssertTrue(VaultScanner.limits.allowsExtraction(ofSize: 50 * 1024 * 1024))
+        XCTAssertFalse(VaultScanner.limits.allowsExtraction(ofSize: 50 * 1024 * 1024 + 1))
     }
 
     func testSymlinksAreNeitherListedNorFollowed() throws {
@@ -120,7 +211,6 @@ final class VaultScannerTests: XCTestCase {
         // skipDescendants() is sticky on the enumerator; a non-directory hit must never trigger it.
         try touch("DerivedData")
         try touch("node_modules")
-        try touch("Library")
         try touch("zdir/inner.txt")
         try touch("adir/inner.txt")
         XCTAssertEqual(scan(), ["adir/inner.txt", "zdir/inner.txt"])
@@ -149,24 +239,24 @@ final class VaultScannerTests: XCTestCase {
         try touch("notes/drafts")   // a file named drafts is not a directory, so "drafts/" leaves it alone
         try touch(IgnoreRules.fileName, "# scratch\n*.tmp\ndrafts/\n")
 
-        XCTAssertEqual(VaultScanner.ignoreRules(in: vault), IgnoreRules(text: "*.tmp\ndrafts/"))
-        XCTAssertEqual(scan(), ["keep.md", "notes/drafts", "x/c.md"])
+        XCTAssertEqual(VaultScanner.ignoreRules(in: vault), IgnoreRules(text: IgnoreRules.defaultText + "\n*.tmp\ndrafts/"))
+        XCTAssertEqual(scan(), [".flamingoignore", "keep.md", "notes/drafts", "x/c.md"])
         XCTAssertEqual(paths(VaultScanner.files(in: vault, ignore: .empty)),
-                       ["a.tmp", "drafts/d.md", "drafts/deep/e.md", "keep.md", "notes/drafts", "x/b.tmp", "x/c.md"])
+                       [".flamingoignore", "a.tmp", "drafts/d.md", "drafts/deep/e.md", "keep.md", "notes/drafts", "x/b.tmp", "x/c.md"])
         XCTAssertEqual(paths(VaultScanner.files(in: vault, ignore: IgnoreRules(text: "x/"))),
-                       ["a.tmp", "drafts/d.md", "drafts/deep/e.md", "keep.md", "notes/drafts"])
+                       [".flamingoignore", "a.tmp", "drafts/d.md", "drafts/deep/e.md", "keep.md", "notes/drafts"])
     }
 
-    func testIgnoreRulesAreEmptyWhenFileIsAbsent() {
-        XCTAssertEqual(VaultScanner.ignoreRules(in: vault), .empty)
-        XCTAssertTrue(VaultScanner.ignoreRules(in: vault).isEmpty)
+    func testIgnoreRulesAreTheDefaultsWhenNoFileExists() {
+        XCTAssertEqual(VaultScanner.ignoreRules(in: vault), IgnoreRules(text: IgnoreRules.defaultText))
+        XCTAssertFalse(VaultScanner.ignoreRules(in: vault).isEmpty)
     }
 
     func testIgnoreRulesCanDropAPackage() throws {
         try touch("deck.key/Index/Slide1.iwa")
         try touch("other.key/Index/Slide1.iwa")
         try touch(IgnoreRules.fileName, "deck.key\n")
-        XCTAssertEqual(scan(), ["other.key"])
+        XCTAssertEqual(scan(), [".flamingoignore", "other.key"])
     }
 
     // MARK: tree(from:)
@@ -230,12 +320,33 @@ final class VaultScannerTests: XCTestCase {
 
         let tree = VaultScanner.tree(in: vault)
         XCTAssertEqual(tree, VaultScanner.tree(from: VaultScanner.files(in: vault)))
-        XCTAssertEqual(tree.map(\.id), ["a", "b.txt", "deck.key"])
+        XCTAssertEqual(tree.map(\.id), ["a", ".flamingoignore", "b.txt", "deck.key"])
         XCTAssertEqual(tree[0].children.map(\.id), ["a/sub", "a/x.txt"])
-        XCTAssertEqual(tree.reduce(0) { $0 + $1.fileCount }, 4)
+        XCTAssertEqual(tree.reduce(0) { $0 + $1.fileCount }, 5)
 
         let unfiltered = VaultScanner.tree(in: vault, ignore: .empty)
         XCTAssertEqual(unfiltered, VaultScanner.tree(from: VaultScanner.files(in: vault, ignore: .empty)))
-        XCTAssertEqual(unfiltered.map(\.id), ["a", "drafts", "b.txt", "deck.key", "skip.tmp"])
+        XCTAssertEqual(unfiltered.map(\.id), ["a", "drafts", ".flamingoignore", "b.txt", "deck.key", "skip.tmp"])
+    }
+}
+
+/// Opt-in: `FLAMINGO_SCAN_HOME=1 scripts/test.sh --filter ScanHomeBenchmark` times a full scan of `~`.
+final class ScanHomeBenchmark: XCTestCase {
+    func testScanHome() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["FLAMINGO_SCAN_HOME"] != nil)
+        let vault = Vault(root: FileManager.default.homeDirectoryForCurrentUser)
+        let rules = VaultScanner.ignoreRules(in: vault)
+        let started = Date()
+        var count = 0, firstAt = 0.0
+        var top: [String: Int] = [:]
+        VaultScanner.scan(in: vault, ignore: rules) { ref in
+            if count == 0 { firstAt = Date().timeIntervalSince(started) }
+            count += 1
+            top[ref.components.prefix(ref.components.first == "Library" ? 3 : 1).joined(separator: "/"), default: 0] += 1
+            return true
+        }
+        let s = Date().timeIntervalSince(started)
+        print("scan ~: \(count) files in \(String(format: "%.1f", s))s, first after \(String(format: "%.3f", firstAt))s")
+        for (k, v) in top.sorted(by: { $0.value > $1.value }).prefix(25) { print("  \(v)\t\(k)") }
     }
 }

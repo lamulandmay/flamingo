@@ -19,6 +19,46 @@ public struct IgnoreRules: Sendable, Equatable {
     /// Name of the rules file, looked up directly under the vault root.
     public static let fileName = ".flamingoignore"
 
+    /// What `<vault>/.flamingo/ignore` holds on first run: caches, package stores, build
+    /// output and VCS internals, so a whole home folder (or `/`) indexes what a person made.
+    /// Patterns with a `/` are anchored to the vault root, so the `Library/...` lines are
+    /// spelled `**/Library/...` to work whether the vault is `~` or `/`.
+    public static let defaultText = """
+    # Flamingo skips what matches here. gitignore syntax, one pattern per line.
+    # A pattern without a slash matches a name at any depth; `**/` matches any folders.
+    # Edits take effect on the next reindex.
+
+    .flamingo
+    .git
+    .build
+    node_modules
+    .Trash
+    .cache
+    .npm
+    **/.cargo/registry
+    **/Library/Caches
+    **/Library/Containers
+    **/Library/Developer
+    **/Library/Application Support/Google
+    *.photoslibrary
+    *.app
+    .ollama
+    .docker
+    **/Downloads/*.dmg
+    __pycache__
+    DerivedData
+
+    # Only matter when the vault is /
+    /System/Volumes
+    /Volumes
+    /dev
+    /private/var/vm
+    /.Spotlight-V100
+    /.fseventsd
+    /.DocumentRevisions-V100
+
+    """
+
     /// Rules that ignore nothing.
     public static let empty = IgnoreRules(text: "")
 
@@ -35,6 +75,33 @@ public struct IgnoreRules: Sendable, Equatable {
         let anchored: Bool
         /// Compiled, fully anchored (`^...$`) translation of `glob`.
         let regex: NSRegularExpression
+        /// Cheaper exact test when the glob allows it; `nil` means use `regex`.
+        let fast: Fast?
+        /// A test on the subject's last component that must pass before `regex` is tried, so a
+        /// whole-disk scan rarely runs a regular expression.
+        let basenameFilter: Fast?
+
+        /// `literal`: the subject equals the string. `suffix`: the subject ends with it and the
+        /// part before has no `/` (a glob like `*.app`).
+        enum Fast: Equatable {
+            case literal(String)
+            case suffix(String)
+
+            init?(_ glob: Substring) {
+                let special: Set<Character> = ["*", "?", "[", "\\"]
+                if !glob.contains(where: special.contains) { self = .literal(String(glob)); return }
+                let rest = glob.dropFirst()
+                guard glob.first == "*", !rest.isEmpty, !rest.contains(where: { special.contains($0) || $0 == "/" }) else { return nil }
+                self = .suffix(String(rest))
+            }
+
+            func matches(_ subject: Substring) -> Bool {
+                switch self {
+                case .literal(let s): return subject == s
+                case .suffix(let s): return subject.hasSuffix(s) && !subject.dropLast(s.count).contains("/")
+                }
+            }
+        }
 
         static func == (lhs: Pattern, rhs: Pattern) -> Bool {
             lhs.glob == rhs.glob && lhs.negated == rhs.negated
@@ -42,6 +109,11 @@ public struct IgnoreRules: Sendable, Equatable {
         }
 
         func matches(_ subject: String) -> Bool {
+            if let fast { return fast.matches(Substring(subject)) }
+            if let basenameFilter {
+                let base = subject.lastIndex(of: "/").map { subject[subject.index(after: $0)...] } ?? Substring(subject)
+                guard basenameFilter.matches(base) else { return false }
+            }
             let range = NSRange(subject.startIndex..<subject.endIndex, in: subject)
             return regex.firstMatch(in: subject, options: [], range: range) != nil
         }
@@ -133,7 +205,10 @@ public struct IgnoreRules: Sendable, Equatable {
 
         let glob = String(line)
         guard let regex = try? NSRegularExpression(pattern: regexSource(forGlob: glob)) else { return nil }
-        return Pattern(glob: glob, negated: negated, directoryOnly: directoryOnly, anchored: anchored, regex: regex)
+        let lastComponent = glob.split(separator: "/", omittingEmptySubsequences: false).last ?? Substring(glob)
+        let filter = lastComponent.hasPrefix("**") ? nil : Pattern.Fast(lastComponent)
+        return Pattern(glob: glob, negated: negated, directoryOnly: directoryOnly, anchored: anchored, regex: regex,
+                       fast: Pattern.Fast(Substring(glob)), basenameFilter: filter)
     }
 
     /// Translates a gitignore glob into an anchored ICU regular expression.

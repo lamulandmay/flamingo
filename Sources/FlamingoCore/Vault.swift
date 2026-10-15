@@ -15,6 +15,11 @@ public struct Vault: Hashable, Sendable {
     /// `<root>/.flamingo/trail.jsonl` (plan 07).
     public var trailURL: URL { stateDir.appendingPathComponent("trail.jsonl") }
 
+    /// `<root>/.flamingo/ignore`: the vault's exclusions, gitignore syntax. See `IgnoreRules.defaultText`.
+    public var ignoreURL: URL { stateDir.appendingPathComponent("ignore") }
+    /// `<root>/.flamingo/pins.json`: the folders the sidebar shows. See `Pins`.
+    public var pinsURL: URL { stateDir.appendingPathComponent(Pins.fileName) }
+
     /// The folder's display name.
     public var name: String { root.lastPathComponent }
 

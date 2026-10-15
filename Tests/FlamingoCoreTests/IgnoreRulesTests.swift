@@ -212,4 +212,25 @@ final class IgnoreRulesTests: XCTestCase {
 
         XCTAssertThrowsError(try IgnoreRules(contentsOf: dir.appendingPathComponent("missing")))
     }
+
+    func testFastPathsAgreeWithTheRegex() throws {
+        let globs = ["node_modules", "*.app", "*.tar.gz", "**/Library/Caches", "Library/Caches", "**/Downloads/*.dmg",
+                     "a/b", "*", "a*", "*a*", "x/**", "\\#x", "[ab].txt", ".cache", "*/", "a.b"]
+        let subjects = ["node_modules", "x.app", ".app", "app", "a/x.app", "f.tar.gz", "tar.gz", "Library/Caches",
+                        "u/me/Library/Caches", "Library/CachesX", "XLibrary/Caches", "Downloads/a.dmg",
+                        "me/Downloads/a.dmg", "Downloads/sub/a.dmg", "a/b", "a/b/c", "a", "abc", "x/y", "#x",
+                        "a.txt", "c.txt", ".cache", "a.b", "aXb", ""]
+        for glob in globs {
+            guard let pattern = IgnoreRules.pattern(fromLine: glob) else { continue }
+            for subject in subjects {
+                let range = NSRange(subject.startIndex..<subject.endIndex, in: subject)
+                let expected = pattern.regex.firstMatch(in: subject, options: [], range: range) != nil
+                XCTAssertEqual(pattern.matches(subject), expected, "\(glob) vs \(subject)")
+            }
+        }
+        XCTAssertEqual(IgnoreRules.pattern(fromLine: "*.app")?.fast, .suffix(".app"))
+        XCTAssertEqual(IgnoreRules.pattern(fromLine: "a/b")?.fast, .literal("a/b"))
+        XCTAssertNil(IgnoreRules.pattern(fromLine: "**/Library/Caches")?.fast)
+        XCTAssertEqual(IgnoreRules.pattern(fromLine: "**/Library/Caches")?.basenameFilter, .literal("Caches"))
+    }
 }
