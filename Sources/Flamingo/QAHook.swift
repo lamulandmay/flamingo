@@ -14,6 +14,7 @@ enum QAHook {
 
     static func install() {
         guard Log.enabled, observer == nil else { return }
+        startLagMonitor()
         observer = DistributedNotificationCenter.default().addObserver(forName: name, object: nil, queue: .main) { note in
             let command = note.object as? String ?? ""
             MainActor.assumeIsolated { run(command) }
@@ -69,5 +70,21 @@ enum QAHook {
         Log.debug("qa: to \(type(of: window)) key=\(window.isKeyWindow) responder=\(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")")
         // An inactive app's windows ignore `sendEvent` key events; hand them to the responder.
         if window.isKeyWindow { window.sendEvent(event) } else { window.firstResponder?.keyDown(with: event) }
+    }
+
+    /// Every 10 s, logs the longest the main thread took to run a 50 ms timer, minus 50 ms:
+    /// what a user would feel as a stutter.
+    private static func startLagMonitor() {
+        var expected = Date().addingTimeInterval(0.05)
+        var worst = 0.0, windowStart = Date()
+        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+            let now = Date()
+            worst = max(worst, now.timeIntervalSince(expected))
+            expected = now.addingTimeInterval(0.05)
+            if now.timeIntervalSince(windowStart) >= 10 {
+                Log.debug("main: worst lag \(Int(worst * 1000)) ms over 10 s")
+                worst = 0; windowStart = now
+            }
+        }
     }
 }

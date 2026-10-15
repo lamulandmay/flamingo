@@ -75,6 +75,16 @@ final class VaultSession {
         }
     }
 
+    /// Graph builds read the whole index; on a disk-sized vault they take seconds, so they
+    /// get their own queue rather than holding up searches and comment reads.
+    private let graphQueue = DispatchQueue(label: "com.flamingo.graph", qos: .utility)
+
+    private func onGraph<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { cont in
+            graphQueue.async { cont.resume(with: Result { try work() }) }
+        }
+    }
+
     private func onIndex<T>(_ work: @escaping () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { cont in
             indexQueue.async { cont.resume(with: Result { try work() }) }
@@ -86,26 +96,29 @@ final class VaultSession {
     /// Set by `stop()`; walks and the reindex check it between files.
     let cancelled = Flag()
 
-    /// Every user file, walked at `.utility` QoS. Unsorted. Empty if the session stops first.
-    /// `partial` gets what has been found so far every couple of seconds, so ⌘K can reach
-    /// files before a whole-disk walk ends.
-    func listFiles(partial: (@MainActor ([FileRef]) -> Void)? = nil) async -> [FileRef] {
+    /// Every user file, walked at `.utility` QoS, unsorted, with the same files as a set
+    /// (built here so the main thread never hashes a whole disk). Empty if the session stops
+    /// first. `partial` gets what has been found so far every couple of seconds, so ⌘K can
+    /// reach files before a whole-disk walk ends.
+    func listFiles(partial: (@MainActor ([FileRef], Set<FileRef>) -> Void)? = nil) async -> ([FileRef], Set<FileRef>) {
         let v = vault
         let cancelled = cancelled
         return await withCheckedContinuation { cont in
             DispatchQueue.global(qos: .utility).async {
                 var out: [FileRef] = []
+                var set = Set<FileRef>()
                 var lastPartial = Date()
                 VaultScanner.scan(in: v, ignore: VaultScanner.ignoreRules(in: v)) { ref in
                     out.append(ref)
+                    set.insert(ref)
                     if let partial, out.count % 1024 == 0, Date().timeIntervalSince(lastPartial) > 2 {
                         lastPartial = Date()
-                        let snapshot = out
-                        Task { @MainActor in partial(snapshot) }
+                        let (list, members) = (out, set)
+                        Task { @MainActor in partial(list, members) }
                     }
                     return !cancelled.isSet
                 }
-                cont.resume(returning: cancelled.isSet ? [] : out)
+                cont.resume(returning: cancelled.isSet ? ([], []) : (out, set))
             }
         }
     }
@@ -195,12 +208,18 @@ final class VaultSession {
                     batch.removeAll(keepingCapacity: true)
                     let now = Date()
                     guard now.timeIntervalSince(lastReport) >= 0.25 else { return }
+                    if Int(now.timeIntervalSince(started)) / 10 != Int(lastReport.timeIntervalSince(started)) / 10 {
+                        Log.debug("reindex: \(done) files at \(Int(now.timeIntervalSince(started)))s")
+                    }
                     lastReport = now
                     let status = IndexStatus(files: done, perSecond: Double(done) / max(now.timeIntervalSince(started), 0.001))
                     Task { @MainActor in progress(status) }
                 }
                 VaultScanner.scan(in: v, ignore: rules) { ref in
                     guard !cancelled.isSet else { return false }
+                    // Too big, or an iCloud placeholder: ⌘K still finds it by name, but its
+                    // contents are never read. (A metadata-only index row is plan 12's.)
+                    guard VaultScanner.limits.allowsExtraction(of: v.url(for: ref)) else { return true }
                     seen.insert(ref.relativePath)
                     batch.append(ref)
                     if batch.count >= Self.reindexBatch { flush() }
@@ -227,7 +246,16 @@ final class VaultSession {
         }
     }
 
+    /// Refs the index may extract now (see `reindex`); vanished paths pass, so their rows go.
+    nonisolated static func extractable(_ refs: [FileRef], in vault: Vault) -> [FileRef] {
+        refs.filter { ref in
+            let url = vault.url(for: ref)
+            return !FileManager.default.fileExists(atPath: url.path) || VaultScanner.limits.allowsExtraction(of: url)
+        }
+    }
+
     func update(_ refs: [FileRef]) async {
+        let refs = Self.extractable(refs, in: vault)
         guard let index, !refs.isEmpty else { return }
         try? await onIndex { try index.update(refs) }
     }
@@ -254,11 +282,26 @@ final class VaultSession {
         guard let index else {
             return Graph(nodes: [], edges: (try? trail.edges()) ?? [])
         }
-        return (try? await onStore {
+        let started = Date()
+        let g = (try? await onGraph {
             let extra = (try? trail.edges()) ?? []
-            return try index.buildGraph(extraEdges: extra)
+            return Self.drawable(try index.buildGraph(extraEdges: extra))
         }) ?? Graph()
+        Log.debug("graph: \(g.nodes.count) nodes, \(g.edges.count) edges in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
+        return g
     }
+
+    /// Past `orphanLimit` nodes, files with no edge and no thought are dropped: on a whole
+    /// disk they are hundreds of thousands of dots that say nothing. Small vaults keep them,
+    /// as Obsidian does.
+    nonisolated static func drawable(_ g: Graph) -> Graph {
+        guard g.nodes.count > orphanLimit else { return g }
+        var linked = Set<String>()
+        for e in g.edges { linked.insert(e.source); linked.insert(e.target) }
+        return Graph(nodes: g.nodes.filter { $0.commentCount > 0 || linked.contains($0.id) }, edges: g.edges)
+    }
+
+    nonisolated static let orphanLimit = 5_000
 
     // MARK: Comments
 

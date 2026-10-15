@@ -192,10 +192,21 @@ final class VaultScannerTests: XCTestCase {
         XCTAssertEqual(VaultScanner.children(of: "nope", in: vault), [])
     }
 
-    func testLimitsAllowExtractionUpTo50MB() {
+    func testLimitsAllowExtractionUpTo50MB() throws {
         XCTAssertEqual(VaultScanner.limits.maxExtractableBytes, 50 * 1024 * 1024)
         XCTAssertTrue(VaultScanner.limits.allowsExtraction(ofSize: 50 * 1024 * 1024))
         XCTAssertFalse(VaultScanner.limits.allowsExtraction(ofSize: 50 * 1024 * 1024 + 1))
+        let small = try touch("small.txt")
+        let big = url("big.bin")
+        XCTAssertTrue(fm.createFile(atPath: big.path, contents: nil))
+        let h = try FileHandle(forWritingTo: big)
+        try h.truncate(atOffset: UInt64(VaultScanner.limits.maxExtractableBytes + 1))   // sparse
+        try h.close()
+        try touch("deck.key/Index/Slide1.iwa")
+        XCTAssertTrue(VaultScanner.limits.allowsExtraction(of: small))
+        XCTAssertFalse(VaultScanner.limits.allowsExtraction(of: big))
+        XCTAssertTrue(VaultScanner.limits.allowsExtraction(of: url("deck.key")))
+        XCTAssertFalse(VaultScanner.limits.allowsExtraction(of: url("missing.txt")))
     }
 
     func testSymlinksAreNeitherListedNorFollowed() throws {

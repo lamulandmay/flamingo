@@ -60,6 +60,16 @@ public enum VaultScanner {
 
         /// Whether a file of `bytes` may have its contents extracted.
         public func allowsExtraction(ofSize bytes: Int64) -> Bool { bytes <= maxExtractableBytes }
+
+        /// Whether the file at `url` may be opened for extraction: no larger than the limit,
+        /// and on this disk rather than an iCloud placeholder (reading one downloads it). A
+        /// package counts as small. Unreadable or missing files are not extractable.
+        public func allowsExtraction(of url: URL) -> Bool {
+            var st = stat()
+            guard lstat(url.path, &st) == 0 else { return false }
+            if st.st_flags & UInt32(SF_DATALESS) != 0 { return false }
+            return (st.st_mode & S_IFMT) == S_IFDIR || allowsExtraction(ofSize: Int64(st.st_size))
+        }
     }
 
     /// 50 MB: above it a file is metadata only.

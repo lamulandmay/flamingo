@@ -149,6 +149,8 @@ final class AppState: ObservableObject {
         comments = []; commentCounts = [:]; graph = Graph(); sections = []
         history = History()
         graphStale = true
+        graphTask?.cancel()
+        graphTask = nil
         Defaults.noteRecent(v.root)
         MainMenu.refreshRecents()
         hostWindow?.title = v.name
@@ -159,7 +161,8 @@ final class AppState: ObservableObject {
         s.watcher.onChange = { [weak self] refs in
             // Watcher queue. The index is thread-safe; update it here, then refresh the UI.
             let user = refs.filter { !$0.relativePath.hasPrefix(".flamingo") }
-            if !user.isEmpty { try? index?.update(user) }
+            let fresh = VaultSession.extractable(user, in: v)
+            if !fresh.isEmpty { try? index?.update(fresh) }
             Task { @MainActor in self?.filesChanged(user, in: s) }
         }
         s.watcher.onSidecarChange = { [weak self] targets in
@@ -176,23 +179,27 @@ final class AppState: ObservableObject {
             self?.reindex()
         }
         Task { [weak self] in
-            let files = await s.listFiles { [weak self] partial in
+            let (files, set) = await s.listFiles { [weak self] partial, members in
                 guard let self, self.session === s, !self.listed else { return }
-                self.setFiles(partial)
+                self.setFiles(partial, set: members)
             }
             guard let self, self.session === s else { return }
             self.listed = true
-            self.setFiles(files)
+            self.setFiles(files, set: set)
             if self.selected == nil, let first = self.tree.root.children.lazy.compactMap({ self.firstFile(in: $0) }).first {
                 self.select(first, source: .other)
             }
         }
     }
 
-    private func setFiles(_ list: [FileRef]) {
+    private func setFiles(_ list: [FileRef], set: Set<FileRef>? = nil) {
+        // Freeing a whole disk's worth of paths takes a few hundred ms; not on this thread.
+        let old = (files, fileSet)
         files = list
-        fileSet = Set(list)
+        fileSet = set ?? Set(list)
         filesVersion &+= 1
+        DispatchQueue.global(qos: .utility).async { withExtendedLifetime(old) {} }
+        Log.debug("files: \(list.count)\(listed ? "" : " so far")")
     }
 
     /// The first file in the sidebar's order under `node`, without listing deeper than needed.
@@ -355,9 +362,9 @@ final class AppState: ObservableObject {
     private func rescan() {
         guard let s = session else { return }
         Task {
-            let files = await s.listFiles()
+            let (files, set) = await s.listFiles()
             guard self.session === s else { return }
-            self.setFiles(files)
+            self.setFiles(files, set: set)
             if let sel = selected, !vault!.exists(sel) { selected = nil }
             history.prune(keeping: fileSet)
         }
@@ -544,7 +551,7 @@ final class AppState: ObservableObject {
     // MARK: Modes
 
     private func modeChanged() {
-        if mode == .graph, graphStale { graphTask?.cancel(); Task { await refreshGraph() } }
+        if mode == .graph, graphStale { graphTask?.cancel(); graphTask = nil; Task { await refreshGraph() } }
     }
 
     func toggleRail() {
@@ -601,7 +608,7 @@ final class AppState: ObservableObject {
         await s.update([file])          // re-ingests the sidecar into the index
         guard session === s else { return }
         await refreshCounts()
-        markGraphStale()
+        markGraphStale(urgent: true)
     }
 
     func refreshComments() async {
@@ -646,17 +653,26 @@ final class AppState: ObservableObject {
     }
 
     /// The graph feeds Graph mode and the local graph under the rail, so it is rebuilt
-    /// whenever it goes stale, coalescing bursts; at once when Graph mode is on screen.
-    private func markGraphStale() {
+    /// whenever it goes stale, coalescing bursts; at once when Graph mode is on screen. A
+    /// whole disk changes every few seconds, so there files changing on disk rebuild it at
+    /// most every `slowGraphDelay`; a thought (`urgent`) still shows within a second or two.
+    private func markGraphStale(urgent: Bool = false) {
         graphStale = true
+        let slow = !urgent && mode != .graph && files.count > Self.bigVault
+        if slow, graphTask != nil { return }
         graphTask?.cancel()
-        let delay: UInt64 = mode == .graph ? 300_000_000 : 1_500_000_000
+        let delay: UInt64 = mode == .graph ? 300_000_000 : slow ? Self.slowGraphDelay : 1_500_000_000
         graphTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delay)
-            guard !Task.isCancelled else { return }
-            await self?.refreshGraph()
+            guard !Task.isCancelled, let self else { return }
+            self.graphTask = nil
+            await self.refreshGraph()
         }
     }
+
+    /// Above this many files the vault is a disk, not a project.
+    static let bigVault = 50_000
+    static let slowGraphDelay: UInt64 = 30_000_000_000
 
     private func trailChanged() {
         markGraphStale()
@@ -724,6 +740,21 @@ final class AppState: ObservableObject {
 
     var captureGlobalKeys: String { CaptureController.shared.globalShortcuts.first ?? "⌃⌥Space" }
 
+    /// The local vision model leaves its description as a thought on the image.
+    func describeImage(_ ref: FileRef) {
+        guard let s = session, let engine = s.ask else { return }
+        showToast(ToastMessage(text: "Describing " + ref.name))
+        Task {
+            do {
+                try await engine.describe(ref)
+                dismissToast()
+            } catch {
+                showToast(ToastMessage(text: (error as? LocalizedError)?.errorDescription ?? String(describing: error)))
+            }
+            await commentsDidChange(for: ref, in: s)
+        }
+    }
+
     private func report(_ error: Error) {
         FileHandle.standardError.write("flamingo: \(error)\n".data(using: .utf8)!)
     }
@@ -759,6 +790,22 @@ final class AppState: ObservableObject {
                 self?.trailEnabled.toggle()
             },
         ]
+        let provider = AskProvider.preferred
+        if provider != .llama {
+            list.append(PaletteCommand(id: "asklocal", title: "Ask: Use Local Model", keys: nil, symbol: "desktopcomputer") {
+                AskProvider.preferred = .llama
+            })
+        }
+        if provider != .claude {
+            list.append(PaletteCommand(id: "askclaude", title: "Ask: Use Claude", keys: nil, symbol: "cloud") {
+                AskProvider.preferred = .claude
+            })
+        }
+        if let ref = selected, FileFamily(ext: ref.ext) == .image {
+            list.append(PaletteCommand(id: "describe", title: "Describe Image", keys: nil, symbol: "eye", enabled: askEngine != nil) { [weak self] in
+                self?.describeImage(ref)
+            })
+        }
         if needsFullDiskAccess {
             list.append(PaletteCommand(id: "fda", title: "Grant Full Disk Access", keys: nil, symbol: "lock.open") { [weak self] in
                 self?.openFullDiskAccessSettings()

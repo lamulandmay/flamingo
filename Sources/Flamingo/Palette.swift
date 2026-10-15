@@ -122,7 +122,8 @@ final class PaletteController: NSObject, NSWindowDelegate {
         } else {
             orderOut(panel)
         }
-        if host?.isKeyWindow == true { state?.focusSidebar?() }
+        // In Ask mode the question field claims focus itself.
+        if host?.isKeyWindow == true, state?.mode != .ask { state?.focusSidebar?() }
     }
 
     private func orderOut(_ panel: PalettePanel) {

@@ -189,7 +189,7 @@ struct Rail: View {
             .onOpenLink { state.openLink($0) }
             .onRestore { c in state.restoreComment(c, to: file) }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if let file, state.graph.nodes.contains(where: { $0.id == file.relativePath }) {
+            if state.mode != .graph, let file, state.graph.nodes.contains(where: { $0.id == file.relativePath }) {
                 Hairline()
                 LocalGraphView(graph: state.graph, center: file, depth: 1) { state.jump(to: $0, anchor: nil) }
                     .frame(height: 220)
