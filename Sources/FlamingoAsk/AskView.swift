@@ -184,12 +184,12 @@ struct AskSurface: View {
     @ObservedObject var session: AskSession
     var onOpen: (FileRef, FileAnchor?) -> Void
 
-    @FocusState private var focused: Bool
+    @State private var focusRequest = 0
     @State private var keyMonitor: Any?
     @State private var host = HostWindow()
 
     /// A comfortable reading measure.
-    private let measure: CGFloat = 680
+    private let measure: CGFloat = 640
     private let visibleHistory = 5
 
     var body: some View {
@@ -198,8 +198,10 @@ struct AskSurface: View {
                 if session.hasKey {
                     previousQuestions
                     questionField
-                    StreamHairline(active: session.waiting)
-                        .padding(.top, Theme.Space.s)
+                    if session.current != nil || !session.history.isEmpty {
+                        StreamHairline(active: session.waiting)
+                            .padding(.top, Theme.Space.s)
+                    }
                     if let current = session.current { answer(current) }
                 } else {
                     keyField
@@ -212,12 +214,9 @@ struct AskSurface: View {
         .scrollIndicators(.automatic)
         .background(Theme.Color.bg)
         .background(HostWindowReader(host: host))
-        .onAppear {
-            focused = true
-            installKeyMonitor()
-        }
+        .onAppear(perform: installKeyMonitor)
         .onDisappear(perform: removeKeyMonitor)
-        .onChange(of: session.hasKey) { focused = true }
+        .onChange(of: session.hasKey) { focusRequest += 1 }
     }
 
     // MARK: Pieces
@@ -229,7 +228,7 @@ struct AskSurface: View {
                 PreviousQuestion(text: exchange.question,
                                  opacity: Theme.Opacity.dimmed + (Theme.Opacity.rest - Theme.Opacity.dimmed) * Double(i + 1) / Double(shown.count)) {
                     session.show(exchange)
-                    focused = true
+                    focusRequest += 1
                 }
             }
         }
@@ -237,24 +236,17 @@ struct AskSurface: View {
     }
 
     private var questionField: some View {
-        TextField("", text: $session.draft, axis: .vertical)
-            .textFieldStyle(.plain)
-            .font(Theme.Font.title)
-            .foregroundStyle(Theme.Color.text)
-            .lineLimit(1...4)
-            .focused($focused)
-            .onSubmit { session.submit() }
-            .accessibilityLabel("Question")
+        QuestionField(text: $session.draft, accessibility: "Question", focusRequest: focusRequest, host: host) {
+            session.submit()
+        }
     }
 
     private var keyField: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s) {
-            SecureField("", text: $session.draft)
-                .textFieldStyle(.plain)
-                .font(Theme.Font.mono)
-                .focused($focused)
-                .onSubmit { session.saveKey() }
-                .accessibilityLabel("Anthropic API key")
+            QuestionField(text: $session.draft, secure: true, font: Theme.NS.mono,
+                          accessibility: "Anthropic API key", focusRequest: focusRequest, host: host) {
+                session.saveKey()
+            }
             Hairline()
             if let error = session.keyError { ErrorLine(text: error) }
         }
@@ -298,7 +290,8 @@ struct AskSurface: View {
         guard keyMonitor == nil else { return }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [session, host] event in
             // Local monitors see every window's keys; only this window's field is ours.
-            guard focused, session.hasKey, let window = host.window, event.window === window else { return event }
+            guard session.hasKey, let window = host.window, event.window === window,
+                  host.field?.isEditingNow == true else { return event }
             let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let command = mods == .command || mods == [.command, .numericPad, .function]
             let plain = mods.subtracting([.numericPad, .function]).isEmpty
@@ -322,6 +315,7 @@ struct AskSurface: View {
 /// The window this view lives in, for scoping the key monitor.
 final class HostWindow {
     weak var window: NSWindow?
+    weak var field: NSTextField?
 }
 
 private struct HostWindowReader: NSViewRepresentable {
