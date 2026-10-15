@@ -44,6 +44,9 @@ extension IndexStore {
                 weights[EdgeKey(source: source, target: dest, kind: .link), default: 0] += 1
             }
         }
+        for (key, w) in try mentionEdges(paths: paths) where nodes[key.source] != nil && nodes[key.target] != nil {
+            weights[key, default: 0] += w
+        }
         for e in extraEdges where e.source != e.target && nodes[e.source] != nil && nodes[e.target] != nil {
             weights[EdgeKey(source: e.source, target: e.target, kind: e.kind), default: 0] += e.weight
         }
