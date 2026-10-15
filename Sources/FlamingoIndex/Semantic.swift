@@ -18,7 +18,7 @@ extension IndexStore {
     /// After Ollama fails, semantic search waits this long before trying it again.
     static let downInterval: TimeInterval = 30
 
-    /// Queues `embedPending` at background QoS. Calls while one is queued coalesce.
+    /// Queues `embedPending`, then `titlePending`, at background QoS. Calls while one is queued coalesce.
     public func scheduleEmbedding() {
         let state = embedding
         let first = state.lock.withLock { () -> Bool in
@@ -28,7 +28,10 @@ extension IndexStore {
         guard first else { return }
         state.queue.async { [weak self] in
             state.lock.withLock { state.scheduled = false }
-            self?.embedPending()
+            guard let self else { return }
+            self.embedPending()
+            // Titling rewrites each file's title row, which drops its vector; embed those again.
+            if Self.autoTitle, self.titlePending() > 0 { self.embedPending() }
         }
     }
 

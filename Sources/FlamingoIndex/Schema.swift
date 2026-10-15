@@ -92,4 +92,12 @@ enum Schema {
     END;
     PRAGMA user_version = 3;
     """
+
+    /// Titles and tags from a small model for files whose extractor found no title.
+    /// `titled_by` marks a file as asked about (the model's name), whatever came back.
+    static let v4 = """
+    ALTER TABLE files ADD COLUMN tags TEXT;
+    ALTER TABLE files ADD COLUMN titled_by TEXT;
+    PRAGMA user_version = 4;
+    """
 }

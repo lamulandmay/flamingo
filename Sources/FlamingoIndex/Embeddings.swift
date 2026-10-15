@@ -108,6 +108,7 @@ final class EmbeddingState: @unchecked Sendable {
     var downSince: Date?
     let queue = DispatchQueue(label: "flamingo.embeddings", qos: .background)
     var embedder = Embedder()
+    var titler = Titler()
 }
 
 /// Reciprocal rank fusion: each list contributes 1 / (k + rank) for the items it has.

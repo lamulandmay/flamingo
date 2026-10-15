@@ -64,7 +64,7 @@ public final class IndexStore: @unchecked Sendable {
     public var databaseURL: URL { vault.stateDir.appendingPathComponent("index.sqlite") }
     public var graphURL: URL { vault.stateDir.appendingPathComponent("graph.json") }
 
-    static let schemaVersion = 3
+    static let schemaVersion = 4
     /// Changes whenever extraction output may differ, so files indexed by older extractors
     /// are re-extracted even though they haven't changed on disk.
     static var extractVersion: String { "\(Extract.version)" }
@@ -355,6 +355,7 @@ public final class IndexStore: @unchecked Sendable {
             if v < 1 { try db.exec(Schema.v1) }
             if v < 2 { try db.exec(Schema.v2) }
             if v < 3 { try db.exec(Schema.v3) }
+            if v < 4 { try db.exec(Schema.v4) }
             let stored = try db.query("SELECT value FROM meta WHERE key = 'extract_version'") { $0.string(0) }.first
             if stored != extractVersion {
                 try db.exec("UPDATE files SET size = -1")   // stale; keep serving old text until reindexed
@@ -408,15 +409,15 @@ public final class IndexStore: @unchecked Sendable {
 
     /// Moves the row of a vanished file carrying `id` to `ref`, keeping its extracted text.
     private func adoptRow(carrying id: UUID, to ref: FileRef) throws {
-        let candidates = try writer.query("SELECT path, title FROM files WHERE id = ? AND path != ?",
-                                          id.uuidString, ref.relativePath) { ($0.string(0), $0.optionalString(1)) }
-        guard let (old, title) = candidates.first(where: {
+        let candidates = try writer.query("SELECT path, title, tags FROM files WHERE id = ? AND path != ?",
+                                          id.uuidString, ref.relativePath) { ($0.string(0), $0.optionalString(1), $0.optionalString(2)) }
+        guard let (old, title, tags) = candidates.first(where: {
             !FileManager.default.fileExists(atPath: vault.url(for: FileRef(relativePath: $0.0)).path)
         }) else { return }
         try deleteRows(path: ref.relativePath)
         try writer.run("UPDATE files SET path = ?, ext = ? WHERE path = ?", ref.relativePath, ref.ext, old)
         try writer.run("UPDATE sections SET path = ? WHERE path = ?", ref.relativePath, old)
-        try writer.run("UPDATE sections SET title = ? WHERE path = ? AND ord = 0", Self.fileTitle(title, ref), ref.relativePath)
+        try writer.run("UPDATE sections SET title = ? WHERE path = ? AND ord = 0", Self.fileTitle(title, ref, tags: tags), ref.relativePath)
     }
 
     /// What the scanner lists under a folder, judged by the vault's rules (not the folder's).
@@ -516,9 +517,12 @@ public final class IndexStore: @unchecked Sendable {
         }
     }
 
-    static func fileTitle(_ title: String?, _ ref: FileRef) -> String {
-        guard let title, title != ref.name, title != (ref.name as NSString).deletingPathExtension else { return ref.name }
-        return title + " · " + ref.name
+    /// The file row's searchable title: `Title · name.ext`, then any model-given tags.
+    static func fileTitle(_ title: String?, _ ref: FileRef, tags: String? = nil) -> String {
+        var s = ref.name
+        if let title, title != ref.name, title != (ref.name as NSString).deletingPathExtension { s = title + " · " + ref.name }
+        if let tags, !tags.isEmpty { s += " · " + tags }
+        return s
     }
 
     static func capped(_ s: String, _ limit: Int) -> String {
