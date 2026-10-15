@@ -366,7 +366,7 @@ final class GraphRenderer {
             var level = 0
             if focusOn && !touchesFocus { level |= 1 }
             if (flags[a] | flags[b]) & Flag.filtered != 0 { level |= 2 }
-            let bucket = (e.kind == .link ? 0 : 12) + emphasis * 4 + level
+            let bucket = (e.kind == .trail ? 12 : 0) + emphasis * 4 + level
             let path = paths[bucket]
             path.move(to: CGPoint(x: ax + ux * ra, y: ay + uy * ra))
             path.addLine(to: CGPoint(x: bx - ux * rb, y: by - uy * rb))
@@ -416,8 +416,11 @@ final class GraphRenderer {
         let accentSlot = families
         // Missing files draw as hollow rings: a link to something that isn't there yet.
         let ghostSlot = families + 1
+        // Folders are hollow too, in the secondary color.
+        let folderSlot = families + 2
         let missing = frame.topology.missing
-        let bucketCount = (families + 2) * 4
+        let isFolder = frame.topology.isFolder
+        let bucketCount = (families + 3) * 4
         var paths: [CGMutablePath] = []
         paths.reserveCapacity(bucketCount)
         for _ in 0..<bucketCount { paths.append(CGMutablePath()) }
@@ -426,7 +429,7 @@ final class GraphRenderer {
         for i in 0..<n where visible[i] {
             if i == sel || i == focus || i == drag { continue }
             let f = flags[i]
-            let slot = f & Flag.selSet != 0 ? accentSlot : (i < missing.count && missing[i] ? ghostSlot : family[i])
+            let slot = f & Flag.selSet != 0 ? accentSlot : (i < isFolder.count && isFolder[i] ? folderSlot : (i < missing.count && missing[i] ? ghostSlot : family[i]))
             var level = 0
             if focusOn && f & Flag.focusSet == 0 { level |= 1 }
             if f & Flag.filtered != 0 { level |= 2 }
@@ -436,10 +439,13 @@ final class GraphRenderer {
             used[bucket] = true
         }
         for level in stride(from: 3, through: 0, by: -1) {
-            for slot in 0...ghostSlot {
+            for slot in 0...folderSlot {
                 let bucket = slot * 4 + level
                 guard used[bucket] else { continue }
-                if slot == ghostSlot {
+                if slot == folderSlot {
+                    context.stroke(Path(paths[bucket]), with: Self.shade(pal.secondary, 0.8 * levels[level]),
+                                   lineWidth: Style.edgeWidth * 1.5)
+                } else if slot == ghostSlot {
                     context.stroke(Path(paths[bucket]), with: Self.shade(pal.tertiary, levels[level]),
                                    lineWidth: Style.edgeWidth)
                 } else {

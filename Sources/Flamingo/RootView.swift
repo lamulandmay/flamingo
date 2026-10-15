@@ -72,7 +72,7 @@ struct RootView: View {
             case .files:
                 PreviewPane()
             case .graph:
-                GraphView(graph: state.graph, selected: state.selected, vault: state.vault) {
+                GraphView(graph: state.graph, selected: state.selected, vault: state.vault, scope: state.selectedFolder) {
                     state.jump(to: $0, anchor: nil)
                 }
             case .trail:

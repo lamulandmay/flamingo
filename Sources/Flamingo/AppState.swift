@@ -52,6 +52,8 @@ final class AppState: ObservableObject {
     @Published private(set) var vault: Vault?
     @Published private(set) var files: [FileRef] = []
     @Published var selected: FileRef? { didSet { if selected != oldValue { selectionChanged() } } }
+    /// The sidebar's folder, or the selected file's parent. The graph scopes to it.
+    @Published var selectedFolder: String?
     @Published var anchor: FileAnchor? { didSet { if anchor != oldValue { history.updateAnchor(anchor) } } }
     /// Files, Graph, Trail, Ask. The design module's enum, so `SegmentedModes` binds directly.
     typealias Mode = FlamingoMode

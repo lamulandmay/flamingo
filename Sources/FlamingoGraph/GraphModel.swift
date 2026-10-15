@@ -55,6 +55,12 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     private var engine: LayoutEngine?
     private var lastGeneration = -1
     private(set) var vault: Vault?
+    /// The full graph from the index. `graph` is what's shown: the whole thing, or `scope`'s folder.
+    private var source = Graph()
+    /// Relative folder path the view is scoped to; nil shows the whole graph.
+    private(set) var scope: String?
+    /// Folder budget for a scoped graph so `~` doesn't become ten thousand dots.
+    var scopeBudget = 400
 
     var onSelect: (FileRef) -> Void = { _ in }
     /// Printable keys typed on the canvas. The view appends them to the filter field.
@@ -96,6 +102,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     /// Live graph. Positions come from the in-memory cache, then `graph-layout.json`, then seeds.
     init(graph: Graph, vault: Vault?) {
         mode = .live
+        self.source = graph
         self.graph = graph
         self.vault = vault
         topology = Self.topology(for: graph, vault: vault)
@@ -149,6 +156,18 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     /// A new graph from the index: keep every known position, bring new nodes in near their
     /// neighbors, relax gently.
     func update(graph newGraph: Graph) {
+        source = newGraph
+        show(Self.scoped(newGraph, to: scope, in: vault, budget: scopeBudget))
+    }
+
+    /// Scope the graph to a folder (relative path, "" for the vault root) or nil for everything.
+    func setScope(_ folder: String?) {
+        guard folder != scope else { return }
+        scope = folder
+        show(Self.scoped(source, to: folder, in: vault, budget: scopeBudget))
+    }
+
+    private func show(_ newGraph: Graph) {
         guard newGraph != graph else { return }
         let old = topology
         let carried = LayoutStore.layout(for: old, positions: positions, pinned: pinned)
@@ -179,6 +198,8 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         guard vault != self.vault, mode == .live else { return update(graph: graph) }
         persist()
         self.vault = vault
+        self.source = graph
+        let graph = Self.scoped(graph, to: scope, in: vault, budget: scopeBudget)
         self.graph = graph
         topology = Self.topology(for: graph, vault: vault)
         let saved = LayoutStore.cached(Self.layoutKey(vault)) ?? vault.flatMap(LayoutStore.load(from:))
@@ -278,7 +299,50 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     private func open(_ i: Int) {
         guard topology.ids.indices.contains(i) else { return }
         invalidate()
+        if topology.isFolder[i] {
+            let id = topology.ids[i]
+            setScope(id == "/" ? "" : String(id.dropLast()))
+            return
+        }
         onSelect(FileRef(relativePath: topology.ids[i]))
+    }
+
+    /// The folder's subtree as a graph: a hollow node per folder, a dot per file, `folder` edges
+    /// for containment, plus every link or trail edge touching the subtree with its far end
+    /// brought in. Breadth-first so a huge folder shows its top levels and stops at `budget`.
+    static func scoped(_ g: Graph, to scope: String?, in vault: Vault?, budget: Int) -> Graph {
+        guard let scope, let vault else { return g }
+        let byID = Dictionary(g.nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let ignore = VaultScanner.ignoreRules(in: vault)
+        func folderID(_ p: String) -> String { p.isEmpty ? "/" : p + "/" }
+        func folderNode(_ p: String) -> Graph.Node {
+            Graph.Node(id: folderID(p), name: p.isEmpty ? vault.root.lastPathComponent : (p as NSString).lastPathComponent, ext: "")
+        }
+        var nodes: [Graph.Node] = [], edges: [Graph.Edge] = [], seen = Set<String>()
+        var queue = [scope], head = 0
+        nodes.append(folderNode(scope)); seen.insert(folderID(scope))
+        while head < queue.count, nodes.count < budget {
+            let f = queue[head]; head += 1
+            for child in VaultScanner.children(of: f, in: vault, ignore: ignore) {
+                let id = child.isFolder ? folderID(child.id) : child.id
+                guard seen.insert(id).inserted else { continue }
+                if child.isFolder { nodes.append(folderNode(child.id)); queue.append(child.id) }
+                else { nodes.append(byID[id] ?? Graph.Node(id: id, name: child.name, ext: child.ref?.ext ?? "")) }
+                edges.append(Graph.Edge(source: folderID(f), target: id, kind: .folder))
+                if nodes.count >= budget { break }
+            }
+        }
+        var outside = 0
+        for e in g.edges where e.kind != .folder {
+            let sIn = seen.contains(e.source), tIn = seen.contains(e.target)
+            guard sIn || tIn else { continue }
+            for far in [e.source, e.target] where !seen.contains(far) {
+                guard outside < 120, let n = byID[far] else { continue }
+                nodes.append(n); seen.insert(far); outside += 1
+            }
+            if seen.contains(e.source), seen.contains(e.target) { edges.append(e) }
+        }
+        return Graph(nodes: nodes, edges: edges)
     }
 
     // MARK: Drawing

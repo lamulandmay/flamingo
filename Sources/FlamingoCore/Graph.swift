@@ -12,7 +12,8 @@ public struct Graph: Codable, Sendable, Equatable {
         }
     }
     public struct Edge: Codable, Sendable, Equatable {
-        public enum Kind: String, Codable, Sendable { case link, trail }
+        /// `folder` edges join a folder node (id ends in `/`) to its direct children.
+        public enum Kind: String, Codable, Sendable { case link, trail, folder }
         public var source: String
         public var target: String
         public var kind: Kind

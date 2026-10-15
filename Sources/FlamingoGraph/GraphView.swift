@@ -15,6 +15,9 @@ public struct GraphView: View {
     public var selected: FileRef?
     public var onSelect: (FileRef) -> Void
     var vault: Vault?
+    /// Folder to scope to (relative path, "" for the root); nil shows everything. Double-click
+    /// a folder node to scope into it.
+    public var scope: String?
 
     @StateObject private var model: GraphModel
     @State private var filter = ""
@@ -27,8 +30,8 @@ public struct GraphView: View {
     /// Pass the vault so the layout persists in `<vault>/.flamingo/graph-layout.json`: reopening
     /// shows the graph exactly as it was left, pins included. Without it the layout lives only
     /// for the life of the process.
-    public init(graph: Graph, selected: FileRef? = nil, vault: Vault?, onSelect: @escaping (FileRef) -> Void) {
-        self.graph = graph; self.selected = selected; self.vault = vault; self.onSelect = onSelect
+    public init(graph: Graph, selected: FileRef? = nil, vault: Vault?, scope: String? = nil, onSelect: @escaping (FileRef) -> Void) {
+        self.graph = graph; self.selected = selected; self.vault = vault; self.scope = scope; self.onSelect = onSelect
         _model = StateObject(wrappedValue: GraphModel(graph: graph, vault: vault))
     }
 
@@ -54,12 +57,14 @@ public struct GraphView: View {
         .coordinateSpace(name: Self.space)
         .background(Theme.Color.bgSunken)
         .onAppear {
+            model.setScope(scope)
             model.select(selected)
             model.resume()
         }
         .onDisappear { model.suspend() }
         .onChange(of: graph) { _, new in model.update(graph: new) }
         .onChange(of: selected) { _, new in model.select(new) }
+        .onChange(of: scope) { _, new in model.setScope(new) }
         .onChange(of: vault) { _, new in model.reset(graph: graph, vault: new) }
         .onChange(of: filter) { _, new in model.setFilter(new) }
     }

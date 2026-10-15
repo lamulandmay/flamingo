@@ -124,11 +124,11 @@ final class ForceSimulation {
         for e in topology.edges where e.a != e.b && e.a >= 0 && e.b >= 0 && e.a < n && e.b < n {
             let key = Pair(a: min(e.a, e.b), b: max(e.a, e.b))
             if let s = slot[key] {
-                if e.kind == .link { hasLink[s] = true }
+                if e.kind != .trail { hasLink[s] = true }
             } else {
                 slot[key] = pairs.count
                 pairs.append(key)
-                hasLink.append(e.kind == .link)
+                hasLink.append(e.kind != .trail)
             }
         }
         var degree = [Int](repeating: 0, count: n)

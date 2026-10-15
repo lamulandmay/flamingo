@@ -41,6 +41,8 @@ struct GraphTopology: Sendable {
     /// Nodes with no file behind them: wikilink targets that resolve to nothing and sidecar
     /// targets whose file is gone. Drawn ghosted. All false until `markMissing(in:)`.
     private(set) var missing: [Bool]
+    /// Folder nodes (ids ending in `/`), drawn as hollow rings.
+    let isFolder: [Bool]
 
     var count: Int { ids.count }
     func degree(_ i: Int) -> Int { neighbors[i].count }
@@ -52,8 +54,9 @@ struct GraphTopology: Sendable {
         for node in graph.nodes where index[node.id] == nil {
             index[node.id] = ids.count
             ids.append(node.id)
-            let name = node.name.isEmpty ? (node.id as NSString).lastPathComponent : node.name
-            let stem = (name as NSString).deletingPathExtension
+            let folder = node.id.hasSuffix("/")
+            let name = node.name.isEmpty ? ((folder ? String(node.id.dropLast()) : node.id) as NSString).lastPathComponent : node.name
+            let stem = folder ? name : (name as NSString).deletingPathExtension
             labels.append(stem.isEmpty ? name : stem)
             var ext = node.ext.isEmpty ? (name as NSString).pathExtension.lowercased() : node.ext.lowercased()
             // Inbox thoughts (`_inbox/2026-10-14`) are markdown notes with no file of their own.
@@ -86,14 +89,16 @@ struct GraphTopology: Sendable {
         self.index = index
         self.edges = edges
         self.neighbors = adjacency.map { $0.sorted() }
-        self.radius = (0..<ids.count).map { 3 + log(1 + Double(counts[$0] + adjacency[$0].count)) }
+        let folders = ids.map { $0.hasSuffix("/") }
+        self.isFolder = folders
+        self.radius = (0..<ids.count).map { folders[$0] ? 4.5 + log(1 + Double(adjacency[$0].count)) : 3 + log(1 + Double(counts[$0] + adjacency[$0].count)) }
         self.missing = [Bool](repeating: false, count: ids.count)
     }
 
     /// Marks nodes whose file doesn't exist in `vault`. Inbox notes are never missing.
     mutating func markMissing(in vault: Vault) {
         let fm = FileManager.default
-        for i in ids.indices {
+        for i in ids.indices where !isFolder[i] {
             let ref = FileRef(relativePath: ids[i])
             missing[i] = !ref.isInbox && !fm.fileExists(atPath: vault.url(for: ref).path)
         }
