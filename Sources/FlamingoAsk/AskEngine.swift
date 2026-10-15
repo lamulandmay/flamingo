@@ -29,6 +29,8 @@ public enum Delta: Sendable, Equatable {
     case discard
     /// The finished answer, with citations parsed.
     case answer(Answer)
+    /// One tertiary line about the model, e.g. `loading qwen3.8-27b` while it loads.
+    case status(String)
 }
 
 /// Retrieval over the index + a Claude call. Plan 09 owns.
@@ -88,7 +90,11 @@ public final class AskEngine: @unchecked Sendable {
 
     let source: PassageSource
     var client = MessagesClient()
+    var chat = ChatClient()
     var keyProvider: @Sendable () -> String? = { KeyStore.key() }
+    var providerChoice: @Sendable () -> AskProvider = { AskProvider.preferred }
+    var isOnline: @Sendable () -> Bool = { Reachability.shared.isOnline }
+    var llama: @Sendable (@escaping @Sendable () -> Void) async throws -> URL = { try await LlamaServer.shared.endpoint(onLoading: $0) }
     private let lock = NSLock()
     private var _model = AskEngine.defaultModel
 
@@ -97,12 +103,59 @@ public final class AskEngine: @unchecked Sendable {
         self.source = source
         self.client = client
         self.keyProvider = key
+        self.providerChoice = { .claude }
     }
 
-    /// Retrieve, then let the model search up to `Prompt.maxSearches` times before it answers.
+    /// Claude when chosen, or on auto with a key and a network; otherwise a local model.
+    /// On auto, Claude going offline before any text falls back to the local model.
     private func run(_ question: String, yield: @escaping @Sendable (Delta) -> Void) async throws {
         let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
+        let choice = providerChoice()
+        switch choice {
+        case .claude:
+            try await runClaude(question, yield: yield)
+        case .llama, .ollama:
+            try await runLocal(question, kind: choice, yield: yield)
+        case .auto:
+            guard keyProvider() != nil, isOnline() else { return try await runLocal(question, kind: .llama, yield: yield) }
+            let shown = Flag()
+            do {
+                try await runClaude(question) { delta in
+                    if case .text = delta { shown.set() }
+                    yield(delta)
+                }
+            } catch AskError.offline where !shown.value {
+                try await runLocal(question, kind: .llama, yield: yield)
+            }
+        }
+    }
+
+    /// One pass, no search tool. The 27B falls back to Ollama when it can't be started.
+    private func runLocal(_ question: String, kind: AskProvider, yield: @escaping @Sendable (Delta) -> Void) async throws {
+        var endpoint: ChatEndpoint
+        if kind == .ollama {
+            endpoint = ChatEndpoint(baseURL: ChatEndpoint.ollama, model: AskProvider.ollamaModel, kind: .ollama)
+        } else {
+            do {
+                let url = try await llama { yield(.status("loading \(LlamaServer.modelName)")) }
+                endpoint = ChatEndpoint(baseURL: url, model: LlamaServer.modelName, kind: .llama)
+            } catch AskError.unavailable(_) where providerChoice() == .auto {
+                endpoint = ChatEndpoint(baseURL: ChatEndpoint.ollama, model: AskProvider.ollamaModel, kind: .ollama)
+            }
+        }
+        try Task.checkCancellation()
+        let passages = try Retriever(source: source).retrieve(question, budgetTokens: Prompt.localBudget(endpoint.kind))
+        yield(.passages(passages))
+        let sources = Dictionary(uniqueKeysWithValues: passages.map { ($0.id, $0.citation) })
+        let body = Prompt.localBody(endpoint, question: question, passages: passages, today: Date())
+        let text = try await chat.send(body, to: endpoint) { yield(.text($0)) }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AskError.stream("No answer") }
+        yield(.answer(CitationParser.answer(text: text, sources: sources)))
+    }
+
+    /// Retrieve, then let the model search up to `Prompt.maxSearches` times before it answers.
+    private func runClaude(_ question: String, yield: @escaping @Sendable (Delta) -> Void) async throws {
         guard let key = keyProvider() else { throw AskError.noKey }
 
         let retriever = Retriever(source: source)
@@ -215,6 +268,14 @@ public final class AskEngine: @unchecked Sendable {
         if message.stopReason == "refusal" { throw AskError.refused }
         if message.stopReason == "max_tokens", message.text.isEmpty { throw AskError.stream("Answer cut off") }
     }
+}
+
+/// Set once, read from another task.
+final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value = false
+    var value: Bool { lock.withLock { _value } }
+    func set() { lock.withLock { _value = true } }
 }
 
 /// `[3]`, `[2][5]` and `[2, 5]` in answer text.

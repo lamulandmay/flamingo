@@ -33,7 +33,10 @@ struct Exchange: Identifiable, Equatable {
 /// lose the history or cut off an answer that is still streaming.
 @MainActor
 final class AskSession: ObservableObject {
-    @Published var hasKey = AskEngine.hasKey
+    /// False only when Claude is the chosen provider and there's no key: then the field takes one.
+    @Published var hasKey = AskSession.keyReady
+    /// `loading qwen3.8-27b` while the local model loads; cleared when text arrives.
+    @Published private(set) var status: String?
     @Published var draft = ""
     @Published private(set) var history: [Exchange] = []
     @Published private(set) var current: Exchange?
@@ -59,7 +62,18 @@ final class AskSession: ObservableObject {
         return s
     }
 
-    init(engine: AskEngine) { self.engine = engine }
+    private var observer: NSObjectProtocol?
+
+    static var keyReady: Bool { AskProvider.preferred != .claude || AskEngine.hasKey }
+
+    init(engine: AskEngine) {
+        self.engine = engine
+        observer = NotificationCenter.default.addObserver(forName: AskProvider.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.hasKey = AskSession.keyReady }
+        }
+    }
+
+    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
 
     func submit() {
         let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -89,6 +103,7 @@ final class AskSession: ObservableObject {
         task?.cancel()
         task = nil
         waiting = false
+        status = nil
         if var current {
             current.done = true
             history.append(current)
@@ -100,8 +115,11 @@ final class AskSession: ObservableObject {
         switch delta {
         case .passages(let passages):
             for p in passages { current?.sources[p.id] = p.citation }
+        case .status(let line):
+            status = line
         case .text(let text):
             waiting = false
+            status = nil
             current?.text += text
         case .discard:
             current?.text = ""
@@ -119,11 +137,13 @@ final class AskSession: ObservableObject {
         guard current?.id == id else { return }
         current?.done = true
         waiting = false
+        status = nil
     }
 
     private func fail(_ error: Error, in id: UUID) {
         guard current?.id == id else { return }
         waiting = false
+        status = nil
         let ask = error as? AskError
         current?.error = ask?.errorDescription ?? error.localizedDescription
         current?.done = true
@@ -202,6 +222,7 @@ struct AskSurface: View {
                         StreamHairline(active: session.waiting)
                             .padding(.top, Theme.Space.s)
                     }
+                    if let status = session.status { ErrorLine(text: status).padding(.top, Theme.Space.s) }
                     if let current = session.current { answer(current) }
                 } else {
                     keyField

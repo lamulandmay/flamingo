@@ -36,6 +36,38 @@ enum Prompt {
 
     static let maxSearches = 3
 
+    /// For local models, which answer in one pass without the search tool.
+    static let localSystem = String(system[..<system.range(of: "\n\nSearching:")!.lowerBound])
+
+    /// An OpenAI-style chat request for llama-server or Ollama. Thinking off for the 27B,
+    /// with the model card's non-thinking sampling.
+    static func localBody(_ endpoint: ChatEndpoint, question: String, passages: [Passage], today: Date) -> JSON {
+        let day = DateFormatter()
+        day.locale = Locale(identifier: "en_US_POSIX")
+        day.dateFormat = "yyyy-MM-dd"
+        let user = passageBlock(passages) + "\n\n<today>\(day.string(from: today))</today>\n\n<question>\n\(question)\n</question>"
+        var body: JSON = [
+            "model": .string(endpoint.model),
+            "stream": true,
+            "max_tokens": 1500,
+            "temperature": .double(0.7),
+            "top_p": .double(0.8),
+            "messages": [
+                ["role": "system", "content": .string(localSystem)],
+                ["role": "user", "content": .string(user)],
+            ],
+        ]
+        if endpoint.kind == .llama {
+            body["chat_template_kwargs"] = ["enable_thinking": false]
+            body["top_k"] = 20
+            body["presence_penalty"] = .double(1.5)
+        }
+        return body
+    }
+
+    /// Passage budgets in tokens: the 27B runs with a 16k context, Ollama defaults to 4k.
+    static func localBudget(_ kind: AskProvider) -> Int { kind == .ollama ? 2500 : 10000 }
+
     static let searchTool: JSON = [
         "name": "search",
         "description": """

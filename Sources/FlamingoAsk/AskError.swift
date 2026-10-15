@@ -11,6 +11,8 @@ public enum AskError: Error, Equatable, LocalizedError {
     case offline
     case api(status: Int, message: String)
     case stream(String)
+    /// A local model or server that isn't there: the message says which.
+    case unavailable(String)
 
     public var errorDescription: String? {
         switch self {
@@ -23,6 +25,7 @@ public enum AskError: Error, Equatable, LocalizedError {
         case .offline: return "Offline"
         case .api(let status, let message): return message.isEmpty ? "HTTP \(status)" : message
         case .stream(let message): return message
+        case .unavailable(let message): return message
         }
     }
 
