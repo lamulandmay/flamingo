@@ -44,7 +44,7 @@ public enum VaultScanner {
     /// machine-made trees nobody wants indexed. Folders are not descended into. Everything
     /// else is in `IgnoreRules.defaultText`, which the user can edit.
     public static let ignoredNames: Set<String> = [
-        ".flamingo", ".git", "node_modules", ".DS_Store", "__pycache__", "DerivedData", ".build", ".Trash",
+        ".flamingo", ".git", "node_modules", ".DS_Store", ".localized", "__pycache__", "DerivedData", ".build", ".Trash",
     ]
 
     /// Names skipped only directly under the vault root. Empty since the vault became the

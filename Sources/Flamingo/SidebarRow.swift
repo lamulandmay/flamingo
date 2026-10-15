@@ -31,7 +31,7 @@ struct SidebarRow: View {
                     .opacity(hovering ? 1 : 0)
             }
         }
-        .padding(.trailing, Theme.Space.l)
+        .padding(.trailing, Theme.Space.s)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)

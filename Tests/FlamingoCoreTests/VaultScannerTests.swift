@@ -96,6 +96,7 @@ final class VaultScannerTests: XCTestCase {
         try touch("sub/.hidden.txt")
         try touch(".config/fish/config.fish")
         try touch(".DS_Store")
+        try touch("Desktop/.localized")
         try touch("__pycache__/a.pyc")
         try touch("DerivedData/Build/x")
         try touch(".build/debug/x")
