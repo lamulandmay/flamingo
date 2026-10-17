@@ -248,7 +248,7 @@ extension IndexStore {
 
     /// A thought from a while ago that bears on `files` (the ones open now), or nil when none does.
     /// It is on one of them, links to one, or is on a file close in meaning to one; open thoughts
-    /// a person wrote themselves, not in `seen` (derived ids or uids). The best match wins, the
+    /// a person wrote themselves (not replies), not in `seen` (derived ids or uids). The best match wins, the
     /// oldest first among equals, so the same files bring back the same thought.
     public func resurfaceableThought(near files: [FileRef], olderThan age: TimeInterval = 3 * 86_400, now: Date = Date(),
                                      seen: Set<String> = []) throws -> (FileRef, Comment)? {
@@ -258,7 +258,7 @@ extension IndexStore {
         let candidates = try read { db in
             try db.query("""
                 SELECT \(Self.thoughtColumns) FROM comments c LEFT JOIN files f ON f.path = c.path
-                WHERE c.state = 'open' AND c.origin = 'human' AND c.ts < ? ORDER BY c.ts
+                WHERE c.state = 'open' AND c.origin = 'human' AND c.parent IS NULL AND c.ts < ? ORDER BY c.ts
                 """, cutoff, row: Self.thoughtRecord)
         }.filter { r in !seen.contains(r.comment.id.uuidString) && (r.uid.map { !seen.contains($0) } ?? true) }
         guard !candidates.isEmpty else { return nil }

@@ -407,22 +407,27 @@ extension IndexStore {
 
     // MARK: - What a thought is embedded as
 
-    /// `Question on Pricing memo (pricing-memo.docx), slide 7 · re: <parent line> · links: <titles>`.
-    /// The kind word comes from the rules alone, and state and due date are left out, so a
-    /// thought's vector changes only when its text does.
+    /// `Question on Pricing memo (pricing-memo.docx), slide 7 · re: <parent line>`, and for a thought
+    /// with no file behind it also ` · links: <titles>`. The kind word comes from the rules alone,
+    /// and state and due date are left out, so a thought's vector changes only when its text does.
+    ///
+    /// Measured on the fixture vault (`SemanticBenchmarkTests`), with qwen3-embedding: "Question" and
+    /// "To do" lift file-level ranking (palette 0.939/0.836 → 0.939/0.841, hybrid MRR 0.824 → 0.855);
+    /// an "Intent" word and `links:` on thoughts that sit on a file each cost a partial hit
+    /// (palette recall 0.939 → 0.924), so intents read as plain thoughts and file thoughts carry no
+    /// link titles. Thought recall (`ThoughtEval`) is 0.95 / 0.95 either way.
     static func thoughtHeader(path: String, title: String?, tags: String?, hasFile: Bool, isFolder: Bool, kind: ThoughtKind,
                               anchor: FileAnchor?, parentLine: String?, links: [String]) -> String {
         let label: String
         switch kind {
         case .question: label = "Question"
         case .todo: label = "To do"
-        case .intent: label = "Intent"
-        case .idea: label = "Thought"
+        case .intent, .idea: label = "Thought"
         }
         var header = label + " on " + thoughtSubject(path: path, title: title, tags: tags, hasFile: hasFile, isFolder: isFolder)
         if let anchor { header += ", " + anchor.label }
         if let parentLine, !parentLine.isEmpty { header += " · re: " + parentLine }
-        if !links.isEmpty { header += " · links: " + links.joined(separator: ", ") }
+        if !hasFile, !links.isEmpty { header += " · links: " + links.joined(separator: ", ") }
         return header
     }
 
@@ -597,12 +602,12 @@ final class EmbeddingPass {
             }) ?? []
             guard let last = raw.last else { return }
             after = last.rowid
-            if resolver == nil, raw.contains(where: { $0.text.contains("[[") }) {
+            if resolver == nil, raw.contains(where: { !$0.hasFile && $0.text.contains("[[") }) {
                 resolver = LinkResolver(paths: (try? store.indexedPaths()) ?? [], aliases: [:])
             }
             let rows = raw.map { r -> (Int, String, String) in
                 let anchor = IndexStore.anchor(r.anchorKind, r.anchorValue)
-                let titles = resolver.map { store.linkedTitles(in: r.text, from: r.path, using: $0) } ?? []
+                let titles = r.hasFile ? [] : (resolver.map { store.linkedTitles(in: r.text, from: r.path, using: $0) } ?? [])
                 let header = IndexStore.thoughtHeader(path: r.path, title: r.title, tags: r.tags, hasFile: r.hasFile,
                                                       isFolder: !r.hasFile && !FileRef(relativePath: r.path).isVirtual && store.isDirectory(r.path),
                                                       kind: ThoughtRules.read(r.text, at: Date(timeIntervalSince1970: r.ts)).kind,

@@ -1,0 +1,317 @@
+[
+  {
+    "query": "what did I need to do before the board meeting",
+    "relevant": [
+      "thought:decks/q3-board-review.pptx|2026-10-09 08:45",
+      "thought:decks/q3-board-review.pptx|2026-10-08 17:20",
+      "thought:decks/q3-board-review.pptx|2026-10-08 17:31"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "who is buying the lamp at retail",
+    "relevant": [
+      "thought:decks/q3-board-review.pptx|2026-10-09 08:45"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "is the lower unit price available with a bigger forecast",
+    "relevant": [
+      "thought:legal/supplier-agreement.pdf|2026-10-14 09:55"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "how long before we have to place the purchase order",
+    "relevant": [
+      "thought:legal/supplier-agreement.pdf|2026-10-14 10:01"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "how much cash do we have left",
+    "relevant": [
+      "thought:decks/q3-board-review.pptx|2026-10-08 17:20"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "dimming without flickering and what she would pay",
+    "relevant": [
+      "thought:research/interview-maya-chen.m4a|2026-10-14 09:41"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "the shade is two different sizes in two documents",
+    "relevant": [
+      "thought:design/arc-lamp.usdz|2026-10-14 10:13"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "why was the premium model never costed",
+    "relevant": [
+      "thought:design/whiteboard-pricing.jpg|2026-10-13 14:23"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "the model still uses the old price",
+    "relevant": [
+      "thought:decks/q3-board-review.pptx|2026-10-13 14:11",
+      "thought:tools/forecast.py|2026-10-06 16:30"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "retail launch timing disagrees between the plan and the revenue model",
+    "relevant": [
+      "thought:finance/q3-model.xlsx|2026-10-13 14:44"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "the waitlist count is stale",
+    "relevant": [
+      "thought:decks/arc-launch-plan.pptx|2026-10-14 09:36"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "wording of the date card in the teaser",
+    "relevant": [
+      "thought:media/arc-teaser.mp4|2026-10-14 10:18"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "which colours for the launch",
+    "relevant": [
+      "thought:design/moodboard.jpg|2026-10-02 10:15"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "render is a prototype shade, not the final",
+    "relevant": [
+      "thought:design/arc-render.png|2026-10-02 10:20"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "clamp mount should be in scope",
+    "relevant": [
+      "thought:docs/arc-product-brief.docx|2026-10-14 09:48",
+      "thought:research/interview-maya-chen.m4a|2026-10-14 09:43"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "record the $260 quote in the decisions log",
+    "relevant": [
+      "thought:notes/pricing-decisions.md|2026-10-13 14:38"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "share of the market that works from home",
+    "relevant": [
+      "thought:research/market-sizing.pdf|2026-10-07 11:02"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "a footnote is needed on the pricing slide if we change the option",
+    "relevant": [
+      "thought:docs/pricing-memo.docx|2026-10-13 14:19"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "contribution at different price points",
+    "relevant": [
+      "thought:finance/unit-economics.xlsx|2026-10-13 14:31"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "which supplier tier are we on for the bill of materials",
+    "relevant": [
+      "thought:finance/unit-economics.xlsx|2026-10-14 10:06"
+    ],
+    "kind": "para"
+  },
+  {
+    "query": "Ningbo",
+    "relevant": [
+      "thought:design/arc-lamp.usdz|2026-10-14 10:13"
+    ],
+    "kind": "exact"
+  },
+  {
+    "query": "供应商的最小起订量和价格",
+    "relevant": [
+      "thought:legal/supplier-agreement.pdf|2026-10-14 09:55"
+    ],
+    "kind": "zh"
+  },
+  {
+    "query": "董事会之前要做什么",
+    "relevant": [
+      "thought:decks/q3-board-review.pptx|2026-10-09 08:45",
+      "thought:decks/q3-board-review.pptx|2026-10-08 17:20",
+      "thought:decks/q3-board-review.pptx|2026-10-08 17:31"
+    ],
+    "kind": "zh"
+  },
+  {
+    "query": "灯罩尺寸在两份文件里不一样",
+    "relevant": [
+      "thought:design/arc-lamp.usdz|2026-10-14 10:13"
+    ],
+    "kind": "zh"
+  },
+  {
+    "query": "采购订单最晚什么时候下",
+    "relevant": [
+      "thought:legal/supplier-agreement.pdf|2026-10-14 10:01"
+    ],
+    "kind": "zh"
+  },
+  {
+    "query": "客户愿意为不闪烁付多少钱",
+    "relevant": [
+      "thought:research/interview-maya-chen.m4a|2026-10-14 09:41"
+    ],
+    "kind": "zh"
+  },
+  {
+    "query": "发布前要更新候补名单数量",
+    "relevant": [
+      "thought:decks/arc-launch-plan.pptx|2026-10-14 09:36"
+    ],
+    "kind": "zh"
+  },
+  {
+    "query": "need to tell the board both runway numbers",
+    "relevant": [
+      "thought:decks/q3-board-review.pptx|2026-10-08 17:20"
+    ],
+    "kind": "echo-related"
+  },
+  {
+    "query": "list the two buyers for retail before the meeting",
+    "relevant": [
+      "thought:decks/q3-board-review.pptx|2026-10-09 08:45"
+    ],
+    "kind": "echo-related"
+  },
+  {
+    "query": "the shade is 150 in one document and 140 in another",
+    "relevant": [
+      "thought:design/arc-lamp.usdz|2026-10-14 10:13"
+    ],
+    "kind": "echo-related"
+  },
+  {
+    "query": "we never costed the Pro at 329",
+    "relevant": [
+      "thought:design/whiteboard-pricing.jpg|2026-10-13 14:23"
+    ],
+    "kind": "echo-related"
+  },
+  {
+    "query": "Maya would pay up to 260 if it dims without flicker",
+    "relevant": [
+      "thought:research/interview-maya-chen.m4a|2026-10-14 09:41"
+    ],
+    "kind": "echo-related"
+  },
+  {
+    "query": "the PO must go out by Oct 20 for the December ship date",
+    "relevant": [
+      "thought:legal/supplier-agreement.pdf|2026-10-14 10:01"
+    ],
+    "kind": "echo-related"
+  },
+  {
+    "query": "the model still uses 229 for Arc",
+    "relevant": [
+      "thought:decks/q3-board-review.pptx|2026-10-13 14:11"
+    ],
+    "kind": "echo-related"
+  },
+  {
+    "query": "teaser only says November, it should give the exact date",
+    "relevant": [
+      "thought:media/arc-teaser.mp4|2026-10-14 10:18"
+    ],
+    "kind": "echo-related"
+  },
+  {
+    "query": "update the waitlist count before the press kit goes out",
+    "relevant": [
+      "thought:decks/arc-launch-plan.pptx|2026-10-14 09:36"
+    ],
+    "kind": "echo-related"
+  },
+  {
+    "query": "the supplier needs a 12 month forecast for the lower price",
+    "relevant": [
+      "thought:legal/supplier-agreement.pdf|2026-10-14 09:55"
+    ],
+    "kind": "echo-related"
+  },
+  {
+    "query": "what should I cook for dinner tonight",
+    "relevant": [],
+    "kind": "echo-unrelated"
+  },
+  {
+    "query": "book flights to Lisbon for the offsite",
+    "relevant": [],
+    "kind": "echo-unrelated"
+  },
+  {
+    "query": "the dog needs its vaccinations",
+    "relevant": [],
+    "kind": "echo-unrelated"
+  },
+  {
+    "query": "plan a weekend hike in the mountains",
+    "relevant": [],
+    "kind": "echo-unrelated"
+  },
+  {
+    "query": "learn piano scales this month",
+    "relevant": [],
+    "kind": "echo-unrelated"
+  },
+  {
+    "query": "fix the leaking kitchen faucet",
+    "relevant": [],
+    "kind": "echo-unrelated"
+  },
+  {
+    "query": "buy a birthday present for mom",
+    "relevant": [],
+    "kind": "echo-unrelated"
+  },
+  {
+    "query": "renew my passport before the trip",
+    "relevant": [],
+    "kind": "echo-unrelated"
+  },
+  {
+    "query": "ideas for a poem about autumn",
+    "relevant": [],
+    "kind": "echo-unrelated"
+  },
+  {
+    "query": "reading list for the winter",
+    "relevant": [],
+    "kind": "echo-unrelated"
+  }
+]
