@@ -15,6 +15,11 @@ public struct Vault: Hashable, Sendable {
     /// `<root>/.flamingo/trail.jsonl` (plan 07).
     public var trailURL: URL { stateDir.appendingPathComponent("trail.jsonl") }
 
+    /// `<root>/.flamingo/work`: memos the night shift and "Work on this" write, one folder per day.
+    public var workDir: URL { stateDir.appendingPathComponent("work", isDirectory: true) }
+    /// `<root>/.flamingo/work/ledger.jsonl`: the append-only record of that work.
+    public var workLedgerURL: URL { workDir.appendingPathComponent("ledger.jsonl") }
+
     /// `<root>/.flamingo/ignore`: the vault's exclusions, gitignore syntax. See `IgnoreRules.defaultText`.
     public var ignoreURL: URL { stateDir.appendingPathComponent("ignore") }
     /// `<root>/.flamingo/pins.json`: the folders the sidebar shows. See `Pins`.
@@ -86,6 +91,18 @@ public struct FileRef: Hashable, Codable, Sendable {
 
     /// True for `_inbox/...` refs (see `inboxDirectory`): a note, not a missing file.
     public var isInbox: Bool { relativePath.hasPrefix(FileRef.inboxDirectory + "/") }
+
+    /// Folder (relative to the vault) whose "files" are notes about web pages:
+    /// `_web/<host>/<slug>-<hash6>` is the note `.flamingo/notes/_web/<host>/<slug>-<hash6>.md`,
+    /// with `url:` and `title:` in its front matter. See `WebThought`.
+    public static let webDirectory = "_web"
+
+    /// True for `_web/...` refs (see `webDirectory`).
+    public var isWeb: Bool { relativePath.hasPrefix(FileRef.webDirectory + "/") }
+
+    /// True for refs that are notes with no user file behind them: `_inbox/...` and `_web/...`.
+    /// (A note about a folder is told apart by its front matter, `SidecarDocument.isFolderNote`.)
+    public var isVirtual: Bool { isInbox || isWeb }
 }
 
 extension FileRef: Comparable {

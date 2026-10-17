@@ -53,13 +53,13 @@ public enum GraphFolders {
     }
 
     /// Reject unresolved targets that cannot describe a path inside the vault, along with
-    /// synthetic inbox notes and Flamingo's own state. Their original graph data survives.
+    /// synthetic inbox and web notes and Flamingo's own state. Their original graph data survives.
     private static func pathComponents(_ id: String) -> [String]? {
         if id == "/" { return [] }
         guard !id.isEmpty, !id.hasPrefix("/"), !id.contains("\0") else { return nil }
         let path = id.hasSuffix("/") ? String(id.dropLast()) : id
         let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        guard let first = parts.first, first != FileRef.inboxDirectory, first != ".flamingo",
+        guard let first = parts.first, first != FileRef.inboxDirectory, first != FileRef.webDirectory, first != ".flamingo",
               parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
         return parts
     }
