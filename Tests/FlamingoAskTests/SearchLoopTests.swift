@@ -19,7 +19,7 @@ final class SearchLoopTests: XCTestCase {
 
     func testTwoHopQuestionSearchesThenAnswers() async throws {
         // The first retrieval for this question yields the comment and slide 7; churn arrives via search.
-        let firstCount = try Retriever(source: Fixture.vault).retrieve("what did I say about the slide that mentions pricing").count
+        let firstCount = try Retriever(source: ThoughtBlindSource(base: Fixture.vault)).retrieve("what did I say about the slide that mentions pricing").count
         let churnID = firstCount + 1
         MockAPI.reset([
             SSE.reply(SSE.message(text: ["Let me look."], tools: [("toolu_1", #"{"query": "churn cohort"}"#)], stop: "tool_use")),

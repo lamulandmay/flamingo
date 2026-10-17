@@ -155,7 +155,10 @@ final class CallTests: XCTestCase {
 
         let sent = try XCTUnwrap(MockAPI.requests.first?.body)
         let content = try XCTUnwrap(sent["messages"]?.array?.first?["content"]?.array)
-        XCTAssertTrue(content[0]["text"]?.string?.hasPrefix("<passages>\n<passage id=\"1\" kind=\"comment\"") ?? false)
+        // Claude is not on this Mac: the deck's comment ("Decided: keep $49…") stays home, so the
+        // first passage is a section of a file.
+        XCTAssertTrue(content[0]["text"]?.string?.hasPrefix("<passages>\n<passage id=\"1\" kind=\"section\"") ?? false)
+        XCTAssertFalse(content[0]["text"]?.string?.contains("kind=\"comment\"") ?? true)
         XCTAssertTrue(content.last?["text"]?.string?.hasSuffix("<question>\nwhat did I decide about pricing\n</question>") ?? false,
                       "the question comes last")
     }

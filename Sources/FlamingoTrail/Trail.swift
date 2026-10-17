@@ -353,6 +353,48 @@ public final class TrailStore: @unchecked Sendable {
     /// Every event in file-then-buffer order, unsorted: for callers that filter first.
     func unsortedEvents() throws -> [TrailEvent] { try backend.events() }
 
+    // MARK: Attention
+
+    /// Longest stretch one event counts for. A window left open for an hour is not an hour of work.
+    public static let attentionCap: TimeInterval = 10 * 60
+
+    /// How long the person spent on each of `files` since `since`, from the trail: each time they
+    /// opened a file counts until the next event of any kind (capped at `attentionCap`; the last
+    /// one until `now`). Writing a thought is not attention, so a thought's own save doesn't count. Reads the trail once; call off the main thread. A file with no events is
+    /// absent from the result.
+    public func attention(on files: [FileRef], since: Date, now: Date = Date()) throws -> [FileRef: TimeInterval] {
+        guard !files.isEmpty else { return [:] }
+        return Self.attention(in: try events(), on: Set(files), since: since, now: now)
+    }
+
+    /// The same over events already read (sorted by time), so a caller asking about many
+    /// thoughts reads the trail once.
+    public static func attention(in events: [TrailEvent], on wanted: Set<FileRef>, since: Date, now: Date = Date()) -> [FileRef: TimeInterval] {
+        var out: [FileRef: TimeInterval] = [:]
+        for (i, e) in events.enumerated() {
+            guard e.kind == .opened, e.at >= since, let file = e.file, wanted.contains(file) else { continue }
+            let next = i + 1 < events.count ? events[i + 1].at : now
+            out[file, default: 0] += max(0, min(next.timeIntervalSince(e.at), attentionCap))
+        }
+        return out
+    }
+
+    /// When `file` was last opened, nil if the trail never saw it open.
+    public func lastOpened(_ file: FileRef) throws -> Date? {
+        try lastOpened(of: [file])[file]
+    }
+
+    /// When each of `files` was last opened; files never opened are absent. One read of the trail.
+    public func lastOpened(of files: [FileRef]) throws -> [FileRef: Date] {
+        let wanted = Set(files)
+        guard !wanted.isEmpty else { return [:] }
+        var out: [FileRef: Date] = [:]
+        for e in try events() where e.kind == .opened {
+            if let file = e.file, wanted.contains(file), out[file].map({ e.at > $0 }) ?? true { out[file] = e.at }
+        }
+        return out
+    }
+
     /// Clustered sessions, oldest first, with their names applied.
     public func sessions(ignoringCorrections: Bool = false) throws -> [TrailSession] {
         let names = self.names()

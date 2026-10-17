@@ -165,7 +165,11 @@ final class Retriever {
         var failures = 0
         for q in queries {
             do {
-                sectionRank.add(try source.searchSections(q.text, limit: searchLimit), weight: q.weight) { Self.key($0.file, $0.anchor) }
+                let found = try source.searchSections(q.text, limit: searchLimit)
+                // A thought found by meaning arrives among the sections. It stays a thought: it
+                // joins the comment fusion, never the section list.
+                sectionRank.add(found.filter { $0.commentID == nil }, weight: q.weight) { Self.key($0.file, $0.anchor) }
+                commentRank.add(found.compactMap(thoughtHit), weight: q.weight) { "c:\($0.comment.id.uuidString)" }
                 commentRank.add(try source.searchComments(q.text, limit: 50), weight: q.weight) { "c:\($0.comment.id.uuidString)" }
             } catch {
                 failure = error
@@ -240,9 +244,11 @@ final class Retriever {
             used += cost; nextID += 1; seen.insert(key)
         }
         func comment(_ file: FileRef, _ c: Comment) -> Passage {
-            Passage(id: 0, kind: .comment, file: file, anchor: c.anchor,
-                    text: Self.excerpt(c.text, terms: terms, max: maxCommentChars), timestamp: c.timestamp,
-                    provenance: c.provenance, commentID: c.id)
+            // A reply says what it answers, so it reads on its own.
+            let parent = parentLine(of: c, on: file).map { "re: " + $0 + "\n" } ?? ""
+            return Passage(id: 0, kind: .comment, file: file, anchor: c.anchor,
+                           text: parent + Self.excerpt(c.text, terms: terms, max: maxCommentChars), timestamp: c.timestamp,
+                           provenance: c.provenance, commentID: c.id)
         }
         for hit in direct.prefix(40) {
             add(comment(hit.file, hit.comment), key: "c:\(hit.comment.id.uuidString)", within: commentBudget)
@@ -315,6 +321,24 @@ final class Retriever {
             }
         }
         return out
+    }
+
+    // MARK: Thoughts
+
+    /// The thought a section-search hit stands for, when it is one (found by meaning).
+    private func thoughtHit(_ hit: SearchHit) -> CommentHit? {
+        guard let id = hit.commentID,
+              let comment = cachedComments(on: hit.file).first(where: { $0.id == id }) else { return nil }
+        return CommentHit(file: hit.file, comment: comment, snippet: Self.plain(hit.snippet), score: hit.score)
+    }
+
+    /// The first line of the thought `c` answers, if it is a reply.
+    private func parentLine(of c: Comment, on file: FileRef) -> String? {
+        guard let parent = c.meta?.parent,
+              let root = cachedComments(on: file).first(where: { $0.meta?.uid == parent }) else { return nil }
+        let line = root.text.split(separator: "\n", omittingEmptySubsequences: true).first { !$0.hasPrefix(">") } ?? Substring(root.text)
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : String(trimmed.prefix(120))
     }
 
     // MARK: Text

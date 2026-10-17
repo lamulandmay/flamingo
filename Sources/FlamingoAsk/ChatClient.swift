@@ -9,6 +9,13 @@ struct ChatClient: Sendable {
 
     /// Streams the answer text and returns it whole. Reasoning deltas are dropped.
     func send(_ body: JSON, to endpoint: ChatEndpoint, onText: @escaping @Sendable (String) -> Void) async throws -> String {
+        try await sendDetailed(body, to: endpoint, onText: onText).text
+    }
+
+    struct Usage: Sendable, Equatable { var input: Int?; var output: Int? }
+
+    /// Like `send`, and also the token counts the server reported (when it reports them).
+    func sendDetailed(_ body: JSON, to endpoint: ChatEndpoint, onText: @escaping @Sendable (String) -> Void) async throws -> (text: String, usage: Usage?) {
         var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
         request.timeoutInterval = timeout
@@ -25,6 +32,7 @@ struct ChatClient: Sendable {
                 throw Self.error(http.statusCode, body: data, endpoint: endpoint)
             }
             var text = ""
+            var usage: Usage?
             var parser = SSEParser()
             var line: [UInt8] = []
             var done = false
@@ -32,6 +40,9 @@ struct ChatClient: Sendable {
                 if event.data == "[DONE]" { done = true; return }
                 guard let json = try? JSON.decode(Data(event.data.utf8)) else { return }
                 if let message = json["error"]?["message"]?.string ?? json["error"]?.string { throw AskError.stream(message) }
+                if let u = json["usage"], u.object != nil {
+                    usage = Usage(input: u["prompt_tokens"]?.int, output: u["completion_tokens"]?.int)
+                }
                 guard let choice = json["choices"]?.array?.first else { return }
                 if let t = choice["delta"]?["content"]?.string, !t.isEmpty {
                     text += t
@@ -54,7 +65,7 @@ struct ChatClient: Sendable {
             if !line.isEmpty, let event = parser.feed(String(decoding: line, as: UTF8.self)) { try handle(event) }
             if let event = parser.flush() { try handle(event) }
             guard done else { throw AskError.stream("Answer interrupted before completion. Retry to finish it.") }
-            return text
+            return (text, usage)
         } catch let error as URLError {
             if error.code == .cancelled { throw CancellationError() }
             throw AskError.unavailable(Self.name(endpoint))
