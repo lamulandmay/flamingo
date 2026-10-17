@@ -16,7 +16,7 @@ let package = Package(
         .executableTarget(
             name: "Flamingo",
             dependencies: ["FlamingoCore", "FlamingoDesign", "FlamingoCapture", "FlamingoExtract",
-                           "FlamingoIndex", "FlamingoGraph", "FlamingoTrail", "FlamingoAsk"],
+                           "FlamingoIndex", "FlamingoGraph", "FlamingoTrail", "FlamingoAsk", "FlamingoThoughts"],
             path: "Sources/Flamingo"
         ),
         // Pure model layer: vault, file identity, sidecar notes, wikilinks, graph model.
@@ -36,12 +36,16 @@ let package = Package(
         .target(name: "FlamingoTrail", dependencies: ["FlamingoCore", "FlamingoDesign"], path: "Sources/FlamingoTrail"),
         // Ask: natural-language questions over the vault.
         .target(name: "FlamingoAsk", dependencies: ["FlamingoCore", "FlamingoIndex", "FlamingoDesign"], path: "Sources/FlamingoAsk"),
+        // Thoughts that act: night shift, attention ranking, the daily briefing engine. No views.
+        // Local models only: thoughts never leave this Mac.
+        .target(name: "FlamingoThoughts", dependencies: ["FlamingoCore", "FlamingoIndex", "FlamingoAsk", "FlamingoTrail"], path: "Sources/FlamingoThoughts"),
 
         .testTarget(name: "FlamingoCoreTests", dependencies: ["FlamingoCore"], path: "Tests/FlamingoCoreTests"),
         .testTarget(name: "FlamingoExtractTests", dependencies: ["FlamingoExtract"], path: "Tests/FlamingoExtractTests"),
         .testTarget(name: "FlamingoIndexTests", dependencies: ["FlamingoIndex"], path: "Tests/FlamingoIndexTests"),
         .testTarget(name: "FlamingoTrailTests", dependencies: ["FlamingoTrail"], path: "Tests/FlamingoTrailTests"),
         .testTarget(name: "FlamingoAskTests", dependencies: ["FlamingoAsk"], path: "Tests/FlamingoAskTests"),
+        .testTarget(name: "FlamingoThoughtsTests", dependencies: ["FlamingoThoughts", "FlamingoCore", "FlamingoIndex", "FlamingoAsk", "FlamingoTrail"], path: "Tests/FlamingoThoughtsTests"),
         .testTarget(name: "FlamingoCaptureTests", dependencies: ["FlamingoCapture", "FlamingoCore"], path: "Tests/FlamingoCaptureTests"),
         .testTarget(name: "FlamingoGraphTests", dependencies: ["FlamingoGraph", "FlamingoCore"], path: "Tests/FlamingoGraphTests"),
         .testTarget(name: "FlamingoAppTests", dependencies: ["Flamingo"], path: "Tests/FlamingoAppTests"),

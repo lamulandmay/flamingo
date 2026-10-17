@@ -25,12 +25,29 @@ public struct Answer: Sendable, Equatable, Codable {
     public var sources: [Int: Citation] = [:]
     public var model: String?
     public init(text: String, citations: [Citation]) { self.text = text; self.citations = citations }
+
+    /// Whether any citation is one of the person's thoughts. Mark the conversation turn with it.
+    public var drewOnThoughts: Bool { citations.contains { $0.commentID != nil } }
 }
 
 public struct ConversationTurn: Codable, Equatable, Sendable {
     public var question: String
     public var answer: String
-    public init(question: String, answer: String) { self.question = question; self.answer = answer }
+    /// The answer drew on one of the person's thoughts (see `Answer.drewOnThoughts`). A turn
+    /// like that never goes to a provider that is not on this Mac.
+    public var thoughtDerived: Bool
+
+    public init(question: String, answer: String, thoughtDerived: Bool = false) {
+        self.question = question; self.answer = answer; self.thoughtDerived = thoughtDerived
+    }
+
+    enum CodingKeys: String, CodingKey { case question, answer, thoughtDerived }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        question = try c.decode(String.self, forKey: .question)
+        answer = try c.decode(String.self, forKey: .answer)
+        thoughtDerived = try c.decodeIfPresent(Bool.self, forKey: .thoughtDerived) ?? false
+    }
 }
 
 /// What `askStreaming` yields, in order: passages, then text as it arrives, then the answer.
@@ -162,12 +179,17 @@ public final class AskEngine: @unchecked Sendable {
         let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
         let choice = providerChoice()
+        // Thoughts never leave this Mac. Whatever a remote provider reads has none: no thought
+        // passages, no section found through a thought, no turn of the conversation that used one.
+        // A local model gets everything.
+        let remoteSource = ThoughtBlindSource(base: source)
+        let remoteHistory = ThoughtPrivacy.scrub(history, against: source)
         switch choice {
         case .claude:
             if keyProvider() == nil, hasClaudeCode() {
-                try await runClaudeCode(question, history: history, source: source, context: context, yield: yield)
+                try await runClaudeCode(question, history: remoteHistory, source: remoteSource, context: context, yield: yield)
             } else {
-                try await runClaude(question, history: history, source: source, context: context, yield: yield)
+                try await runClaude(question, history: remoteHistory, source: remoteSource, context: context, yield: yield)
             }
         case .llama, .ollama:
             try await runLocal(question, history: history, source: source, context: context, kind: choice, yield: yield)
@@ -178,7 +200,7 @@ public final class AskEngine: @unchecked Sendable {
             guard keyProvider() != nil, isOnline() else { return try await runLocal(question, history: history, source: source, context: context, kind: .llama, yield: yield) }
             let shown = Flag()
             do {
-                try await runClaude(question, history: history, source: source, context: context) { delta in
+                try await runClaude(question, history: remoteHistory, source: remoteSource, context: context) { delta in
                     if case .text = delta { shown.set() }
                     yield(delta)
                 }
@@ -296,19 +318,25 @@ public final class AskEngine: @unchecked Sendable {
     func gather(_ question: String, history: [ConversationTurn], source: PassageSource, context: AskContext, budget: Int) throws -> (passages: [Passage], retriever: Retriever) {
         let query = Self.retrievalQuestion(question, history: history)
         var out: [Passage] = []
-        if let open = context.openFile, !(source is SelectedFileSource) {
+        if let open = context.openFile, !ThoughtPrivacy.isScoped(source) {
             // "Summarize this", "what does it say?": nothing to search the vault for.
             let aboutOpen = QueryPlan.terms(question).count <= 1 && !Set(QueryPlan.words(question)).isDisjoint(with: Self.followUpWords)
             let local = Retriever(source: SelectedFileSource(base: source, file: open))
             local.sectionLimit = aboutOpen ? 20 : 6
             out = (try? local.retrieve(query, budgetTokens: aboutOpen ? budget : budget / 3)) ?? []
-            if aboutOpen, !out.isEmpty { return (out, Retriever(source: source, firstID: (out.map(\.id).max() ?? 0) + 1)) }
+            if aboutOpen, !out.isEmpty { return (Self.screened(out, for: source), Retriever(source: source, firstID: (out.map(\.id).max() ?? 0) + 1)) }
         }
         let retriever = Retriever(source: source, firstID: (out.map(\.id).max() ?? 0) + 1)
         retriever.skip(out)
         let used = out.map(Retriever.tokens).reduce(0, +)
         out += try retriever.retrieve(query, budgetTokens: max(1000, budget - used))
-        return (out, retriever)
+        return (Self.screened(out, for: source), retriever)
+    }
+
+    /// Defence in depth for the privacy rule: a source that hides thoughts must not yield a
+    /// thought passage, whatever path produced it.
+    static func screened(_ passages: [Passage], for source: PassageSource) -> [Passage] {
+        source is ThoughtBlindSource ? ThoughtPrivacy.withoutThoughts(passages) : passages
     }
 
     /// A follow-up ("and the deck?", "why?") borrows the last question's words; a question
@@ -390,6 +418,10 @@ enum CitationParser {
         pattern: #"(?<!\[)\[\s*(\d{1,4}(?:\s*,\s*\d{1,4})*)\s*\](?![\(\]])"#)
 
     /// Cited passage numbers in order of first appearance.
+    static func matches(in text: String) -> [NSTextCheckingResult] {
+        pattern.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length))
+    }
+
     static func numbers(in text: String) -> [Int] {
         let ns = text as NSString
         var seen = Set<Int>()

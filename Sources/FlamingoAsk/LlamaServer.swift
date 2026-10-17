@@ -53,6 +53,7 @@ public final class LlamaServer: @unchecked Sendable {
     private var startingID: UUID?
     private var generation = 0
     private var observing = false
+    private var _lastInteractiveUse: Date?
     var session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 2
@@ -62,6 +63,13 @@ public final class LlamaServer: @unchecked Sendable {
     /// The `/v1` base URL of a healthy server, starting one if needed. `onLoading` runs once
     /// if the model has to load first (about 36 s).
     public func endpoint(onLoading: @escaping @Sendable () -> Void = {}) async throws -> URL {
+        try await endpoint(background: false, onLoading: onLoading)
+    }
+
+    /// `background` marks a caller that isn't a person waiting (the night shift): it doesn't
+    /// count as Ask using the server, so the night shift can stop a server it started itself.
+    public func endpoint(background: Bool, onLoading: @escaping @Sendable () -> Void = {}) async throws -> URL {
+        if !background { lock.withLock { _lastInteractiveUse = Date() } }
         let alias = modelAlias
         if let url = lock.withLock({ baseURL }) {
             if await health(url.deletingLastPathComponent()) == .ok,
@@ -86,6 +94,24 @@ public final class LlamaServer: @unchecked Sendable {
         guard accepted else { throw CancellationError() }
         return url
     }
+
+    /// The URL of a healthy server that already serves the model, or nil. Never starts one:
+    /// the understanding pass uses the 27B only when it is already loaded.
+    public func runningEndpoint() async -> URL? {
+        let alias = modelAlias
+        if let url = lock.withLock({ baseURL }) {
+            let root = url.deletingLastPathComponent()
+            if await health(root) == .ok, await servesModel(root, alias: alias) == true { return url }
+        }
+        for port in Self.ports {
+            let root = URL(string: "http://127.0.0.1:\(port)")!
+            if await health(root) == .ok, await servesModel(root, alias: alias) == true { return root.appendingPathComponent("v1") }
+        }
+        return nil
+    }
+
+    /// When a person last asked for the server (Ask, `@ai`), nil if they never have this run.
+    public var lastInteractiveUse: Date? { lock.withLock { _lastInteractiveUse } }
 
     /// Stops the server if Flamingo started it.
     public func stop() {
