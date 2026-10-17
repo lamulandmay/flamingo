@@ -143,6 +143,85 @@ public struct SidecarDocument: Equatable, Sendable {
         return c
     }
 
+    // MARK: Thoughts by uid
+
+    /// The `subject` key: `folder` on a note about a folder (`.flamingo/notes/<folder>.md`).
+    public var subject: String? { frontmatterValue(for: "subject") }
+
+    /// True for a note about a folder rather than a file.
+    public var isFolderNote: Bool { subject == "folder" }
+
+    /// Every uid in the note.
+    public var uids: Set<String> { Set(comments.compactMap { $0.meta?.uid }) }
+
+    private func itemIndex(ofUID uid: String) -> Int? {
+        items.firstIndex { if case .comment(let c) = $0 { return c.meta?.uid == uid } else { return false } }
+    }
+
+    /// The thought with this uid.
+    public func comment(uid: String) -> Comment? {
+        itemIndex(ofUID: uid).flatMap { if case .comment(let c) = items[$0] { return c } else { return nil } }
+    }
+
+    /// Changes the thought with this uid in place, wherever its text or id has moved to since
+    /// the caller last read it. Returns the stored thought (normalized), nil if there is none.
+    @discardableResult
+    public mutating func update(uid: String, _ change: (inout Comment) throws -> Void) rethrows -> Comment? {
+        guard let i = itemIndex(ofUID: uid), case .comment(var c) = items[i] else { return nil }
+        try change(&c)
+        c.meta?.uid = uid
+        items[i] = .comment(c)
+        normalize()
+        if case .comment(let stored) = items[i] { return stored }
+        return nil
+    }
+
+    /// Gives the thought with this derived id a uid if it has none, and returns it.
+    public mutating func ensureUID(forCommentID id: UUID) -> String? {
+        guard let i = itemIndex(of: id), case .comment(var c) = items[i] else { return nil }
+        if let uid = c.meta?.uid { return uid }
+        var uid = ThoughtUID.generate()
+        let taken = uids
+        while taken.contains(uid) { uid = ThoughtUID.generate() }
+        var meta = c.meta ?? ThoughtMeta()
+        meta.uid = uid
+        c.meta = meta
+        if c.provenance == nil { c.provenance = CommentProvenance(origin: .human) }
+        items[i] = .comment(c)
+        normalize()
+        return uid
+    }
+
+    /// Adds `reply` as a thread reply: a top-level bullet placed right after the last
+    /// descendant of the thought `parent`, carrying `parent` in its metadata. Returns the
+    /// stored reply, nil if the parent is not in this note.
+    @discardableResult
+    public mutating func appendReply(_ reply: Comment, toUID parent: String) -> Comment? {
+        guard let pi = itemIndex(ofUID: parent) else { return nil }
+        var r = reply
+        var meta = r.meta ?? ThoughtMeta()
+        meta.parent = parent
+        let taken = uids
+        if meta.uid == nil || taken.contains(meta.uid!) {
+            var uid = ThoughtUID.generate()
+            while taken.contains(uid) { uid = ThoughtUID.generate() }
+            meta.uid = uid
+        }
+        r.meta = meta
+        if r.provenance == nil { r.provenance = CommentProvenance(origin: .human) }
+        var family: Set<String> = [parent]
+        var insertAt = pi + 1
+        for j in (pi + 1)..<max(pi + 1, items.count) {
+            guard case .comment(let c) = items[j], let p = c.meta?.parent, family.contains(p) else { continue }
+            if let uid = c.meta?.uid { family.insert(uid) }
+            insertAt = j + 1
+        }
+        items.insert(.comment(r), at: insertAt)
+        normalize()
+        if case .comment(let stored) = items[insertAt] { return stored }
+        return nil
+    }
+
     /// Appends `other`'s items after this document's (used when two notes merge). Comments
     /// identical to one already here are skipped, so merging the same note twice (a crash
     /// between writing the new note and removing the old one) does not duplicate thoughts.
@@ -184,14 +263,14 @@ public struct SidecarDocument: Equatable, Sendable {
             seen[key] = n + 1
             let id = SidecarFormat.stableID(target: t, timestamp: ts, anchor: anchor, text: c.text, occurrence: n)
             if id != c.id || date != c.timestamp || anchor != c.anchor {
-                items[i] = .comment(Comment(id: id, timestamp: date, anchor: anchor, text: c.text, provenance: c.provenance))
+                items[i] = .comment(Comment(id: id, timestamp: date, anchor: anchor, text: c.text, provenance: c.provenance, meta: c.meta))
             }
         }
     }
 
     /// Timestamp, anchor and text: what makes two comments "the same thought".
     static func contentKey(_ c: Comment) -> String {
-        SidecarFormat.string(fromTimestamp: c.timestamp) + "\n" + (c.anchor?.rendered ?? "") + "\n" + c.text + (SidecarFormat.metadata(c.provenance) ?? "")
+        SidecarFormat.string(fromTimestamp: c.timestamp) + "\n" + (c.anchor?.rendered ?? "") + "\n" + c.text + (SidecarFormat.metadataLines(of: c).joined(separator: "\n"))
     }
 
     private var commentItemIndices: [Int] {
@@ -332,16 +411,63 @@ public enum SidecarFormat {
         if let first = lines.first, !first.isEmpty { out += " " + first }
         out += nl
         for line in lines.dropFirst() { out += "  " + line + nl }
-        if let metadata = metadata(c.provenance) { out += "  <!-- flamingo: " + metadata + " -->" + nl }
+        for metadata in metadataLines(of: c) { out += "  <!-- flamingo: " + metadata + " -->" + nl }
         return out
     }
 
-    static func metadata(_ provenance: CommentProvenance?) -> String? {
-        guard let provenance else { return nil }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return (try? encoder.encode(provenance)).flatMap { String(data: $0, encoding: .utf8) }?
-            .replacingOccurrences(of: ">", with: "\\u003e")
+    /// Keys of `CommentProvenance`; a hidden line carrying any of them is provenance.
+    static let provenanceKeys: Set<String> = ["origin", "model", "appBundleID", "appName", "windowTitle", "sourceURL", "reason"]
+
+    /// The text between `<!-- flamingo: ` and ` -->` for each hidden line a comment writes:
+    /// first any non-JSON lines it was read with (kept verbatim), then one JSON object that
+    /// merges provenance, thought metadata and unknown keys. The object always has `origin`
+    /// (human unless the provenance says otherwise), because Flamingo builds before thoughts
+    /// v2 decode the line as provenance and only then keep it out of the thought's text.
+    static func metadataLines(of c: Comment) -> [String] {
+        var lines = c.meta?.unparsed?.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) ?? []
+        if let json = metadataJSON(of: c) { lines.append(json) }
+        return lines
+    }
+
+    /// The JSON object of the hidden line, nil when the comment has neither provenance nor metadata.
+    public static func metadataJSON(of c: Comment) -> String? {
+        guard c.provenance != nil || c.meta?.hasFields == true else { return nil }
+        var object = c.meta?.fields() ?? [:]
+        if let provenance = c.provenance, let p = MetaJSON.object(from: provenance) { object.merge(p) { _, new in new } }
+        if object["origin"] == nil { object["origin"] = .string(CommentProvenance.Origin.human.rawValue) }
+        return MetaJSON.render(object)
+    }
+
+    /// Reads one hidden line (the text between the markers) into `comment`. Any such line is
+    /// metadata, never thought text: JSON objects are split into provenance, metadata and
+    /// unknown keys; anything else is kept verbatim in `meta.unparsed`.
+    public static func applyMetadata(_ line: String, to comment: inout Comment) {
+        guard var object = MetaJSON.parseObject(line), !object.isEmpty else {
+            var meta = comment.meta ?? ThoughtMeta()
+            meta.unparsed = meta.unparsed.map { $0 + "\n" + line } ?? line
+            comment.meta = meta
+            return
+        }
+        // A second JSON line merges into what the first one said.
+        let unparsed = comment.meta?.unparsed
+        if comment.provenance != nil || comment.meta?.hasFields == true {
+            var earlier = comment.meta?.fields() ?? [:]
+            if let p = comment.provenance.flatMap({ MetaJSON.object(from: $0) }) { earlier.merge(p) { _, new in new } }
+            object = earlier.merging(object) { _, new in new }
+        }
+        var provenanceObject: [String: MetaJSON] = [:]
+        for key in provenanceKeys { if let v = object.removeValue(forKey: key) { provenanceObject[key] = v } }
+        var provenance: CommentProvenance?
+        if !provenanceObject.isEmpty {
+            var candidate = provenanceObject
+            if candidate["origin"] == nil { candidate["origin"] = .string(CommentProvenance.Origin.human.rawValue) }
+            if let decoded = MetaJSON.decode(CommentProvenance.self, from: .object(candidate)) { provenance = decoded }
+            else { object.merge(provenanceObject) { old, _ in old } }
+        }
+        var meta = ThoughtMeta(taking: &object)
+        meta.unparsed = unparsed
+        comment.provenance = provenance
+        comment.meta = meta.hasFields || meta.unparsed != nil ? meta : nil
     }
 
     // MARK: Parse
@@ -378,10 +504,10 @@ public enum SidecarFormat {
             if let c = parseCommentStart(line) {
                 flush()
                 current = c
-            } else if var c = current, line.hasPrefix("  <!-- flamingo: "), line.hasSuffix(" -->"),
-                      let data = String(line.dropFirst("  <!-- flamingo: ".count).dropLast(" -->".count)).data(using: .utf8),
-                      let metadata = try? JSONDecoder().decode(CommentProvenance.self, from: data) {
-                c.provenance = metadata
+            } else if var c = current, line.count >= "  <!-- flamingo:  -->".count,
+                      line.hasPrefix("  <!-- flamingo: "), line.hasSuffix(" -->") {
+                // Any hidden metadata line is metadata, even one this build cannot read.
+                applyMetadata(String(line.dropFirst("  <!-- flamingo: ".count).dropLast(" -->".count)), to: &c)
                 current = c
             } else if var c = current, line.unicodeScalars.starts(with: "  ".unicodeScalars) {
                 c.text += "\n" + string(line.unicodeScalars.dropFirst(2))

@@ -25,6 +25,7 @@ usage: flamingo-index <vault> [options]
   --pairs [min]       suggested connections across the vault (default: the model's floor)
   --embed             embed everything pending now, with progress
   --eval <cases.json> recall@5 / MRR for [{"query", "relevant": [paths], "kind"}]
+  --mode thoughts     with --eval: cases name thoughts ("thought:<path>|<time>"); also scores ⌘K rows and echo
   --vector-bench N    time in-memory vector search over N synthetic passages
   --watch             keep running and apply changes as they happen
   --no-reindex        query the existing index as is
@@ -64,7 +65,7 @@ var actions: [(String, String?)] = []
 var watch = false, reindexFirst = true, bench = false, force = false, catalogIndexed = false
 var limit = 20
 let takesValue: Set<String> = ["--search", "--sections", "--comments", "--files", "--backlinks", "--text", "--unified", "--family",
-                                "--semantic", "--hybrid", "--similar", "--eval", "--vector-bench"]
+                                "--semantic", "--hybrid", "--similar", "--eval", "--vector-bench", "--mode"]
 var i = 0
 while i < args.count {
     let a = args[i]
@@ -186,6 +187,9 @@ do {
                 result.hits.forEach { print("  " + line($0)) }
                 if let coverage = result.coverage { print("  " + coverage) }
             }
+            for hit in response.thoughts {
+                print("[thought] \(hit.record.file.relativePath)  \(hit.record.kind.rawValue)\(hit.record.state == .open ? "" : " " + hit.record.state.rawValue)  \(hit.snippet)")
+            }
             if !query.summary.isEmpty { err(query.summary.joined(separator: " · ")) }
             if let notice = response.notice { err(notice) }
             err("\(response.results.count) unified results in \(fmt(elapsed, 2))ms")
@@ -234,6 +238,9 @@ do {
                 print("[\(result.isDirectory ? "folder" : "file")] \(result.file.relativePath)  score=\(fmt(result.score, 2))")
                 result.hits.prefix(2).forEach { print("  " + line($0)) }
             }
+            for hit in response.thoughts {
+                print("[thought] \(hit.record.file.relativePath)  \(hit.record.kind.rawValue)  \(hit.snippet)")
+            }
             err("\(response.results.count) results in \(fmt(elapsed, 2))ms")
         case "--similar":
             let similar = try store.similarFiles(to: FileRef(relativePath: value!), limit: limit)
@@ -256,9 +263,20 @@ do {
                 if n == 0 || status.embedded >= status.total { break }
             }
             err("embedded \(total) sections in \(fmt(ms(since: t) / 1000, 1))s")
+        case "--mode":
+            break
         case "--eval":
             let data = try Data(contentsOf: URL(fileURLWithPath: value!))
             let cases = try JSONDecoder().decode([SemanticEval.Case].self, from: data)
+            if actions.contains(where: { $0.0 == "--mode" && $0.1 == "thoughts" }) {
+                let report = try ThoughtEval.run(cases, on: store)
+                print(report.text)
+                for r in report.recall where r.mode == "searchThoughts" {
+                    for m in r.misses { print("  \(m.rank.map(String.init) ?? "-")  \(m.query)  →  \(m.top.joined(separator: ", "))") }
+                }
+                if !report.meetsTargets { exit(1) }
+                break
+            }
             func files(_ r: UnifiedSearchResponse) -> [String] { r.results.filter { !$0.isDirectory }.map(\.file.relativePath) }
             let modes: [(String, (String) throws -> [String])] = [
                 ("lexical", { try store.search($0, inFolder: nil, limit: 20, includeSemantic: false).map(\.file.relativePath) }),

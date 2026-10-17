@@ -61,7 +61,9 @@ Tests live in `Tests/<Module>Tests` and belong to the module's session.
 - `FileAnchor(kind:value:)` — a place inside a file. Kinds: `page slide sheet cell time line node region`.
   Rendered `(slide 7)`, `(cell Q3!B12)`, `(time 1:23)`. Named `FileAnchor` because SwiftUI owns `Anchor`.
 - `Comment(id:timestamp:anchor:text:)` — one thought. `.links` are the wikilink targets in `.text`.
+  `.provenance` says who wrote it; `.meta` (`ThoughtMeta`) carries `uid`, thread `parent`, kind, state, due.
 - `SidecarStore(vault:)` — reads/writes comments. `comments(for:)`, `append(_:to:)`, `update`, `delete`, `all()`.
+  Background writers address a thought by uid: `comment(uid:in:)`, `update(uid:in:_:)`, `appendReply(_:toUID:in:)`.
 - `Wikilink.parse(_:)`, `Wikilink.resolve(_:in:candidates:)`.
 - `Graph { nodes: [Node], edges: [Edge] }` — `Node.id` is the relative path. `Edge.kind` is `link` or `trail`.
 - `VaultScanner.files(in:)` — every user file, packages treated as single files.
@@ -87,6 +89,57 @@ id: 6F9619FF-8B86-D011-B42D-00C04FC964FF
 - Wikilinks: `[[target]]`, `[[target|alias]]`, `[[target#slide 3]]`. Target resolves by relative
   path, then basename, then basename without extension.
 - Obsidian can open this folder as a vault and the links work. That is intentional.
+
+#### The hidden metadata line
+
+A thought may carry one more line, indented two spaces, an HTML comment Obsidian does not show:
+
+```
+- [2026-10-16 18:40] (slide 7) review conflict between this and [[q3-model.xlsx]] before friday
+  <!-- flamingo: {"intent":{"action":"review-conflict","objects":["decks/q3.pptx#slide 7","finance/q3-model.xlsx"]},"kind":"intent","kindBy":"model","origin":"human","uid":"t8m2k4q9xa"} -->
+```
+
+- One line per thought: a single JSON object with sorted keys that merges where the thought came
+  from (`origin` `human`|`ai`, `model`, `appBundleID`, `appName`, `windowTitle`, `sourceURL`,
+  `reason`), what Flamingo has decided about it, and any keys a newer build added (kept as they are).
+- **It always has `origin`**, even for a thought typed by a person (`"origin":"human"`). Builds
+  from before this line existed read it as provenance, which keeps it out of the thought's text.
+  `>` is written `\u003e`, so `-->` never occurs inside it.
+- Any hidden line under a thought is metadata, never text. A line that is not a JSON object is
+  kept as it is.
+- Keys: `uid` (`t` + nine Crockford base32 characters, stable when the text is edited),
+  `parent` (the uid of the thought this answers), `kind` (`idea` `question` `todo` `intent`) and
+  `kindBy` (`rules` `model` `user`), `state` (`open` `done` `snoozed` `dismissed`) and `stateAt`,
+  `due` and `snoozeUntil` (`yyyy-MM-dd` or `yyyy-MM-dd HH:mm`), `modified`, `intent`
+  (`action`, `objects`, `confidence`, `model`, `at`), `work` (a memo path relative to `.flamingo`).
+- Only decisions are written. The kind and due date Flamingo reads from the words are worked out
+  again from the text whenever they are needed. A thought gets a `uid` the first time something
+  refers to it; notes are never rewritten in bulk.
+- Comment ids are still derived from the content and never include the metadata line.
+
+#### Threads
+
+A reply is its own top-level bullet, placed right after the last reply under the thought it
+answers, with `parent` set to that thought's `uid`. Nothing nests. Obsidian shows consecutive bullets.
+
+#### Notes with no file behind them
+
+- `_inbox/<yyyy-MM-dd>`: thoughts captured with nothing in front.
+- `_web/<host>/<slug>-<hash6>`: thoughts about a web page, in `.flamingo/notes/_web/<host>/<slug>-<hash6>.md`,
+  with `url:` and `title:` in the front matter (`hash6` is six hex digits of a stable hash of the URL).
+- `<folder>`: thoughts about a folder, in `.flamingo/notes/<folder>.md` with `subject: folder` in the
+  front matter. It cannot clash with a file's note: the file `x.md` has `x.md.md`.
+- Selected text from another app is part of the thought, as indented `> ` quote lines.
+
+### Work memos — `.flamingo/work/`
+
+What the night shift (or "Work on this") writes about a thought, as Markdown Obsidian can read:
+`.flamingo/work/<yyyy-MM-dd>/<slug>.md`. Front matter: `flamingo: memo`, `thought` (the uid), `on`,
+`recipe`, `verdict`, `sources` (each `path#anchor · modified`), `model`, `provider`, `tokens`,
+`created`; then `# title` and the memo. `.flamingo/work/ledger.jsonl` is the append-only record
+of that work, one JSON object per line. The thought it answers gets a reply whose visible text
+carries the summary and `[[links]]` to the sources and whose hidden `work` key names the memo.
+Thoughts are only ever read by models running on this Mac.
 
 ### Index — `.flamingo/index.sqlite`
 SQLite with FTS5. Schema is plan 05's. Other modules only use `IndexStore`.

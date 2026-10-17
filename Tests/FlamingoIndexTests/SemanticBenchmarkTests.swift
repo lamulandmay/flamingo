@@ -130,6 +130,33 @@ final class SemanticBenchmarkTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(semantic.overall.mrr, lexical.overall.mrr)
     }
 
+    /// Thought recall on the fixture vault: `fixtures/thought-cases.json` (paraphrase, Chinese and
+    /// cross-language queries, ⌘K rows, "you thought this before" drafts). Targets in `ThoughtEval`.
+    func testThoughtRecallBenchmark() throws {
+        try XCTSkipUnless(live, "set FLAMINGO_LIVE=1")
+        let here = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let fixtures = here.appendingPathComponent("../../fixtures/vault").standardized
+        let cases = try JSONDecoder().decode([SemanticEval.Case].self, from: Data(contentsOf: here.appendingPathComponent("../../fixtures/thought-cases.json")))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("bench-thoughts-\(UUID().uuidString)")
+        try FileManager.default.copyItem(at: fixtures, to: root)
+        for suffix in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(at: root.appendingPathComponent(".flamingo/index.sqlite" + suffix)) }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try IndexStore(vault: Vault(root: root))
+        try store.reindex()
+        while true {
+            let n = store.embedPending()
+            let progress = try store.embeddingProgress()
+            if n == 0 || progress.embedded >= progress.total { break }
+        }
+        let report = try ThoughtEval.run(cases, on: store)
+        print("[thoughts]\n" + report.text)
+        XCTAssertGreaterThanOrEqual(report.search?.overall.recall ?? 0, 0.90)
+        XCTAssertGreaterThanOrEqual(report.search?.overall.mrr ?? 0, 0.80)
+        XCTAssertGreaterThanOrEqual(report.commandK?.overall.hit3 ?? 0, 0.85)
+        XCTAssertGreaterThanOrEqual(report.echoRelatedTop2, 8)
+        XCTAssertGreaterThanOrEqual(report.echoUnrelatedSilent, 9)
+    }
+
     func testBilingualBenchmark() throws {
         try XCTSkipUnless(live, "set FLAMINGO_LIVE=1")
         let distractors = Int(ProcessInfo.processInfo.environment["FLAMINGO_BENCH_DISTRACTORS"] ?? "") ?? 1200

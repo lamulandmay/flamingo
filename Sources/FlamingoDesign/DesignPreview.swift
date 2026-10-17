@@ -97,6 +97,8 @@ private struct DesignSheet: View {
                     Text("Oct 12 · 22:05").font(Theme.Font.small).foregroundStyle(Theme.Color.textSecondary)
                     Text("decks/q3.pptx").font(Theme.Font.mono).foregroundStyle(Theme.Color.textSecondary)
                     SectionMarker("Pinned")
+                    Text("Saturday").font(Theme.Font.display)
+                        + Text(" October 17").font(Theme.Font.display).foregroundColor(Theme.Color.textTertiary)
                 }
                 .foregroundStyle(Theme.Color.text)
             }
@@ -110,6 +112,27 @@ private struct DesignSheet: View {
                             Text(e).font(Theme.Font.monoSmall).foregroundStyle(Theme.Color.textSecondary)
                         }
                     }
+                }
+            }
+
+            section("Kinds") {
+                HStack(spacing: Theme.Space.l) {
+                    ForEach(KindGlyph.Kind.allCases, id: \.self) { k in
+                        HStack(spacing: Theme.Space.xs) {
+                            KindGlyph(kind: k)
+                            Text(k.rawValue).font(Theme.Font.monoSmall).foregroundStyle(Theme.Color.textSecondary)
+                        }
+                    }
+                    HStack(spacing: Theme.Space.xs) {
+                        KindGlyph(kind: .todo, state: .done)
+                        Text("done").font(Theme.Font.monoSmall).foregroundStyle(Theme.Color.textTertiary)
+                    }
+                }
+                HStack(spacing: Theme.Space.l) {
+                    Squircle(radius: Theme.Radius.s).fill(Theme.Color.fill)
+                        .frame(width: Theme.Size.thumbnail, height: Theme.Size.thumbnail)
+                    Squircle(radius: Theme.Radius.m).fill(Theme.Color.fill)
+                        .frame(width: Theme.Size.tile.width, height: Theme.Size.tile.height)
                 }
             }
 

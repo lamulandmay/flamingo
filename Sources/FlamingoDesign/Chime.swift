@@ -38,6 +38,14 @@ public enum Chime {
         }
     }
 
+    /// One soft note and a tap, for a small decision such as marking a thought done. The note
+    /// is the one `level` would end on (0 spark, 1 solid, 2 woven). Silent when the Mac's
+    /// interface sounds are off.
+    public static func tick(level: Int) {
+        note(min(max(level, 0), 2))
+        tap(final: true)
+    }
+
     static func note(_ i: Int) {
         guard soundsEnabled, sounds.indices.contains(i), let sound = sounds[i] else { return }
         sound.stop()

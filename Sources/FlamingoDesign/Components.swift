@@ -547,3 +547,42 @@ private struct FlamingoRow: ViewModifier {
             .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
+
+// MARK: - KindGlyph
+
+/// What a thought is, as one monochrome glyph: question, to do (open or done) or intent.
+/// An idea draws nothing, so most thoughts stay quiet. Secondary colour, never tinted.
+///
+/// The enums mirror Core's `ThoughtKind` / `ThoughtState` (Design depends on nothing);
+/// FlamingoCapture adds `KindGlyph(kind: ThoughtKind, state: ThoughtState)`.
+public struct KindGlyph: View {
+    public enum Kind: String, CaseIterable, Sendable { case idea, question, todo, intent }
+    public enum State: String, CaseIterable, Sendable { case open, done, snoozed, dismissed }
+
+    let kind: Kind
+    let state: State
+    let size: CGFloat
+
+    public init(kind: Kind, state: State = .open, size: CGFloat = Theme.Size.iconSmall) {
+        self.kind = kind; self.state = state; self.size = size
+    }
+
+    /// The SF Symbol, nil for an idea.
+    public static func symbol(kind: Kind, state: State) -> String? {
+        switch kind {
+        case .idea: nil
+        case .question: "questionmark.circle"
+        case .todo: state == .done ? "checkmark.circle" : "circle"
+        case .intent: "arrow.triangle.turn.up.right.circle"
+        }
+    }
+
+    public var body: some View {
+        if let name = Self.symbol(kind: kind, state: state) {
+            Image(systemName: name)
+                .font(.system(size: size))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .accessibilityLabel(kind.rawValue)
+        }
+    }
+}

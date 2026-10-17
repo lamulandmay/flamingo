@@ -78,12 +78,43 @@ public struct Comment: Identifiable, Hashable, Codable, Sendable {
     public var text: String
     /// Missing on legacy thoughts, which are treated as human authored.
     public var provenance: CommentProvenance?
+    /// Thread, kind, state, due and other decisions (see `ThoughtMeta`). Nil on legacy thoughts.
+    public var meta: ThoughtMeta?
     /// Basenames or relative paths referenced by `[[...]]` in `text`. Derived; kept for convenience.
     public var links: [String] { Wikilink.parse(text) }
 
     public init(id: UUID = UUID(), timestamp: Date = Date(), anchor: FileAnchor? = nil, text: String,
                 provenance: CommentProvenance? = nil) {
         self.id = id; self.timestamp = timestamp; self.anchor = anchor; self.text = text; self.provenance = provenance
+    }
+
+    public init(id: UUID = UUID(), timestamp: Date = Date(), anchor: FileAnchor? = nil, text: String,
+                provenance: CommentProvenance? = nil, meta: ThoughtMeta?) {
+        self.id = id; self.timestamp = timestamp; self.anchor = anchor; self.text = text; self.provenance = provenance; self.meta = meta
+    }
+
+    /// The thought's stable identity, nil until something needed one (see `stamped`).
+    public var uid: String? { meta?.uid }
+
+    /// The thought's state; a thought with no recorded state is open.
+    public var state: ThoughtState { meta?.state ?? .open }
+
+    /// A copy that has a uid and says who wrote it (human unless already set), ready to be saved.
+    /// `now` is accepted so call sites read the same as `modified(at:)`; a uid does not depend on it.
+    public func stamped(now: Date = Date()) -> Comment {
+        var copy = self
+        var meta = copy.meta ?? ThoughtMeta()
+        if meta.uid == nil { meta.uid = ThoughtUID.generate() }
+        copy.meta = meta
+        if copy.provenance == nil { copy.provenance = CommentProvenance(origin: .human) }
+        return copy
+    }
+
+    /// A copy marked as edited at `now` (minute precision, local time).
+    public func modified(at now: Date = Date()) -> Comment {
+        var copy = stamped(now: now)
+        copy.meta?.modified = ThoughtDates.stamp(now)
+        return copy
     }
 
     /// The first line of `text`, for list rows.

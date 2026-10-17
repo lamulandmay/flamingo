@@ -19,6 +19,8 @@ public struct FrontmostContext: Sendable {
     /// The focused window in AppKit global coordinates (bottom-left origin), for centering
     /// the capture panel over it.
     public var windowFrame: CGRect? = nil
+    /// The text selected in the app, up to 2,000 characters. Never read from a password field.
+    public var selectedText: String? = nil
     /// Set by `current(in:)` when `documentURL` lies inside one of the given vaults.
     public var vault: Vault? = nil
     public var file: FileRef? = nil
@@ -107,6 +109,7 @@ public struct FrontmostContext: Sendable {
         ctx.windowFrame = window?.frame
         ctx.documentURL = window?.documentURL
         ctx.sourceURL = window?.sourceURL
+        ctx.selectedText = AXFrontmost.selectedText(pid: app.processIdentifier)
 
         if let scripted = AnchorScripts.run(bundleID: ctx.appBundleID) {
             let pathWins = AnchorScripts.probes[ctx.appBundleID]?.pathWins ?? false

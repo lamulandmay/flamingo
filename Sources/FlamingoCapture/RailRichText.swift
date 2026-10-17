@@ -6,11 +6,13 @@ import FlamingoDesign
 struct RailRichText: NSViewRepresentable {
     var text: String
     var onLink: (String) -> Void
+    /// A finished thought: the words in `textTertiary`. Links keep the accent.
+    var dimmed = false
 
-    static func attributed(_ text: String) -> NSAttributedString {
+    static func attributed(_ text: String, dimmed: Bool = false) -> NSAttributedString {
         let out = NSMutableAttributedString(string: "")
         for segment in RailText.segments(text) {
-            var attributes: [NSAttributedString.Key: Any] = [.font: Theme.NS.body, .foregroundColor: Theme.NS.text]
+            var attributes: [NSAttributedString.Key: Any] = [.font: Theme.NS.body, .foregroundColor: dimmed ? Theme.NS.textTertiary : Theme.NS.text]
             if let target = segment.target, let url = RailText.linkURL(for: target) {
                 attributes[.link] = url
                 attributes[.foregroundColor] = Theme.NS.accent
@@ -33,17 +35,17 @@ struct RailRichText: NSViewRepresentable {
         view.isAutomaticLinkDetectionEnabled = false
         view.linkTextAttributes = [.foregroundColor: Theme.NS.accent, .cursor: NSCursor.pointingHand]
         view.delegate = context.coordinator
-        view.textStorage?.setAttributedString(Self.attributed(text))
+        view.textStorage?.setAttributedString(Self.attributed(text, dimmed: dimmed))
         return view
     }
     func updateNSView(_ view: NSTextView, context: Context) {
         context.coordinator.parent = self
-        let value = Self.attributed(text)
+        let value = Self.attributed(text, dimmed: dimmed)
         if view.textStorage?.isEqual(to: value) != true { view.textStorage?.setAttributedString(value) }
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextView, context: Context) -> CGSize? {
         let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? 10_000
-        return context.coordinator.measure(Self.attributed(text), width: width)
+        return context.coordinator.measure(Self.attributed(text, dimmed: dimmed), width: width)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {

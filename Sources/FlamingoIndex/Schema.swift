@@ -142,6 +142,32 @@ enum Schema {
     PRAGMA user_version = 7;
     """
 
+    /// Thoughts v2: what a thought carries beyond its text (`ThoughtMeta`), queryable. `kind` and
+    /// `due` are the person's or a model's decision, else what `ThoughtRules` read from the text;
+    /// `meta` is the whole hidden-line JSON. A one-time reload fills the columns from the notes.
+    static let v9Columns: [(column: String, ddl: String)] = [
+        ("uid", "ALTER TABLE comments ADD COLUMN uid TEXT"),
+        ("parent", "ALTER TABLE comments ADD COLUMN parent TEXT"),
+        ("kind", "ALTER TABLE comments ADD COLUMN kind TEXT"),
+        ("kind_by", "ALTER TABLE comments ADD COLUMN kind_by TEXT"),
+        ("state", "ALTER TABLE comments ADD COLUMN state TEXT NOT NULL DEFAULT 'open'"),
+        ("due", "ALTER TABLE comments ADD COLUMN due REAL"),
+        ("snooze_until", "ALTER TABLE comments ADD COLUMN snooze_until REAL"),
+        ("modified", "ALTER TABLE comments ADD COLUMN modified REAL"),
+        ("origin", "ALTER TABLE comments ADD COLUMN origin TEXT NOT NULL DEFAULT 'human'"),
+        ("action", "ALTER TABLE comments ADD COLUMN action TEXT"),
+        ("meta", "ALTER TABLE comments ADD COLUMN meta TEXT"),
+    ]
+
+    /// The rest of the v9 step, after `v9Columns` (each added only if missing).
+    static let v9 = """
+    CREATE INDEX IF NOT EXISTS comments_uid ON comments(uid);
+    CREATE INDEX IF NOT EXISTS comments_parent ON comments(parent);
+    CREATE INDEX IF NOT EXISTS comments_triage ON comments(state, kind, due);
+    INSERT OR REPLACE INTO meta(key, value) VALUES ('comments_reload', '1');
+    PRAGMA user_version = 9;
+    """
+
     /// Semantic search, additive and idempotent, so it can be applied lazily by the writer
     /// (`IndexStore.ensureSemanticSchema`) without a `user_version` bump, or folded into a
     /// numbered step later (`semanticColumns` first, guarded by `table_info`).

@@ -161,8 +161,15 @@ public struct UnifiedSearchResponse: Sendable, Equatable {
     public var results: [UnifiedSearchResult]
     public var isTruncated: Bool
     public var notice: String?
+    /// Thoughts that match, as rows of their own: those on a file (also reachable through `results`)
+    /// and those with no file behind them (inbox, web pages, folders), which `results` never lists.
+    /// Empty when the query filters by type, date or folders only.
+    public var thoughts: [ThoughtHit] = []
     public init(results: [UnifiedSearchResult], isTruncated: Bool = false, notice: String? = nil) {
         self.results = results; self.isTruncated = isTruncated; self.notice = notice
+    }
+    public init(results: [UnifiedSearchResult], isTruncated: Bool = false, notice: String? = nil, thoughts: [ThoughtHit]) {
+        self.results = results; self.isTruncated = isTruncated; self.notice = notice; self.thoughts = thoughts
     }
 }
 
@@ -250,8 +257,9 @@ extension IndexStore {
                 }
             }
             if includeSemantic, !query.text.isEmpty {
+                // A thought with no file (inbox, web page, folder) is no file result; it comes back in `thoughts`.
                 let found = semanticSections(query.text, limit: candidateLimit + 1, folder: query.folder, filePredicate: predicate,
-                                             wait: Self.interactiveEmbedWait, shouldCancel: shouldCancel)
+                                             wait: Self.interactiveEmbedWait, shouldCancel: shouldCancel).filter { !$0.isGhost }
                 // Each file's best hit first (scored), then its other passages (shown).
                 let best = Self.bestPerFile(found)
                 let scored = Set(best.map(\.section))
@@ -403,8 +411,13 @@ extension IndexStore {
             return $0.file.relativePath < $1.file.relativePath
         }
         truncated = truncated || results.count > limit
+        var thoughts: [ThoughtHit] = []
+        if !query.text.isEmpty, !query.directoriesOnly, query.extensions.isEmpty, query.after == nil, query.before == nil {
+            thoughts = (try? searchThoughts(query.text, inFolder: query.folder, limit: 6, includeSemantic: includeSemantic,
+                                            wait: Self.interactiveEmbedWait, shouldCancel: shouldCancel)) ?? []
+        }
         return UnifiedSearchResponse(results: Array(results.prefix(limit)), isTruncated: truncated,
-                                     notice: truncated ? "More matches available; narrow the query or add a filter" : nil)
+                                     notice: truncated ? "More matches available; narrow the query or add a filter" : nil, thoughts: thoughts)
     }
 
     /// Scores (see `unifiedSearch`): content hits matching every word 70–78, thoughts 74–82,

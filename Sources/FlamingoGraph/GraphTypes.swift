@@ -77,8 +77,8 @@ struct GraphTopology: Sendable {
             let stem = folder ? name : (name as NSString).deletingPathExtension
             labels.append(stem.isEmpty ? name : stem)
             var ext = node.ext.isEmpty ? (name as NSString).pathExtension.lowercased() : node.ext.lowercased()
-            // Inbox thoughts (`_inbox/2026-10-14`) are markdown notes with no file of their own.
-            if ext.isEmpty, FileRef(relativePath: node.id).isInbox { ext = "md" }
+            // Inbox and web thoughts (`_inbox/2026-10-14`, `_web/host/page-ab12cd`) are markdown notes with no file of their own.
+            if ext.isEmpty, FileRef(relativePath: node.id).isVirtual { ext = "md" }
             exts.append(ext)
             counts.append(max(0, node.commentCount))
         }
@@ -121,12 +121,12 @@ struct GraphTopology: Sendable {
         self.missing = [Bool](repeating: false, count: ids.count)
     }
 
-    /// Marks nodes whose file doesn't exist in `vault`. Inbox notes are never missing.
+    /// Marks nodes whose file doesn't exist in `vault`. Inbox and web notes are never missing.
     mutating func markMissing(in vault: Vault) {
         let fm = FileManager.default
         for i in ids.indices where !isFolder[i] {
             let ref = FileRef(relativePath: ids[i])
-            missing[i] = !ref.isInbox && !fm.fileExists(atPath: vault.url(for: ref).path)
+            missing[i] = !ref.isVirtual && !fm.fileExists(atPath: vault.url(for: ref).path)
         }
     }
 }

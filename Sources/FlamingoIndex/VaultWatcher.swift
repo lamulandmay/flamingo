@@ -151,11 +151,22 @@ public final class VaultWatcher: @unchecked Sendable {
                 continue
             }
             guard let c = classifyAbsolute(p, f, roots: roots) else { continue }
-            pending.insert(c.ref.relativePath)
+            if c.sidecar, c.ref != Self.allNotes, isFolder(c.ref) {
+                // A thought on a folder: re-read the notes, not the folder (which could be most of the vault).
+                pending.insert(Self.allNotes.relativePath)
+            } else {
+                pending.insert(c.ref.relativePath)
+            }
             if c.sidecar { pendingSidecar.insert(c.ref.relativePath) }
             added = true
         }
         if added { schedule() }
+    }
+
+    private func isFolder(_ ref: FileRef) -> Bool {
+        let url = vault.url(for: ref)
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue && !VaultScanner.isPackage(url)
     }
 
     /// Spellings of the root FSEvents may report: as given, symlink-resolved (`/private/var`), and the

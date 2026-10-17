@@ -1,11 +1,13 @@
 import Foundation
+import FlamingoCore
 
 /// A small relevance benchmark: queries with the files that answer them, scored against
 /// any ranking function. Used by `flamingo-index --eval` and the benchmark tests.
 public enum SemanticEval {
     public struct Case: Codable, Sendable, Equatable {
         public var query: String
-        /// Vault-relative paths that answer the query.
+        /// Vault-relative paths that answer the query. For thoughts, `thought:<path>|<yyyy-MM-dd HH:mm>`
+        /// keys (see `thoughtKey`), which name a thought by its note and minute.
         public var relevant: [String]
         /// A free-form group for the per-kind breakdown (`en`, `zh`, `cross`, `exact`, …).
         public var kind: String
@@ -22,6 +24,8 @@ public enum SemanticEval {
         public var mrr = 0.0
         /// Share of queries whose first result is relevant.
         public var hit1 = 0.0
+        /// Share of queries with a relevant result in the first three.
+        public var hit3 = 0.0
     }
 
     public struct Miss: Sendable, Equatable {
@@ -46,7 +50,7 @@ public enum SemanticEval {
     /// dropped, so a section-level ranking can be passed as is).
     public static func run(_ cases: [Case], mode: String, k: Int = 5, rank: (String) throws -> [String]) rethrows -> Report {
         var report = Report(mode: mode, k: k)
-        var sums: [String: (n: Int, r: Double, m: Double, h: Double)] = [:]
+        var sums: [String: (n: Int, r: Double, m: Double, h: Double, h3: Double)] = [:]
         for c in cases {
             let started = DispatchTime.now()
             var seen = Set<String>()
@@ -57,21 +61,27 @@ public enum SemanticEval {
             let recall = Double(Set(ranked.prefix(k)).intersection(relevant).count) / Double(max(1, min(k, relevant.count)))
             let rr = first.map { 1 / Double($0) } ?? 0
             let h = first == 1 ? 1.0 : 0
+            let h3 = (first ?? 99) <= 3 ? 1.0 : 0
             for key in ["*", c.kind] {
-                var s = sums[key] ?? (0, 0, 0, 0)
-                s.n += 1; s.r += recall; s.m += rr; s.h += h
+                var s = sums[key] ?? (0, 0, 0, 0, 0)
+                s.n += 1; s.r += recall; s.m += rr; s.h += h; s.h3 += h3
                 sums[key] = s
             }
             if first != 1 { report.misses.append(Miss(query: c.query, rank: first, top: Array(ranked.prefix(3)))) }
         }
-        func score(_ s: (n: Int, r: Double, m: Double, h: Double)) -> Score {
+        func score(_ s: (n: Int, r: Double, m: Double, h: Double, h3: Double)) -> Score {
             let n = Double(max(1, s.n))
-            return Score(count: s.n, recall: s.r / n, mrr: s.m / n, hit1: s.h / n)
+            return Score(count: s.n, recall: s.r / n, mrr: s.m / n, hit1: s.h / n, hit3: s.h3 / n)
         }
-        report.overall = score(sums["*"] ?? (0, 0, 0, 0))
+        report.overall = score(sums["*"] ?? (0, 0, 0, 0, 0))
         for (key, s) in sums where key != "*" { report.byKind[key] = score(s) }
         report.latencies.sort()
         return report
+    }
+
+    /// The key a thought has in a case's `relevant` list: `thought:decks/q3.pptx|2026-10-13 14:11`.
+    public static func thoughtKey(path: String, timestamp: Date) -> String {
+        "thought:" + path + "|" + SidecarFormat.string(fromTimestamp: timestamp)
     }
 
     /// A plain-text table: one row per report, overall then per kind.

@@ -86,6 +86,63 @@ public final class SidecarStore: @unchecked Sendable {
         try modify(ref) { $0.append(comment) }
     }
 
+    /// Adds a thought to a note that may not exist yet, giving a new note these front matter
+    /// keys (`url`, `title` for a web page; `subject: folder` for a folder). Keys a note
+    /// already has are left alone.
+    public func append(_ comment: Comment, to ref: FileRef, frontmatter: [String: String]) throws {
+        try modify(ref) { doc in
+            for key in frontmatter.keys.sorted() where doc.frontmatterValue(for: key) == nil {
+                doc.setFrontmatterValue(frontmatter[key], for: key)
+            }
+            doc.append(comment)
+        }
+    }
+
+    // MARK: Thoughts by uid
+    //
+    // Background writers (the understanding pass, `@ai` replies, the night shift) address a
+    // thought by uid, never by derived id: the id changes when the text is edited, the uid
+    // does not. Each call is one locked read-modify-write of the note.
+
+    /// The thought with this uid, nil if the note or the thought is missing.
+    public func comment(uid: String, in ref: FileRef) throws -> Comment? {
+        try document(for: ref)?.comment(uid: uid)
+    }
+
+    /// Changes the thought with this uid and returns it as stored. Throws `thoughtNotFound`.
+    @discardableResult
+    public func update(uid: String, in ref: FileRef, _ change: (inout Comment) throws -> Void) throws -> Comment {
+        var stored: Comment?
+        try modify(ref, createIfMissing: false) { doc in
+            stored = try doc.update(uid: uid, change)
+        }
+        guard let stored else { throw SidecarError.thoughtNotFound(uid: uid) }
+        return stored
+    }
+
+    /// The uid of the thought with this derived id, giving it one if it has none (a legacy
+    /// thought gets its uid the first time something refers to it; notes are never rewritten in bulk).
+    public func ensureUID(forCommentID id: UUID, in ref: FileRef) throws -> String {
+        var uid: String?
+        try modify(ref, createIfMissing: false) { doc in
+            uid = doc.ensureUID(forCommentID: id)
+        }
+        guard let uid else { throw SidecarError.commentNotFound(id) }
+        return uid
+    }
+
+    /// Adds `reply` below the thought with uid `parent` (after its last descendant). Throws
+    /// `thoughtNotFound` if the parent is gone.
+    @discardableResult
+    public func appendReply(_ reply: Comment, toUID parent: String, in ref: FileRef) throws -> Comment {
+        var stored: Comment?
+        try modify(ref, createIfMissing: false) { doc in
+            stored = doc.appendReply(reply, toUID: parent)
+        }
+        guard let stored else { throw SidecarError.thoughtNotFound(uid: parent) }
+        return stored
+    }
+
     /// Inserts so the comment becomes `comments(for:)[index]`; `index == count` appends.
     /// Lets an undo put a deleted comment back where it was.
     public func insert(_ comment: Comment, at index: Int, in ref: FileRef) throws {
@@ -240,11 +297,14 @@ public final class SidecarStore: @unchecked Sendable {
         return try processLock.withLock(body)
     }
 
-    private func modify(_ ref: FileRef, _ body: (inout SidecarDocument) throws -> Void) throws {
+    /// Read-modify-write under both locks. With `createIfMissing` false a missing note is
+    /// left missing (the body never runs) and an unchanged note is not rewritten.
+    private func modify(_ ref: FileRef, createIfMissing: Bool = true, _ body: (inout SidecarDocument) throws -> Void) throws {
         try locked {
-            var doc = try read(ref) ?? newDocument(for: ref)
+            guard var doc = try createIfMissing ? (read(ref) ?? newDocument(for: ref)) : read(ref) else { return }
+            let before = doc
             try body(&doc)
-            try write(doc, for: ref)
+            if doc != before || createIfMissing { try write(doc, for: ref) }
         }
     }
 
@@ -276,6 +336,9 @@ public final class SidecarStore: @unchecked Sendable {
     /// cannot take an xattr (read-only, locked, or a volume without xattrs).
     private func identity(of ref: FileRef) -> UUID? {
         guard vault.exists(ref) else { return nil }
+        // A folder's note is about the folder; never mark the folder itself.
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: vault.url(for: ref).path, isDirectory: &isDirectory), isDirectory.boolValue { return nil }
         return try? FileIdentity.id(for: vault.url(for: ref))
     }
 

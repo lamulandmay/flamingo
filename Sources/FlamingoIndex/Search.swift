@@ -127,6 +127,13 @@ extension IndexStore {
         return Array(try matchingStrategies(query, key: { $0.id.uuidString }) { try commentHits($0, limit: limit, folder: folder) }.prefix(limit))
     }
 
+    /// Matching comments with how well the words matched (every word, some, or a substring).
+    func rankedComments(_ query: String, inFolder folder: String?, limit: Int) throws -> (hits: [CommentHit], strength: KeywordStrength) {
+        guard limit > 0 else { return ([], .none) }
+        let (hits, strength) = try rankedStrategies(query, key: { $0.id.uuidString }) { try commentHits($0, limit: limit, folder: folder) }
+        return (Array(hits.prefix(limit)), strength)
+    }
+
     /// Most recently modified files.
     public func recent(limit: Int = 20) throws -> [FileRef] {
         try read { db in
@@ -188,8 +195,8 @@ extension IndexStore {
     /// Indexed comments on one file, oldest first.
     public func comments(on ref: FileRef) throws -> [Comment] {
         try read { db in
-            try db.query("SELECT id, ts, anchor_kind, anchor_value, text, provenance FROM comments WHERE path = ? ORDER BY ts, rowid",
-                         ref.relativePath) { Self.comment($0, 0, provenanceColumn: 5) }
+            try db.query("SELECT id, ts, anchor_kind, anchor_value, text, provenance, meta FROM comments WHERE path = ? ORDER BY ts, rowid",
+                         ref.relativePath) { Self.comment($0, 0, provenanceColumn: 5, metaColumn: 6) }
         }
     }
 
@@ -268,7 +275,7 @@ extension IndexStore {
     }
 
     /// `matchingStrategies`, also saying which strategy produced the first hits.
-    private func rankedStrategies<T>(_ query: String, key: (T) -> String, _ run: (Match) throws -> [T]) throws -> (hits: [T], strength: KeywordStrength) {
+    func rankedStrategies<T>(_ query: String, key: (T) -> String, _ run: (Match) throws -> [T]) throws -> (hits: [T], strength: KeywordStrength) {
         var hits: [T] = []
         var seen = Set<String>()
         var strength = KeywordStrength.none
@@ -396,25 +403,25 @@ extension IndexStore {
 
     // MARK: - Comments
 
-    private func commentHits(_ match: Match, limit: Int, folder: String?) throws -> [CommentHit] {
+    func commentHits(_ match: Match, limit: Int, folder: String?) throws -> [CommentHit] {
         switch match {
         case .fts(let q):
             return try read { db in
                 try db.query("""
-                    SELECT c.path, c.id, c.ts, c.anchor_kind, c.anchor_value, c.text, f.snip, f.rank, c.provenance FROM (
+                    SELECT c.path, c.id, c.ts, c.anchor_kind, c.anchor_value, c.text, f.snip, f.rank, c.provenance, c.meta FROM (
                         SELECT rowid, snippet(comments_fts, 0, '«', '»', '…', 16) AS snip, rank
                         FROM comments_fts WHERE comments_fts MATCH ?1
                         \(Self.folderPredicate(folder).isEmpty ? "" : "AND +rowid IN (SELECT rowid FROM comments WHERE 1 = 1 \(Self.folderPredicate(folder)))") ORDER BY rank LIMIT ?2
                     ) f JOIN comments c ON c.rowid = f.rowid ORDER BY f.rank
                     """, q, limit) {
-                    CommentHit(file: FileRef(relativePath: $0.string(0)), comment: Self.comment($0, 1, provenanceColumn: 8),
+                    CommentHit(file: FileRef(relativePath: $0.string(0)), comment: Self.comment($0, 1, provenanceColumn: 8, metaColumn: 9),
                                snippet: Self.clean($0.string(6)), score: -$0.double(7) * Self.commentBoost)
                 }
             }
         case .substring(let terms):
-            let rows = try substringRows("comments", columns: "path, id, ts, anchor_kind, anchor_value, text, provenance",
+            let rows = try substringRows("comments", columns: "path, id, ts, anchor_kind, anchor_value, text, provenance, meta",
                                          textColumns: ["text"], order: "ts DESC", terms: terms, limit: limit, folder: folder) {
-                (FileRef(relativePath: $0.string(0)), Self.comment($0, 1, provenanceColumn: 6))
+                (FileRef(relativePath: $0.string(0)), Self.comment($0, 1, provenanceColumn: 6, metaColumn: 7))
             }
             return rows.enumerated().map { i, r in
                 CommentHit(file: r.0, comment: r.1, snippet: Self.substringSnippet(r.1.text, terms),
@@ -454,6 +461,11 @@ extension IndexStore {
         return FileAnchor(kind: .line, value: String(base + preceding))
     }
 
+    static func anchor(_ kind: String?, _ value: String?) -> FileAnchor? {
+        guard let kind, let value, let k = FileAnchor.Kind(rawValue: kind) else { return nil }
+        return FileAnchor(kind: k, value: value)
+    }
+
     static func anchor(_ row: Row, _ i: Int32) -> FileAnchor? {
         guard let k = row.optionalString(i), let kind = FileAnchor.Kind(rawValue: k) else { return nil }
         return FileAnchor(kind: kind, value: row.string(i + 1))
@@ -461,10 +473,18 @@ extension IndexStore {
 
     /// Reads `id, ts, anchor_kind, anchor_value, text` starting at column `i`.
     static func comment(_ row: Row, _ i: Int32, provenanceColumn: Int32? = nil) -> Comment {
-        Comment(id: UUID(uuidString: row.string(i)) ?? UUID(),
-                timestamp: Date(timeIntervalSince1970: row.double(i + 1)),
-                anchor: anchor(row, i + 2), text: row.string(i + 4),
-                provenance: provenanceColumn.flatMap { row.optionalString($0) }.flatMap { try? JSONDecoder().decode(CommentProvenance.self, from: Data($0.utf8)) })
+        comment(row, i, provenanceColumn: provenanceColumn, metaColumn: nil)
+    }
+
+    /// As above, and with `metaColumn` (the whole hidden-line JSON the note carries, which
+    /// includes the provenance) the thought's uid, thread parent, state and so on come back too.
+    static func comment(_ row: Row, _ i: Int32, provenanceColumn: Int32?, metaColumn: Int32?) -> Comment {
+        var c = Comment(id: UUID(uuidString: row.string(i)) ?? UUID(),
+                        timestamp: Date(timeIntervalSince1970: row.double(i + 1)),
+                        anchor: anchor(row, i + 2), text: row.string(i + 4),
+                        provenance: provenanceColumn.flatMap { row.optionalString($0) }.flatMap { try? JSONDecoder().decode(CommentProvenance.self, from: Data($0.utf8)) })
+        if let json = metaColumn.flatMap({ row.optionalString($0) }) { SidecarFormat.applyMetadata(json, to: &c) }
+        return c
     }
 
     static func json<T: Encodable>(_ values: [T]) -> String {

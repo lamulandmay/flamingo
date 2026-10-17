@@ -48,14 +48,17 @@ same values through `Theme.NS`, never `NSColor.labelColor` and friends.
 | `Color.selection` | Accent at 26% (16% in light). Text on it stays `text`. |
 | `Color.fill` / `hover` | Translucent greys for fields, chips, row hover. They work on material and on `bg`. |
 | `Color.onAccent` | Text on a solid accent fill (rare). |
-| `Color.thought(level)` | A saved thought's strength: blush (spark), the accent (solid), flamingo (woven). Only while a new connection is shown off: its line, the drop at its head, the rings on both ends. |
+| `Color.thought(level)` | A saved thought's strength: blush (spark), the accent (solid), flamingo (woven). Only while a new connection is shown off: its line, the drop at its head, the rings on both ends; and, for 150ms, on a briefing row's glyph the moment it is triaged. |
 | `Color.family(ext:)` | Nine muted hues: deck, document, sheet, pdf, image, media, model, code, note. `FileFamily(ext:)` gives the family itself. |
 | `Font.body` 13, `small` 11, `title` 15 semibold | Text. `bodyMedium` for emphasis. |
+| `Font.display` 26 semibold (`NS.display`) | The briefing's date line, and nothing else. |
 | `Font.mono` 12, `monoSmall` 11 | Paths, anchors, the target line under the comment field. |
 | `Font.caps` + `capsTracking` | The rare section marker. Use `SectionMarker("Pinned")` or `.capsStyle()`. |
 | `Space` xs 4 · s 8 · m 12 · l 16 · xl 24 · xxl 32 | Everything. |
 | `Radius` s 4 · m 8 · l 12 | Rows and chips, fields and toasts, panels. Draw every rounded shape as `Squircle(radius:)` (continuous curvature: cubic Béziers, zero curvature at the edges, peak at the 45° apex), never `RoundedRectangle`, `cornerRadius` or an arc. A shape nested with uniform padding inside another is `ConcentricSquircle(parentRadius:padding:)`, the parent's outline offset along its normals, never a smaller copy. AppKit uses `NSBezierPath(squircleIn:radius:)` and `CALayer.applySquircle`. |
 | `Motion.fast` 150ms, `normal` 220ms | Ease-out. `fastSeconds` / `normalSeconds` for AppKit. |
+| `Motion.stagger(_:)` / `staggerSeconds` 40ms | Neighbours that fade in one after another. Opacity only; nothing moves. |
+| `Size.thumbnail` 44 · `tile` 96×64 | Memo source thumbnails (`Radius.s`); resume tiles (`Radius.m`). |
 | `Size.row` 26 · `sidebar` 240 · `rail` 280 · `panel` 560 · `icon` 14 · `iconSmall` 13 | Layout. |
 | `Opacity.rest` .75 · `dimmed` .3 · `disabled` .35 | Hover raises `rest` to 1. Graph and faded history use `dimmed`. |
 
@@ -70,6 +73,9 @@ in light and dark. Screenshot it and you have the style guide.
 | `FileGlyph(ext:size:)` / `FolderGlyph(size:)` | Family symbol, family tint. Turns accent inside a selected `flamingoRow`, or pass `selected:` in native rows. Fixed width so names align. AppKit cells use `FileGlyph.nsImage(ext:)` tinted with `Theme.NS.family(ext:selected:)`. |
 | `.flamingoRow(selected:)` | 26pt row, `Space.s` inset, hover fill, accent-tinted selection, `Radius.s`. For custom lists. A native `List` draws its own selection, which is coral too via the bundle's `AccentColor`. |
 | `Chip(text:mono:action:)` | Anchors and tags: `slide 7`. Mono by default. With `action` it's clickable. |
+| `KindGlyph(kind:state:)` | A thought's kind as one monochrome secondary glyph: question, to do (open or checked), intent. An idea draws nothing. At the head of a rail row's timestamp line. |
+| `ThoughtEcho` (FlamingoCapture) | Up to two earlier, similar thoughts above the composer: kind glyph, first line, file, date. All user data. Fades in over 150ms; click jumps, ⌥-click replies. |
+| `Chime.tick(level:)` | One soft note and a tap, for a small decision such as marking a thought done. |
 | `KeyHint("⌘K")` | Menus and the command palette only. |
 | `EmptyState("No vault open")` | One tertiary line, centered. |
 | `SectionMarker("Pinned")` | 11pt medium, tracked, uppercase, tertiary. Rare. |
