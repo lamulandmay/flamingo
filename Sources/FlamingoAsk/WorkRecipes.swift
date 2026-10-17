@@ -47,6 +47,11 @@ public struct WorkResult: Sendable, Equatable {
     public var tokens: Int
     /// Hash of the files read, as they stood when the work finished.
     public var fingerprint: String
+
+    public init(memo: WorkMemo, replyText: String, model: String, provider: String, tokens: Int, fingerprint: String) {
+        self.memo = memo; self.replyText = replyText; self.model = model; self.provider = provider
+        self.tokens = tokens; self.fingerprint = fingerprint
+    }
 }
 
 public enum WorkError: Error, Equatable, LocalizedError {

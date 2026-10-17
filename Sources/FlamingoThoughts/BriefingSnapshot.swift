@@ -92,7 +92,8 @@ public struct BriefingBuilder: Sendable {
         var q = ThoughtQuery(states: [.open], order: .newest, limit: 1500)
         q.snoozeEndedBy = now
         let records = try index.thoughts(q)
-        let roots = records.filter { $0.parent == nil && $0.origin == .human }
+        // Loose captures in the inbox have their own place below; they aren't also "to address".
+        let roots = records.filter { $0.parent == nil && $0.origin == .human && !$0.file.isInbox }
 
         // What models replied lately, by the thought they answer.
         var ai = ThoughtQuery(states: nil, order: .newest, limit: 600)

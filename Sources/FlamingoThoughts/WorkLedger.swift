@@ -106,7 +106,20 @@ public final class WorkLedger: @unchecked Sendable {
 
     public func append(_ event: LedgerEvent) throws {
         let data = try Self.encoder.encode(event)
-        try lock.withLock { try WorkLedgerFile.append(String(decoding: data, as: UTF8.self), in: vault) }
+        try lock.withLock {
+            // A crash can leave a line without its newline; end it so this event isn't glued to it.
+            if Self.endsMidLine(vault.workLedgerURL) { try WorkLedgerFile.append("", in: vault) }
+            try WorkLedgerFile.append(String(decoding: data, as: UTF8.self), in: vault)
+        }
+    }
+
+    private static func endsMidLine(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        guard size > 0 else { return false }
+        try? handle.seek(toOffset: size - 1)
+        return (try? handle.read(upToCount: 1))?.first != 0x0A
     }
 
     /// Every complete, readable line, oldest first.

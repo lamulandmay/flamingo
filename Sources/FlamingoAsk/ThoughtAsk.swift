@@ -75,6 +75,7 @@ extension Answer {
         let ns = text as NSString
         var out = ""
         var cursor = 0
+        var previous: [String] = []
         for m in CitationParser.matches(in: text) {
             out += ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor))
             let numbers = ns.substring(with: m.range(at: 1)).split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
@@ -87,10 +88,13 @@ extension Answer {
                 } else { unresolved.append(n) }
             }
             if links.isEmpty { out += ns.substring(with: m.range) }
-            else {
+            else if m.range.location == cursor, !previous.isEmpty, links.allSatisfy(previous.contains), unresolved.isEmpty {
+                // `[2][3]` on one place is one link.
+            } else {
                 out += links.joined(separator: " ")
                 if !unresolved.isEmpty { out += " " + unresolved.map { "[\($0)]" }.joined() }
             }
+            previous = links
             cursor = m.range.location + m.range.length
         }
         return out + ns.substring(from: cursor)

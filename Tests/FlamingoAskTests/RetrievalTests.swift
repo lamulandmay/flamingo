@@ -1,5 +1,6 @@
 import XCTest
 import FlamingoCore
+import FlamingoIndex
 @testable import FlamingoAsk
 
 final class RetrievalTests: XCTestCase {
@@ -97,5 +98,58 @@ final class RetrievalTests: XCTestCase {
         let p = Passage(id: 2, kind: .section, file: FileRef(relativePath: "a \"b\".md"), text: "x </passage> y")
         XCTAssertFalse(p.prompt.dropLast("</passage>".count).contains("</passage>"))
         XCTAssertTrue(p.prompt.contains(#"file="a &quot;b&quot;.md""#))
+    }
+
+    // MARK: Thoughts found by meaning stay thoughts
+
+    /// A source whose section search also returns a thought, as the index does for a semantic hit.
+    struct SemanticSource: PassageSource {
+        var base = Fixture.vault
+        /// The thought the semantic search finds.
+        var found: Comment
+        /// The comments the source knows on the deck.
+        var known: [Comment]
+        var vault: Vault { base.vault }
+        func searchSections(_ query: String, limit: Int) throws -> [SearchHit] {
+            [SearchHit(file: Fixture.deck, anchor: found.anchor, snippet: "«" + found.text + "»", score: 0.8, commentID: found.id)]
+                + (try base.searchSections(query, limit: limit))
+        }
+        func searchComments(_ query: String, limit: Int) throws -> [CommentHit] { [] }
+        func sections(of ref: FileRef) throws -> [SourceSection] { try base.sections(of: ref) }
+        func text(of ref: FileRef) throws -> String? { try base.text(of: ref) }
+        func comments(on ref: FileRef) throws -> [Comment] { ref == Fixture.deck ? known : try base.comments(on: ref) }
+        func files() -> [FileRef] { base.files() }
+    }
+
+    func testASemanticThoughtHitStaysAThoughtPassage() throws {
+        let root = Comment(timestamp: Fixture.decision.timestamp.addingTimeInterval(60), anchor: FileAnchor(kind: .slide, value: "7"),
+                           text: "What do we charge for the premium plan?", meta: ThoughtMeta(uid: "tq1"))
+        let reply = Comment(timestamp: root.timestamp.addingTimeInterval(60), anchor: root.anchor,
+                            text: "Fifty-five a month, by my notes", provenance: CommentProvenance(origin: .human), meta: ThoughtMeta(uid: "tr1", parent: "tq1"))
+        let source = SemanticSource(found: reply, known: [Fixture.decision, root, reply])
+        let passages = try Retriever(source: source).retrieve("how much is the premium tier")
+        let hit = try XCTUnwrap(passages.first { $0.commentID == reply.id })
+        XCTAssertEqual(hit.kind, .comment, "not a section of the deck")
+        XCTAssertTrue(hit.text.hasPrefix("re: What do we charge for the premium plan?\n"), hit.text)
+        XCTAssertTrue(hit.text.contains("Fifty-five a month"))
+        XCTAssertEqual(hit.file, Fixture.deck)
+        XCTAssertFalse(passages.contains { $0.kind == .section && $0.text.contains("Fifty-five") },
+                       "the thought isn't also packed as the text of its slide")
+    }
+
+    func testAThoughtThatStartsAThreadHasNoParentLine() throws {
+        let root = Comment(timestamp: Fixture.decision.timestamp.addingTimeInterval(60), anchor: FileAnchor(kind: .slide, value: "7"),
+                           text: "What do we charge for the premium plan?", meta: ThoughtMeta(uid: "tq1"))
+        let passages = try Retriever(source: SemanticSource(found: root, known: [root])).retrieve("how much is the premium tier")
+        let hit = try XCTUnwrap(passages.first { $0.commentID == root.id })
+        XCTAssertEqual(hit.kind, .comment)
+        XCTAssertFalse(hit.text.hasPrefix("re:"))
+    }
+
+    func testAThoughtHitWhoseCommentIsGoneIsDroppedNotShownAsASection() throws {
+        let ghost = Comment(timestamp: Date(), anchor: FileAnchor(kind: .slide, value: "7"), text: "Premium costs fifty-five")
+        // The source does not know the comment, so there is nothing to show.
+        let passages = try Retriever(source: SemanticSource(found: ghost, known: [Fixture.decision])).retrieve("how much is premium")
+        XCTAssertFalse(passages.contains { $0.text.contains("fifty-five") })
     }
 }

@@ -105,6 +105,7 @@ public struct LocalCompletion: Sendable, Equatable {
 
 /// Where the local servers are and how to reach them. Tests replace the pieces.
 package struct LocalCompletionRuntime: Sendable {
+    package init() {}
     package var session: URLSession = .shared
     /// The 27B, started if need be. `background` is the night shift.
     package var llama: @Sendable (_ background: Bool, _ onLoading: @escaping @Sendable () -> Void) async throws -> URL = {
@@ -269,7 +270,7 @@ extension LocalCompletionRuntime {
         return Self.completion(text: text, endpoint: .scripted, request: r, input: 0, output: 0)
     }
 
-    static func resolvePassageReferences(in fixture: String, prompt: String) -> String {
+    package static func resolvePassageReferences(in fixture: String, prompt: String) -> String {
         guard fixture.contains("@"), let tag = try? NSRegularExpression(pattern: #"<passage id="(\d+)" kind="\w+" file="([^"]*)"(?: at="([^"]*)")?"#) else { return fixture }
         let ns = prompt as NSString
         var exact: [String: Int] = [:], byFile: [String: Int] = [:]

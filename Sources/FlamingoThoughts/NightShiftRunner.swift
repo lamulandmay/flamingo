@@ -92,6 +92,8 @@ public final class NightShiftRunner: @unchecked Sendable {
         }
 
         let record = ledger.record(for: job.id)
+        // Done is done, and two tries are all a job gets.
+        if let phase = record?.phase, phase == .done || phase == .exhausted { return outcome }
         if record == nil { log(base(.queued)) }
 
         // A memo without its reply: only the reply is missing.

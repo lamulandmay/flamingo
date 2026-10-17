@@ -51,8 +51,19 @@ enum ThoughtPrivacy {
             for query in QueryPlan.queries(for: probe).prefix(3) {
                 candidates += ((try? source.searchComments(query.text, limit: 25)) ?? []).map(\.comment)
             }
-            return !candidates.contains { quotes($0.text, in: text) }
+            let plain = turn.question + " " + turn.answer
+            return !candidates.contains { quotes($0.text, in: text) || restates($0.text, in: plain) }
         }
+    }
+
+    /// Whether `plain` says most of what the thought says in other words: at least four of the
+    /// thought's content words (links left out), and seven tenths of them, appear. Errs toward
+    /// dropping a turn.
+    static func restates(_ thought: String, in plain: String) -> Bool {
+        let words = ThoughtRules.prose(of: thought).replacingOccurrences(of: #"!?\[\[[^\]]*\]\]"#, with: " ", options: .regularExpression)
+        let terms = QueryPlan.terms(words)
+        guard terms.count >= 4 else { return false }
+        return Double(Retriever.matchCount(terms, in: plain)) / Double(terms.count) >= 0.7
     }
 
     /// Letters and digits only, lowercased: survives spacing, case and punctuation changes.
