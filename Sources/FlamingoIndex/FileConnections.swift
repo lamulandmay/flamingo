@@ -58,6 +58,10 @@ public struct FileConnection: Identifiable, Equatable, Sendable {
     public var strength: Double
     public var id: String { file.relativePath }
 
+    public init(file: FileRef, anchor: FileAnchor?, evidence: [ConnectionEvidence], strength: Double) {
+        self.file = file; self.anchor = anchor; self.evidence = evidence; self.strength = strength
+    }
+
     public var isExplicit: Bool { evidence.contains { $0.reason.isExplicit } }
     /// Distinct reasons, strongest first.
     public var reasons: [ConnectionReason] {

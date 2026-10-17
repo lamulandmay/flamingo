@@ -15,6 +15,9 @@ import FlamingoCore
 ///     postnote com.flamingo.qa "flags cmd opt"          hold ⌘⌥ (the recent-files ring); "flags none" releases
 ///     postnote com.flamingo.qa "radial 90 80"           pointer 80 pt clockwise from 12 o'clock, 90°; "radial center"
 ///     postnote com.flamingo.qa "radial origin 400 300"  where the next ring opens (window coordinates, y down)
+///     postnote com.flamingo.qa "tile thirds"            a layout: single halves thirds mainPlusStack grid
+///     postnote com.flamingo.qa "pane 2"                 focus the pane in slot 2 (1-based); "pane close 2" closes it
+///     postnote com.flamingo.qa "launch 2 #0"            the launcher in slot 2 opens its pick 0; "launch 2 q3" types q3 into it
 @MainActor
 enum QAHook {
     /// `FLAMINGO_QA_CHANNEL` picks another name, so concurrent test builds don't hear each other.
@@ -68,6 +71,12 @@ enum QAHook {
         if parts[0] == "open" {
             guard let state = (NSApp.delegate as? AppDelegate)?.state else { return }
             state.jump(to: FileRef(relativePath: parts[1]), anchor: nil)
+            return
+        }
+        // `tile thirds`, `pane 2`, `pane close 2`, `launch 2 #0`, `launch 2 q3`.
+        if parts[0] == "tile" || parts[0] == "pane" || parts[0] == "launch" {
+            guard let state = (NSApp.delegate as? AppDelegate)?.state else { return }
+            runTiling(parts[0], parts[1], state)
             return
         }
         // `flags cmd opt` presses ⌘⌥ for the recent-files ring, `flags none` lets go. Synthesized
@@ -130,6 +139,27 @@ enum QAHook {
         if let f = special[code] { chars = String(UnicodeScalar(UInt16(f)).map(Character.init) ?? " ") }
         else { chars = [51: "\u{7f}", 117: "\u{f728}", 36: "\r", 53: "\u{1b}", 48: "\t"][code] ?? letter(code) }
         send(code: code, chars: chars, flags: flags)
+    }
+
+    private static func runTiling(_ verb: String, _ rest: String, _ state: AppState) {
+        let args = rest.split(separator: " ", maxSplits: 1).map(String.init)
+        func id(slot text: String?) -> DocumentPaneID? {
+            guard let text, let n = Int(text), state.tiling.arrangement.visible.indices.contains(n - 1) else {
+                Log.debug("qa: no pane in slot \(text ?? "?")"); return nil
+            }
+            return state.tiling.arrangement.visible[n - 1]
+        }
+        switch verb {
+        case "tile":
+            guard let layout = TileLayout(rawValue: rest) else { return Log.debug("qa: no layout \(rest)") }
+            state.setLayout(layout)
+        case "pane":
+            if args.first == "close" { if let pane = id(slot: args.dropFirst().first) { state.closePane(pane) } }
+            else if let pane = id(slot: args.first) { state.activatePane(pane); state.pane(pane).focusWhenReady() }
+        default:
+            guard let pane = id(slot: args.first), args.count == 2 else { return }
+            state.launcher.qaLaunch(pane, args[1], state)
+        }
     }
 
     private static func letter(_ code: UInt16) -> String {

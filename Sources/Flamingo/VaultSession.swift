@@ -736,6 +736,33 @@ final class VaultSession {
         return result
     }
 
+    /// What ties each seed file to everything else: links, similar content, opened together,
+    /// mentions. One detached pass, no excerpt reads. `edges` are the built graph's, if any.
+    func paneEvidence(for seeds: [FileRef], edges: [Graph.Edge]) async throws -> [FileRef: FileConnectionsSnapshot] {
+        guard let index, !isStopped else { throw CocoaError(.fileReadUnknown) }
+        let connections = connections, dismissed = dismissed, trail = trail
+        let worker = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let all = ((try? trail.edges()) ?? []) + edges
+            let manual = try connections.all(), hidden = dismissed.keys()
+            var out: [FileRef: FileConnectionsSnapshot] = [:]
+            for seed in seeds {
+                try Task.checkCancellation()
+                let related = try index.relatedFiles(to: seed, connections: manual, limit: 40,
+                                                     checkCancellation: { try Task.checkCancellation() })
+                let similar = ((try? index.similarFiles(to: seed, limit: 12)) ?? []).map {
+                    (file: $0.file, score: index.relatedness($0.score), passage: nil as String?)
+                }
+                out[seed] = FileConnections.merge(for: seed, related: related, edges: all, similar: similar, dismissed: hidden)
+            }
+            return out
+        }
+        let result = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+        try Task.checkCancellation()
+        guard !isStopped else { throw CancellationError() }
+        return result
+    }
+
     /// When each file was first touched: its first open in Trail, its oldest thought, else
     /// its modification date. Feeds the graph's Replay History.
     func firstSeen() async -> [String: Date] {

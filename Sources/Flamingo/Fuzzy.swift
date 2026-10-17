@@ -1,4 +1,5 @@
 import Foundation
+import FlamingoCore
 
 /// Fuzzy subsequence matching for the command palette: file names, paths, command titles.
 ///
@@ -476,5 +477,39 @@ enum Fuzzy {
         var m: UInt64 = 0
         for b in bytes { m |= 1 << bit(b) }
         return m
+    }
+}
+
+
+/// The palette's file table, kept against `AppState.filesVersion` so every surface that matches
+/// names (the pane launchers) shares one build. Big lists build and rank off the main thread.
+@MainActor
+final class FileTableCache {
+    private var table: Fuzzy.FileTable?
+    private var files: [FileRef] = []
+    /// `AppState.filesVersion` the table was built from; -1 before the first build.
+    private var version = -1
+    private var task: Task<Void, Never>?
+    /// Above this many files, building the table and ranking it run off the main thread.
+    static let asyncThreshold = 20_000
+
+    /// The best `limit` file names for `query`, rebuilding the table first if the list changed.
+    func rank(_ query: String, in state: AppState, limit: Int) async -> [FileRef] {
+        let q = Fuzzy.Query(query)
+        guard !q.isEmpty else { return [] }
+        if version != state.filesVersion {
+            let wanted = state.filesVersion, list = state.files
+            if list.count < Self.asyncThreshold {
+                table = Fuzzy.FileTable(paths: list.map(\.relativePath)); files = list; version = wanted
+            } else {
+                let built = await Task.detached(priority: .userInitiated) { Fuzzy.FileTable(paths: list.map(\.relativePath)) }.value
+                if Task.isCancelled { return [] }
+                table = built; files = list; version = wanted
+            }
+        }
+        guard let table else { return [] }
+        let list = files
+        if list.count < Self.asyncThreshold { return table.rank(q, limit: limit).map { list[$0.index] } }
+        return await Task.detached(priority: .userInitiated) { table.rank(q, limit: limit).map { list[$0.index] } }.value
     }
 }

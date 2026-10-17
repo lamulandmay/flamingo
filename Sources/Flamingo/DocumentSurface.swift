@@ -8,6 +8,8 @@ struct DocumentSurface: View {
     let file: FileRef
     let url: URL
     @ObservedObject var pane: DocumentPane
+    /// The pointer is somewhere in this pane (brightens •••).
+    var paneHovering = false
     static let textExtensions = TextExtractor.extensions.subtracting(["rtf", "rtfd", "ipynb"])
     private var editable: Bool { Self.textExtensions.contains(file.ext) }
     private var sourceIsRequired: Bool {
@@ -32,6 +34,10 @@ struct DocumentSurface: View {
             }
             .padding(.leading, Theme.Space.m).padding(.trailing, Theme.Space.s)
             .frame(height: 30)
+            .overlay(alignment: .center) {
+                // Tiled panes carry ••• in their own header.
+                if !state.splitVisible { TileHandle(paneID: pane.id, paneHovering: paneHovering) }
+            }
             Hairline()
             if editable, pane.jumpRequest?.file != file || pane.jumpRequest?.anchor.kind == .line || pane.jumpRequest == nil,
                let buffer = state.textBuffer(for: file) {

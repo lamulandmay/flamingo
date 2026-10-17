@@ -34,6 +34,10 @@ private struct WorkingFileTab: View {
     let file: FileRef
     let selected: Bool
     @State private var hovering = false
+    /// Showing in a pane that isn't the active one.
+    private var elsewhere: Bool {
+        !selected && state.visiblePanes.contains { $0.id != state.activePaneID && $0.file == file }
+    }
 
     var body: some View {
         HStack(spacing: Theme.Space.s) {
@@ -58,10 +62,11 @@ private struct WorkingFileTab: View {
         .frame(height: 30)
         .background(Theme.Color.hover.opacity(hovering && !selected ? 1 : 0))
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.Color.accent).frame(height: 1.5).opacity(selected ? 1 : 0)
+            Rectangle().fill(selected ? Theme.Color.accent : Theme.Color.textTertiary).frame(height: 1.5)
+                .opacity(selected || elsewhere ? 1 : 0)
         }
         .contentShape(Rectangle())
-        .onTapGesture { state.jump(to: file, anchor: nil) }
+        .onTapGesture { state.reveal(file) }
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
         .help(file.relativePath)
@@ -71,6 +76,9 @@ private struct WorkingFileTab: View {
         }
         .contextMenu {
             Button("Open Beside") { state.openBeside(file) }
+            if let empty = state.visiblePanes.first(where: { $0.file == nil }) {
+                Button("Open in Empty Pane") { state.open(file, inPane: empty.id) }
+            }
             Button("Copy File") { state.copyFiles([file]) }
             Button("Copy Path") { state.copyPath(file) }
             Button("Reveal in Finder") { state.revealInFinder(file) }

@@ -98,8 +98,18 @@ enum MainMenu {
         }
         let split = viewMenu.addItem(withTitle: "Split View", action: #selector(AppDelegate.toggleSplit(_:)), keyEquivalent: "\\")
         split.keyEquivalentModifierMask = [.command]
-        let focusPane = viewMenu.addItem(withTitle: "Focus Other Pane", action: #selector(AppDelegate.focusOtherPane(_:)), keyEquivalent: String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)))
+        let layoutItem = viewMenu.addItem(withTitle: "Layout", action: nil, keyEquivalent: "")
+        let layoutMenu = NSMenu(title: "Layout")
+        for (i, layout) in TileLayout.allCases.enumerated() {
+            let item = layoutMenu.addItem(withTitle: layout.title, action: #selector(AppDelegate.setTileLayout(_:)), keyEquivalent: layout.key)
+            item.keyEquivalentModifierMask = [.control, .option, .command]
+            item.tag = i
+        }
+        layoutItem.submenu = layoutMenu
+        let focusPane = viewMenu.addItem(withTitle: "Focus Next Pane", action: #selector(AppDelegate.focusOtherPane(_:)), keyEquivalent: String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)))
         focusPane.keyEquivalentModifierMask = [.command, .option]
+        let focusPrevious = viewMenu.addItem(withTitle: "Focus Previous Pane", action: #selector(AppDelegate.focusPreviousPane(_:)), keyEquivalent: String(Character(UnicodeScalar(NSLeftArrowFunctionKey)!)))
+        focusPrevious.keyEquivalentModifierMask = [.command, .option]
         viewMenu.addItem(withTitle: "Open Current File Beside", action: #selector(AppDelegate.openCurrentBeside(_:)), keyEquivalent: "")
         let rail = viewMenu.addItem(withTitle: "Inspector", action: #selector(AppDelegate.toggleRail(_:)), keyEquivalent: "i")
         rail.keyEquivalentModifierMask = [.command, .option]
@@ -240,7 +250,9 @@ extension AppDelegate: NSMenuItemValidation {
     @objc func toggleConnectGrid(_ sender: Any?) { state.connectGridShown.toggle() }
     @objc func replayGraph(_ sender: Any?) { state.replayGraph() }
     @objc func toggleSplit(_ sender: Any?) { state.toggleSplit() }
-    @objc func focusOtherPane(_ sender: Any?) { state.focusOtherPane() }
+    @objc func focusOtherPane(_ sender: Any?) { state.focusPane(step: 1) }
+    @objc func focusPreviousPane(_ sender: Any?) { state.focusPane(step: -1) }
+    @objc func setTileLayout(_ sender: NSMenuItem) { state.setLayout(TileLayout.allCases[sender.tag]) }
     @objc func openCurrentBeside(_ sender: Any?) { if let file = state.selected { state.openBeside(file, anchor: state.anchor) } }
     @objc func previousAnchor(_ sender: Any?) { state.stepAnchor(-1) }
     @objc func nextAnchor(_ sender: Any?) { state.stepAnchor(1) }
@@ -297,8 +309,11 @@ extension AppDelegate: NSMenuItemValidation {
         case #selector(toggleSplit(_:)):
             item.state = state.splitVisible ? .on : .off
             return hasFile || state.splitVisible
-        case #selector(focusOtherPane(_:)):
+        case #selector(focusOtherPane(_:)), #selector(focusPreviousPane(_:)):
             return state.splitVisible
+        case #selector(setTileLayout(_:)):
+            item.state = TileLayout.allCases[item.tag] == state.tiling.arrangement.kind ? .on : .off
+            return hasVault
         case #selector(openCurrentBeside(_:)):
             return hasFile
         case #selector(toggleGlobalCapture(_:)):

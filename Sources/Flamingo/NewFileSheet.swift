@@ -243,6 +243,10 @@ struct CommandField: NSViewRepresentable {
     var placeholder = ""
     let label: String
     var fontSize: CGFloat = 17
+    /// Takes focus when it appears. A pane launcher turns this off: several can exist at once.
+    var autofocus = true
+    /// Hands over the field once made, so a host can focus it later.
+    var onCreate: ((NSTextField) -> Void)? = nil
     let onCommand: (Selector) -> Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -264,7 +268,8 @@ struct CommandField: NSViewRepresentable {
         }
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        DispatchQueue.main.async { field.window?.makeFirstResponder(field) }
+        if autofocus { DispatchQueue.main.async { field.window?.makeFirstResponder(field) } }
+        onCreate?(field)
         return field
     }
 

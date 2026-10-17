@@ -2,53 +2,46 @@ import SwiftUI
 import FlamingoCore
 import FlamingoDesign
 
-/// Keep the primary document mounted when a second pane opens or closes. Each pane
-/// owns its location; only the active one drives the shell and the context rail.
+/// Up to four document panes in one container. A single `ForEach` over the visible panes, keyed
+/// by pane, places each in its frame, so changing the layout or closing a neighbour only moves
+/// frames: no PDF, Quick Look or text view is remounted. Each pane owns its location; only the
+/// active one drives the shell and the context rail.
 struct PreviewPane: View {
     @EnvironmentObject var state: AppState
 
     var body: some View {
-        GeometryReader { geometry in
-        HSplitView {
-            DocumentPaneColumn(pane: state.primaryPane)
-                .frame(minWidth: 220, idealWidth: state.splitVisible ? (geometry.size.width - 1) / 2 : geometry.size.width,
-                       maxWidth: .infinity, maxHeight: .infinity)
-                .overlay(alignment: .trailing) {
-                    if state.splitVisible {
-                        DocumentDividerGrip().frame(width: 8)
-                    }
-                }
-            if state.splitVisible {
-                DocumentPaneColumn(pane: state.secondaryPane)
-                    .frame(minWidth: 220, idealWidth: (geometry.size.width - 1) / 2,
-                           maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        }
-        .background(Theme.Color.bg)
+        TileContainer(tiling: state.tiling, geometry: state.tiling.geometry)
+            .background(Theme.Color.bg)
     }
 }
 
-/// A generous native hit target for the otherwise one-point SwiftUI split divider.
-/// Resizing still goes through NSSplitView so both hosted documents keep their identity.
-private struct DocumentDividerGrip: NSViewRepresentable {
-    func makeNSView(context: Context) -> DocumentDividerGripView { DocumentDividerGripView() }
-    func updateNSView(_ view: DocumentDividerGripView, context: Context) {}
-}
+private struct TileContainer: View {
+    @EnvironmentObject var state: AppState
+    @ObservedObject var tiling: PaneTiling
+    @ObservedObject var geometry: TileGeometry
 
-private final class DocumentDividerGripView: NSView {
-    override var mouseDownCanMoveWindow: Bool { false }
-    override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
-    override func mouseDown(with event: NSEvent) {}
-    override func mouseDragged(with event: NSEvent) {
-        var ancestor = superview
-        while let view = ancestor {
-            if let split = view as? NSSplitView, split.isVertical, split.arrangedSubviews.count == 2 {
-                let x = split.convert(event.locationInWindow, from: nil).x
-                split.setPosition(min(max(220, x), split.bounds.width - 221), ofDividerAt: 0)
-                return
+    var body: some View {
+        GeometryReader { proxy in
+            let arrangement = tiling.arrangement
+            let layout = arrangement.kind, visible = arrangement.visible
+            let fractions = geometry.fractions(for: layout).clamped(layout, size: proxy.size)
+            let frames = layout.frames(in: proxy.size, fractions)
+            ZStack(alignment: .topLeading) {
+                ForEach(visible, id: \.self) { id in
+                    let slot = visible.firstIndex(of: id) ?? 0
+                    let frame = frames.indices.contains(slot) ? frames[slot] : .zero
+                    DocumentPaneColumn(pane: state.pane(id), slot: slot, count: visible.count)
+                        .frame(width: frame.width, height: frame.height)
+                        .clipped()
+                        .position(x: frame.midX, y: frame.midY)
+                        .transition(.opacity.animation(Theme.Motion.normal))
+                }
+                ForEach(layout.dividers(in: proxy.size, fractions)) { spec in
+                    TileDividerHandle(spec: spec, layout: layout, size: proxy.size, geometry: geometry)
+                        .position(x: spec.rect.midX, y: spec.rect.midY)
+                }
             }
-            ancestor = view.superview
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
     }
 }
@@ -56,57 +49,62 @@ private final class DocumentDividerGripView: NSView {
 private struct DocumentPaneColumn: View {
     @EnvironmentObject var state: AppState
     @ObservedObject var pane: DocumentPane
+    let slot: Int
+    let count: Int
+    @State private var hovering = false
 
     private var active: Bool { state.activePaneID == pane.id }
+    private var tiled: Bool { count > 1 }
 
     var body: some View {
         VStack(spacing: 0) {
-            if state.splitVisible {
-                HStack(spacing: Theme.Space.s) {
-                    Button { state.activatePane(pane.id); pane.focusWhenReady() } label: {
-                        HStack(spacing: Theme.Space.s) {
-                            if let file = pane.file { FileGlyph(ext: file.ext, selected: active) }
-                            Text(pane.file?.name ?? "Files")
-                                .font(Theme.Font.bodyMedium)
-                                .foregroundStyle(active ? Theme.Color.text : Theme.Color.textSecondary)
-                                .lineLimit(1).truncationMode(.middle)
-                            Spacer(minLength: 0)
-                            if let anchor = pane.anchor {
-                                Text(anchor.label).font(Theme.Font.monoSmall)
-                                    .foregroundStyle(Theme.Color.textTertiary).lineLimit(1)
-                            }
-                        }.contentShape(Rectangle())
-                    }.buttonStyle(.plain)
-                        .help(pane.file?.relativePath ?? "Activate pane")
-                        .accessibilityLabel((pane.id == .primary ? "Left pane" : "Right pane") + (active ? ", active" : "") + ": " + (pane.file?.name ?? "Files"))
-                    if pane.id == .secondary {
-                        IconButton("xmark", help: "Close right pane") {
-                            state.activatePane(.primary)
-                            state.closeSplit()
-                        }
-                    }
-                }
-                .padding(.horizontal, Theme.Space.m)
-                .frame(height: 36)
-                .background(active ? Theme.Color.bgRaised : Theme.Color.bg)
+            if tiled {
+                header
                 Rectangle().fill(active ? Theme.Color.accent : Theme.Color.hairline).frame(height: 1)
             }
             if let file = pane.file, let url = state.url(for: file) {
-                DocumentSurface(file: file, url: url, pane: pane)
+                DocumentSurface(file: file, url: url, pane: pane, paneHovering: hovering)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if pane.id == .primary {
-                FolderSurface()
+            } else if tiled {
+                PaneLauncher(pane: pane)
             } else {
-                VStack(spacing: Theme.Space.m) {
-                    Text("No file open").font(Theme.Font.body).foregroundStyle(Theme.Color.textTertiary)
-                    Button("Open a file…") {
-                        state.activatePane(pane.id)
-                        state.showPalette(.commands)
-                    }
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                HStack {
+                    TileHandle(paneID: pane.id, paneHovering: hovering)
+                }
+                .frame(maxWidth: .infinity).frame(height: 30)
+                Hairline()
+                FolderSurface()
             }
         }
         .background(Theme.Color.bg)
+        .onHover { hovering = $0 }
+    }
+
+    private var header: some View {
+        HStack(spacing: Theme.Space.s) {
+            Button { state.activatePane(pane.id); pane.focusWhenReady() } label: {
+                HStack(spacing: Theme.Space.s) {
+                    if let file = pane.file { FileGlyph(ext: file.ext, selected: active) }
+                    Text(pane.file?.name ?? "")
+                        .font(Theme.Font.bodyMedium)
+                        .foregroundStyle(active ? Theme.Color.text : Theme.Color.textSecondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    if let anchor = pane.anchor {
+                        Text(anchor.label).font(Theme.Font.monoSmall)
+                            .foregroundStyle(Theme.Color.textTertiary).lineLimit(1)
+                    }
+                }.contentShape(Rectangle())
+            }.buttonStyle(.plain)
+                .help(pane.file?.relativePath ?? "")
+            IconButton("xmark", help: "Close Pane") { state.closePane(pane.id) }
+        }
+        .overlay(alignment: .center) { TileHandle(paneID: pane.id, paneHovering: hovering) }
+        .padding(.horizontal, Theme.Space.m)
+        .frame(height: 36)
+        .background(active ? Theme.Color.bgRaised : Theme.Color.bg)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Pane \(slot + 1) of \(count)" + (active ? ", active" : "") + (pane.file.map { ": " + $0.name } ?? ""))
     }
 }
 

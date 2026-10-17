@@ -187,10 +187,6 @@ struct TopBar: View {
                     state.connectGridShown.toggle()
                 }
                 .disabled(state.vault == nil)
-                IconButton("rectangle.split.2x1", help: state.splitVisible ? "Close Split View" : "Split View", isOn: state.splitVisible) {
-                    state.toggleSplit()
-                }
-                .disabled(state.selected == nil && !state.splitVisible)
                 IconButton("sidebar.right", help: state.railShown ? "Hide Inspector" : "Show Inspector", isOn: state.railShown) {
                     state.toggleRail()
                 }
