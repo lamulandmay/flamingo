@@ -213,6 +213,14 @@ final class WorkRecipeTests: LocalModelTestCase {
         XCTAssertTrue(result.memo.body.contains("[[finance/q3-model.xlsx"), result.memo.body)
     }
 
+    func testACitationToAPassageNeverGivenIsDroppedNotShownAsZero() async throws {
+        use { $0.environment = { ["FLAMINGO_FAKE_LLM": "1"] } }
+        // Only the deck is read, so the fixture's pointer into the workbook has no passage number.
+        let result = try await v.engine.work(request(.answer, thought: "What price does the model use for Arc?", objects: ["decks/q3-board-review.pptx#slide 7"])) { _ in }
+        XCTAssertFalse(result.memo.body.contains("[0]"), result.memo.body)
+        XCTAssertFalse(result.replyText.contains("[0]"), result.replyText)
+    }
+
     func testCompareVersionsNeedsAnotherVersion() async throws {
         use { $0.environment = { ["FLAMINGO_FAKE_LLM": "1"] } }
         // The workbook has no sibling that looks like a version of it.

@@ -281,10 +281,10 @@ final class RadialRecentsController {
     }
 
     /// Whether a ring may start: the main window is key (or QA says so), nothing is on top
-    /// of it, a vault is open, and no input method is composing text.
+    /// of it (no sheet, no morning inbox), a vault is open, and no input method is composing text.
     private func eligible() -> Bool {
         guard let window, state.vault != nil, window.isKeyWindow || qaKeyWindowOverride,
-              window.attachedSheet == nil, NSApp.modalWindow == nil else { return false }
+              window.attachedSheet == nil, NSApp.modalWindow == nil, !state.briefing.isPresented else { return false }
         if let client = window.firstResponder as? NSTextInputClient, client.hasMarkedText() { return false }
         return true
     }

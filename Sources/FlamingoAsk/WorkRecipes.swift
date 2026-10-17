@@ -101,7 +101,16 @@ extension AskEngine: WorkPerforming {
         let done = try await runtime.complete(request, at: endpoint) { _ in }
         try Task.checkCancellation()
         guard let json = LocalJSON.parse(done) else { throw WorkError.invalidOutput("not JSON") }
-        let output = try WorkOutput.validate(json, recipe: r.recipe, reading: reading)
+        let output: WorkOutput
+        do { output = try WorkOutput.validate(json, recipe: r.recipe, reading: reading) }
+        catch {
+            // QA: which passages the model was given, to tell a bad answer from a bad selection.
+            if ProcessInfo.processInfo.environment["FLAMINGO_DEBUG"] == "1" {
+                let list = reading.passages.map { "\($0.id)=\($0.file.relativePath)#\($0.anchor?.label ?? "-")(\($0.text.count))" }
+                FileHandle.standardError.write(Data("work: rejected \(r.recipe.rawValue) (\(error)) passages \(list)\n".utf8))
+            }
+            throw error
+        }
 
         let end = WorkFingerprint.sources(of: allPaths, in: index.vault)
         guard WorkFingerprint.hash(start) == WorkFingerprint.hash(end) else { throw WorkError.sourceChanged }
@@ -278,7 +287,18 @@ struct WorkOutput {
             if rows.isEmpty { throw WorkError.invalidOutput("no points tied to a passage") }
             out.sections.append("## Key points\n" + rows.joined(separator: "\n"))
         case .answer:
-            let raw = clean(json["answer"]?.string ?? "", max: 3000, keepLines: true)
+            // A citation to a passage the model was never given is dropped, not shown as a bare "[0]".
+            func uncited(_ text: String) -> String {
+                guard let re = try? NSRegularExpression(pattern: #"\s?\[(\d+)\]"#) else { return text }
+                var out = text
+                for m in re.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+                    guard let r = Range(m.range, in: text), let n = Int(text[Range(m.range(at: 1), in: text)!]), byID[n] == nil else { continue }
+                    out.replaceSubrange(r, with: "")
+                }
+                return out
+            }
+            out.tldr = uncited(out.tldr)
+            let raw = uncited(clean(json["answer"]?.string ?? "", max: 3000, keepLines: true))
             guard !raw.isEmpty else { throw WorkError.invalidOutput("no answer") }
             var sources: [Int: Citation] = [:]
             for n in CitationParser.numbers(in: raw) {

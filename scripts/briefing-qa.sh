@@ -58,6 +58,12 @@ Q briefing; sleep 1.2; shot manual-open
 echo "no-zoom:     $(bounds)"
 Q briefing close; sleep 0.6
 
+echo "== the ring does not open over the briefing"
+Q briefing; sleep 1.2
+N=$(grep -c "radial: open" $LOG); W=1 Q flags cmd opt; Q flags none
+[[ $(grep -c "radial: open" $LOG) == $N ]] && echo "ok   no ring while the briefing is up" || echo "FAIL ring opened over the briefing"
+Q briefing close; sleep 0.6
+
 echo "== 1000x600"
 Q window 1000x600; sleep 0.8; Q briefing; sleep 1.2; shot compact-1000x600
 Q briefing close; sleep 0.6; Q window 1200x760

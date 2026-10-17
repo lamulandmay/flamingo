@@ -37,6 +37,8 @@ final class ThoughtWorkflowTests: XCTestCase {
         XCTAssertFalse(ThoughtTriggers.asksAssistant(Comment(text: "@claude what is this")))
         XCTAssertTrue(ThoughtTriggers.shouldUnderstand(Comment(text: "review conflict with [[q3-model.xlsx]]")))
         XCTAssertFalse(ThoughtTriggers.shouldUnderstand(Comment(text: "   ")))
+        XCTAssertFalse(ThoughtTriggers.shouldUnderstand(Comment(text: "Fixed in the model", meta: ThoughtMeta(parent: "t8m2k4q9xa"))),
+                       "a reply keeps the kind the rules read")
     }
 
     func testBackfillBudgetResetsEachDay() {

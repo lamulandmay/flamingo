@@ -53,3 +53,12 @@ Measured on this Mac (M5 Pro, 64 GB) with the vault at `~`, a debug build, `FLAM
 - (07) FlamingoTrailTests crashed the test run (pass 1 → 2).
 - (09) Switching to Ask took key status off the main window (pass 2 → 3).
 - (10) `build.sh` and `test.sh` exited 0 on failure. Ad-hoc signing reset Accessibility grants on every build. `run.sh` killed other sessions' test builds. All fixed.
+
+## 2026-10-17 program (ring, tiles, thoughts v2, night shift, briefing)
+
+- [ ] Night-shift review-conflict failed once in about ten headline runs with "a conflict with no supporting passages" on the deck and model pair, and never in the next dozen. Not reproduced; `FLAMINGO_DEBUG=1` now logs `work: rejected ...` with the passages the model was given. Suspect a timing issue with extraction at first launch.
+- [ ] Fixture vault thoughts that ask for review-conflict on other files (legal/supplier-agreement.pdf) fail under `FLAMINGO_FAKE_LLM=1`; the canned reply cites the deck and model. Expected, not a bug.
+- [ ] Briefing: window-zoom on a second display and native full screen were not driven.
+- [ ] The wikilink display in the briefing rows shows the file name only (no anchor); the rail shows `name › anchor`, the MemoReader `name · anchor`. Unify if it bothers.
+- [ ] Divider drags, the ••• popover and the radial ring with a real trackpad (haptics) need a mouse; QA drives them through verbs.
+- [ ] Obsidian plugins: deferred.

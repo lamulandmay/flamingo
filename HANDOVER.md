@@ -168,6 +168,28 @@ session's scratchpad only; commit before the next big change.
 - Before any view: DESIGN.md. If a label can be removed, remove it. No placeholder text, no emoji.
 - User's hardware: M5 Pro, 64 GB. Ollama has gemma3:4b, llama3.2:1b, qwen2.5:1.5b.
 
+## 2026-10-17 program: ring, tiles, thoughts v2, night shift, morning inbox
+
+Plan: `plans/00-program-2026-10-17.md`. All merged on `feature/integration`.
+
+**What exists and the keys**
+- Radial recents: hold exactly ⌘⌥ for 0.3 s, a ring of up to 8 recent files (4 big compass slots with 4 or fewer) opens at the pointer; move to pick, release to open, Esc cancels, any other key closes it. `RadialRecents.swift`, `RadialRecentsView.swift`, `AppState+Recents.swift`. It never opens while the briefing is up.
+- ••• N-pane tiles: up to 4 `DocumentPane`s, layouts (halves, thirds, grid), a launcher in an empty pane. `AppState+Tiling.swift`, `Tiling.swift`, `PreviewPane.swift` (one `ForEach`, never branch on layout), `TileChrome.swift`, `PaneLauncher.swift`, `PaneSuggestions.swift`.
+- Thoughts v2: every thought has a `uid`, a kind (idea, question, todo, intent), a state (open, done, snoozed, dismissed), threads (replies via `parent`), web and folder notes, `[[file#^uid]]` links. Core: `ThoughtMeta`, `ThoughtRules`, `ThoughtUID`, `ThoughtAction`, `WebThought`. Rail: `CommentsRail`, `RailThreads`, `ThoughtsTab`. Links in the rail show the file name (or alias, or `name › anchor`); the stored text keeps the path.
+- Recall and echo: semantic recall of earlier thoughts (`ThoughtSearch`, `ThoughtEcho`).
+- Understanding: 2 s after a save a local model labels a thought (kind, and an intent with objects). `ThoughtReader` skips replies, AI thoughts, `@ai`/`@flamingo` asks, finished and person-decided thoughts. Replies keep the rules' kind.
+- `@ai` / `@flamingo`: a local answer streams into the rail and is saved as an AI reply (`ThoughtAsk`).
+- Night shift: overnight, local only, `FlamingoThoughts` (`NightShiftPlanner/Runner/Scheduler/Service`) plus recipes in `FlamingoAsk/WorkRecipes.swift` (review-conflict, compare-versions, summarize, answer, find-related). Memos land in `.flamingo/work/<day>/*.md`; the thought gets an AI reply with `work`. Memos reject invented quotes (`WorkOutput.validate`, alphanumerics only).
+- Morning inbox ("briefing"): the first open of the day zooms the window and shows memo cards, the thoughts to address first, what needs attention and where you left off. Keys: j/k or arrows, Return opens (a memo card opens the MemoReader), e done, s snooze, r reply, a attach, backspace dismiss, Cmd-Z undo, Esc leaves. `BriefingView.swift`, `BriefingRows.swift`, `MemoCard.swift`, `MemoReader.swift`, `AppState+Briefing.swift`, `BriefingWorkflow.swift`, model in `FlamingoThoughts/Briefing*.swift`, `AttentionRanker`.
+
+**QA scripts** (each needs `scripts/bundle.sh debug`, runs a copy under its own bundle id and QA channel, kills only its own pid): `scripts/radial-qa.sh`, `tiles-qa.sh`, `thoughts-qa.sh`, `briefing-qa.sh` (+ `briefing-seed.sh`), `headline-qa.sh <scratch> [dark|light]` for the whole evening thought, night memo, morning inbox scenario with `FLAMINGO_FAKE_LLM=1` (fixtures in `fixtures/fake-llm`). QAHook verbs: `clock <ISO>|reset`, `open path#anchor`, `thought`, `reply`, `ai`, `nightshift now|plan`, `briefing [zoom|reset|close|key|select|reply|attach|status]`, `tile`, `pane`, `launch`, `radial`.
+
+**Privacy rule.** Thoughts never leave this Mac. Thought AI uses only the local engines (`completeLocally`/`LocalEndpoint`, `askStreamingLocally`, `ThoughtReader`, `engine.work`, `NightShiftService`). No `@claude`, no Claude or cloud in any thought path. `LocalOnlyTests` and `NightShiftLocalOnlyTests` guard it; do not weaken them.
+
+**Known issues.** See `ISSUES.md`, "2026-10-17 program". The fake review-conflict canned reply can only answer the deck and model pair, so other review-conflict thoughts in the fixture vault (legal/supplier-agreement.pdf) are rejected by the validator, which is correct.
+
+**Obsidian plugins: deferred.** Not part of this build.
+
 ## Thoughts v2 in the shell (feature/shell-thoughts)
 
 Glue only; the engines are in FlamingoCore/Index/Ask/Thoughts. Privacy: thoughts only reach local models (`ThoughtReader`, `askStreamingLocally`, `NightShiftService`).
@@ -175,4 +197,4 @@ Glue only; the engines are in FlamingoCore/Index/Ask/Thoughts. Privacy: thoughts
 - `ThoughtsTab.swift`: Inspector Thoughts tab (rail modifiers, reply mode, echo, folder notes). `ThoughtWorkflow.swift`: pure helpers (`ThoughtLink`, `ThoughtTriggers`, `DailyBudget`, `QAClock`) and `ThoughtsRuntime`.
 - For the briefing: `AppState.nightShiftCatchUp(onEvent:)`, `AppState.qaNow` / `AppState.now` (QA clock).
 - QA: `reply`, `ai`, `nightshift now|plan`, `clock <ISO>|reset` verbs; `scripts/thoughts-qa.sh <scratch> [dark|light]`. `FLAMINGO_QA_STREAM_DELAY=<s>` paces canned answers word by word.
-- Known: the fake review-conflict memo fails the engine's "supporting passages" check on the fixture vault; the `answer` recipe works end to end.
+- The fake review-conflict memo works end to end for the deck and model pair (`scripts/headline-qa.sh`); other thoughts in the fixture vault are rejected by the validator.

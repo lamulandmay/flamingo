@@ -35,9 +35,9 @@ enum ThoughtTriggers {
     static func question(of c: Comment) -> String { ThoughtRules.prose(of: c.text) }
 
     /// Whether the understanding pass should read this thought a moment after it is saved.
-    /// Not a model's reply, not a question for the assistant (the answer is its action), not empty.
+    /// Not a model's reply or any reply, not a question for the assistant (the answer is its action), not empty.
     static func shouldUnderstand(_ c: Comment) -> Bool {
-        c.provenance?.origin != .ai && !asksAssistant(c) && !ThoughtRules.prose(of: c.text).isEmpty
+        c.provenance?.origin != .ai && c.meta?.parent == nil && !asksAssistant(c) && !ThoughtRules.prose(of: c.text).isEmpty
     }
 }
 

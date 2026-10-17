@@ -102,7 +102,7 @@ struct MemoCard: View {
         }
         .padding(Theme.Space.l)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: 232, alignment: .top)
+        .frame(maxHeight: .infinity, alignment: .top)
         .background(shape.fill(Theme.Color.bgRaised))
         .overlay(shape.fill(Theme.Color.hover).opacity(hovering ? 0.6 : 0))
         .overlay(shape.strokeBorder(selected ? Theme.Color.accent.opacity(0.7) : Theme.Color.hairline,
@@ -136,7 +136,7 @@ struct MemoPlaceholderCard: View {
         }
         .padding(Theme.Space.l)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(height: 232, alignment: .top)
+        .frame(maxHeight: .infinity, alignment: .top)
         .background(shape.fill(Theme.Color.bgRaised))
         .overlay(shape.strokeBorder(Theme.Color.hairline, lineWidth: Theme.Size.hairline))
         .clipShape(shape)

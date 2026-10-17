@@ -167,7 +167,7 @@ extension AppState {
     /// A reply from the person: below the thought with `parentUID` in `file`'s note.
     func saveThoughtReply(text: String, anchor: FileAnchor? = nil, toUID parentUID: String, in file: FileRef) async throws {
         guard let s = session else { throw CocoaError(.fileWriteUnknown) }
-        let reply = Comment(anchor: anchor, text: text).replying(toUID: parentUID)
+        let reply = Comment(timestamp: Self.now, anchor: anchor, text: text).replying(toUID: parentUID)
         let store = s.sidecar
         var stored = reply
         try changeComments(in: s, files: [file], name: "Reply") {
@@ -566,7 +566,7 @@ extension AppState {
         case "ai":
             guard let file = selected else { return Log.debug("qa: ai needs an open file") }
             Task {
-                do { try await saveComment(Comment(anchor: anchor, text: "@ai " + rest), to: file) }
+                do { try await saveComment(Comment(timestamp: Self.now, anchor: anchor, text: "@ai " + rest), to: file) }
                 catch { Log.debug("qa: ai not saved: \(error)") }
             }
         case "nightshift":

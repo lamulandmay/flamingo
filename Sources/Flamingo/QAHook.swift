@@ -48,7 +48,7 @@ enum QAHook {
         // as the capture panel does, without needing the panel to hold key focus.
         if parts[0] == "thought" {
             guard let state = (NSApp.delegate as? AppDelegate)?.state, let file = state.selected else { return }
-            let comment = Comment(anchor: state.anchor, text: parts[1])
+            let comment = Comment(timestamp: AppState.now, anchor: state.anchor, text: parts[1])
             Task { @MainActor in
                 do { try await state.saveComment(comment, to: file); state.celebrate(comment, on: file) }
                 catch { Log.debug("qa: thought not saved: \(error)") }
@@ -73,7 +73,9 @@ enum QAHook {
         // `open decks/q3.pptx`: what clicking the file would do.
         if parts[0] == "open" {
             guard let state = (NSApp.delegate as? AppDelegate)?.state else { return }
-            state.jump(to: FileRef(relativePath: parts[1]), anchor: nil)
+            // `open decks/q3.pptx#slide 7` lands on that place.
+            let pieces = parts[1].split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+            state.jump(to: FileRef(relativePath: pieces[0]), anchor: pieces.count > 1 ? FileAnchor(parsing: pieces[1]) : nil)
             return
         }
         // Thoughts v2 QA verbs

@@ -35,8 +35,15 @@ final class RailTextTests: XCTestCase {
     }
 
     func testAnchorStaysOnTarget() {
-        XCTAssertEqual(RailText.segments("[[q3.pptx#slide 2]]"), [seg("q3.pptx#slide 2", "q3.pptx#slide 2")])
+        XCTAssertEqual(RailText.segments("[[q3.pptx#slide 2]]"), [seg("q3.pptx › slide 2", "q3.pptx#slide 2")])
+        XCTAssertEqual(RailText.segments("[[decks/q3-board-review.pptx#slide 7]]"),
+                       [seg("q3-board-review.pptx › slide 7", "decks/q3-board-review.pptx#slide 7")])
         XCTAssertEqual(RailText.segments("[[q3.pptx#slide 2|pricing]]"), [seg("pricing", "q3.pptx#slide 2")])
+    }
+
+    func testAPathShowsJustTheFileName() {
+        XCTAssertEqual(RailText.segments("[[decks/q3-board-review.pptx]]"), [seg("q3-board-review.pptx", "decks/q3-board-review.pptx")])
+        XCTAssertEqual(RailText.segments("[[decks/q3.pptx|the deck]]"), [seg("the deck", "decks/q3.pptx")])
     }
 
     func testEmptyAliasFallsBackToTarget() {

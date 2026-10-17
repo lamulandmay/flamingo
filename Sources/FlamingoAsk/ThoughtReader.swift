@@ -143,6 +143,9 @@ public struct ThoughtReader: Sendable {
     /// empty, or already read since it was last edited.
     static func reasonToSkip(_ c: Comment) -> String? {
         if c.provenance?.origin == .ai { return "Written by a model" }
+        // A reply gets only the deterministic rules kind; a model re-labelling it is noise.
+        if c.meta?.parent != nil { return "A reply" }
+        if ThoughtRules.read(c.text, at: c.timestamp).mentionsAssistant { return "Asks the assistant" }
         if c.state != .open { return "Not open" }
         if c.meta?.kindBy == .user { return "The person chose its kind" }
         if ThoughtRules.prose(of: c.text).isEmpty { return "Nothing to read" }
@@ -194,7 +197,8 @@ public struct ThoughtReader: Sendable {
         q.isReply = false
         q.createdAfter = now.addingTimeInterval(-30 * 86_400)
         let found = (try? index.thoughts(q)) ?? []
-        return Array(found.filter { $0.kindBy == .rules && $0.action == nil && $0.uid != nil && !$0.file.isVirtual }.prefix(limit))
+        return Array(found.filter { $0.kindBy == .rules && $0.action == nil && $0.uid != nil && !$0.file.isVirtual
+            && !ThoughtRules.read($0.comment.text, at: $0.comment.timestamp).mentionsAssistant }.prefix(limit))
     }
 }
 

@@ -5,7 +5,7 @@ import FlamingoDesign
 
 /// One run of comment text as the rail draws it: plain text, or a wikilink.
 struct RailSegment: Equatable {
-    /// What is drawn. For a link, the alias if there is one, else the target.
+    /// What is drawn. For a link, the alias if there is one, else the file name (and anchor).
     var text: String
     /// The link target with any `#anchor` kept and the `|alias` dropped. `nil` for plain text.
     var target: String?
@@ -46,7 +46,16 @@ enum RailText {
         let target = (bar.map { inner[..<$0] } ?? inner).trimmingCharacters(in: .whitespaces)
         guard !target.isEmpty else { return nil }
         let alias = bar.map { inner[inner.index(after: $0)...].trimmingCharacters(in: .whitespaces) } ?? ""
-        return RailSegment(text: alias.isEmpty ? target : alias, target: target)
+        return RailSegment(text: alias.isEmpty ? displayName(of: target) : alias, target: target)
+    }
+
+    /// What a link reads as: the file name without its folders, then " › anchor" if it has one.
+    /// `decks/q3.pptx#slide 7` reads `q3.pptx › slide 7`. The stored text keeps the full path.
+    static func displayName(of target: String) -> String {
+        let parts = Wikilink.components(of: target)
+        let name = parts.target.isEmpty ? "" : (parts.target as NSString).lastPathComponent
+        guard let anchor = parts.anchor, !anchor.isEmpty else { return name.isEmpty ? target : name }
+        return name.isEmpty ? anchor : name + " › " + anchor
     }
 
     /// Comment text with wikilinks as accent-colored links the rail's `openURL` handler resolves.

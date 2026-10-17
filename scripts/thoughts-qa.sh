@@ -48,6 +48,7 @@ wait_index() {
 launch
 Q window 1200 760
 wait_index
+Q clock 2026-10-16T17:30   # the evening before the night shift runs, so the thought is old enough by 02:00
 Q open decks/q3-board-review.pptx; sleep 1.5
 
 echo "1 thought: uid at once, kind and action within 5 s"

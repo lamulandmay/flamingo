@@ -116,3 +116,12 @@ cited files as chips.
 - Full screen. Entering full screen in the review copy would have moved the user's Spaces.
 - The ⌘K and ⌘F panels, which don't open yet.
 - Increase Contrast. The tokens have high-contrast values; check them once the panels exist.
+
+## 2026-10-17 pass: ring, tiles, rail threads, briefing
+
+Checked in dark and light with `scripts/*-qa.sh` and `scripts/headline-qa.sh`.
+
+- **Radial ring.** A `Circle` dial (the one allowed exception), coral highlight, thumbnails, no labels beyond the file name of the highlighted slot. Does not open over the briefing.
+- **Tiles.** One hairline between panes, chrome only on hover, launcher is thumbnails with no copy.
+- **Rail threads.** Replies sit under their root on a spine; AI replies carry only the model glyph. Links show the file name (alias, or `name › anchor`) in the accent, never the path.
+- **Briefing.** A centred page, date line, memo cards that hug their content (equal height per row, thought footer at the bottom), thoughts and needs-attention beside each other, a pinned resume strip. The thoughts list fades over its last 24 pt instead of cutting mid-row. Nothing is labelled; hairlines separate the regions.

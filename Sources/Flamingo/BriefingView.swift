@@ -51,6 +51,15 @@ struct BriefingView: View {
                             guard let id else { return }
                             withAnimation(Theme.Motion.fast) { proxy.scrollTo(id) }
                         }
+                        // Rows fade out over the last 24 pt instead of being cut mid-row by the strip.
+                        .mask(alignment: .bottom) {
+                            VStack(spacing: 0) {
+                                Rectangle()
+                                if !model.resume.isEmpty, pinned {
+                                    LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom).frame(height: 24)
+                                }
+                            }
+                        }
                     }
                     if !model.resume.isEmpty, pinned { resumeStrip(width: width, compact: compact) }
                 }
@@ -105,29 +114,57 @@ struct BriefingView: View {
 
     // MARK: Cards
 
-    @ViewBuilder private func cards(width: CGFloat, compact: Bool) -> some View {
-        let cardWidth = (width - 2 * gutter) / 3
-        if compact {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: gutter) { cardViews.frame(width: cardCompactWidth) }
+    /// Memos then placeholders, in one run so a row is as tall as its tallest card.
+    private enum CardSlot: Identifiable {
+        case memo(Int, MemoCardData)
+        case placeholder(BriefingPlaceholder)
+        var id: String {
+            switch self {
+            case .memo(_, let m): return "memo-" + m.id
+            case .placeholder(let p): return "placeholder-\(p.id)"
             }
-        } else {
-            LazyVGrid(columns: Array(repeating: GridItem(.fixed(cardWidth), spacing: gutter, alignment: .top), count: 3),
-                      alignment: .leading, spacing: gutter) { cardViews }
         }
     }
 
-    @ViewBuilder private var cardViews: some View {
-        ForEach(Array(model.memos.enumerated()), id: \.element.id) { i, memo in
+    private var cardSlots: [CardSlot] {
+        model.memos.enumerated().map { CardSlot.memo($0.offset, $0.element) } + model.placeholders.map { CardSlot.placeholder($0) }
+    }
+
+    @ViewBuilder private func cardView(_ slot: CardSlot) -> some View {
+        switch slot {
+        case .memo(let i, let memo):
             let item = BriefingItem.memo(memo)
             MemoCard(data: memo, thought: model.thought(for: memo), vault: vault, selected: model.selection == item.id) {
                 model.select(item.id); model.open(item)
             }
             .id(item.id)
             .fadesIn(model.visible, delay: 0.06 + Theme.Motion.staggerSeconds * Double(i))
-        }
-        ForEach(model.placeholders) { placeholder in
+        case .placeholder(let placeholder):
             MemoPlaceholderCard(placeholder: placeholder, vault: vault)
+        }
+    }
+
+    /// Cards hug their content; every card in a row is as tall as the tallest.
+    @ViewBuilder private func cards(width: CGFloat, compact: Bool) -> some View {
+        let cardWidth = compact ? cardCompactWidth : (width - 2 * gutter) / 3
+        let slots = cardSlots
+        if compact {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: gutter) {
+                    ForEach(slots) { cardView($0).frame(width: cardWidth).frame(maxHeight: .infinity, alignment: .top) }
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            let rows = stride(from: 0, to: slots.count, by: 3).map { Array(slots[$0..<min($0 + 3, slots.count)]) }
+            VStack(alignment: .leading, spacing: gutter) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(alignment: .top, spacing: gutter) {
+                        ForEach(row) { cardView($0).frame(width: cardWidth).frame(maxHeight: .infinity, alignment: .top) }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 

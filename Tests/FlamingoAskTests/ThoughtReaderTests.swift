@@ -150,6 +150,22 @@ final class ThoughtReaderTests: LocalModelTestCase {
         XCTAssertTrue(LoopbackStub.requests.isEmpty)
     }
 
+    func testRepliesAndAssistantAsksAreNeverRead() async throws {
+        let root = try v.think(review)
+        let reply = try v.think("Fixed in the model", anchor: nil, meta: ThoughtMeta(parent: root.uid))
+        let ask = try v.think("@ai what price does the model use?", anchor: nil)
+        let flamingo = try v.think("hey @flamingo summarize this", anchor: nil)
+        modelSays(#"{"kind":"intent","action":"none","objects":[],"confidence":1}"#)
+        let r = await reader.read(uid: reply.uid!, on: ThoughtVault.deck)
+        let a = await reader.read(uid: ask.uid!, on: ThoughtVault.deck)
+        let f = await reader.read(uid: flamingo.uid!, on: ThoughtVault.deck)
+        XCTAssertEqual(r, .skipped("A reply"))
+        XCTAssertEqual(a, .skipped("Asks the assistant"))
+        XCTAssertEqual(f, .skipped("Asks the assistant"))
+        XCTAssertTrue(LoopbackStub.requests.isEmpty)
+        XCTAssertNil(try stored(reply.uid!).meta?.intent)
+    }
+
     func testNoLocalModelIsQuiet() async throws {
         let c = try v.think(review)
         let before = try String(contentsOf: v.store.sidecarURL(for: ThoughtVault.deck))
