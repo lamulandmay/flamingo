@@ -148,6 +148,18 @@ session's scratchpad only; commit before the next big change.
 4. pptx anchors drift from the Quick Look preview (ISSUES.md).
 5. Remaining items in `ISSUES.md` and `plans/REQUESTS.md`.
 
+## Pane tiling (plan 14, feature B)
+
+- Four `DocumentPane`s live on `AppState` (`allPanes`); `tiling.arrangement` (layout + slot order)
+  says which show. `AppState+Tiling.swift` has layouts, close, focus, open-in-pane, snapshots.
+  `primaryPane`/`secondaryPane` are aliases for slots held by ids `.primary`/`.secondary`.
+- Snapshots: legacy `primary`/`secondary` hold slots 0 and 1; `tiles` (optional, `try?`-decoded) wins.
+- `PreviewPane.swift` is one container with one `ForEach` over visible panes, keyed by id: never
+  branch the view tree on layout or panes remount. Chrome is in `TileChrome.swift`; launchers in
+  `PaneLauncher.swift` (+ pure `PaneSuggestions.swift`, `VaultSession.paneEvidence`).
+- QA: `scripts/tiles-qa.sh <scratch> [dark|light]`; QAHook verbs `tile`, `pane`, `launch`,
+  `window`, `workspace undo|redo`. Divider drags and the ••• popover need a mouse.
+
 ## Conventions that matter
 
 - Public API in Core is frozen for everyone else's sake: add, never rename.

@@ -17,6 +17,7 @@ import FlamingoCore
 ///     postnote com.flamingo.qa "radial origin 400 300"  where the next ring opens (window coordinates, y down)
 ///     postnote com.flamingo.qa "tile thirds"            a layout: single halves thirds mainPlusStack grid
 ///     postnote com.flamingo.qa "pane 2"                 focus the pane in slot 2 (1-based); "pane close 2" closes it
+///     postnote com.flamingo.qa "window 1000 600"       content size in points; "window full" fills the screen
 ///     postnote com.flamingo.qa "launch 2 #0"            the launcher in slot 2 opens its pick 0; "launch 2 q3" types q3 into it
 @MainActor
 enum QAHook {
@@ -71,6 +72,19 @@ enum QAHook {
         if parts[0] == "open" {
             guard let state = (NSApp.delegate as? AppDelegate)?.state else { return }
             state.jump(to: FileRef(relativePath: parts[1]), anchor: nil)
+            return
+        }
+        // `workspace undo|redo`: the workspace's own undo, whatever has keyboard focus.
+        if parts[0] == "workspace" {
+            guard let state = (NSApp.delegate as? AppDelegate)?.state else { return }
+            if parts[1] == "undo" { state.undoAction() } else if parts[1] == "redo" { state.redoAction() }
+            return
+        }
+        if parts[0] == "window" {
+            guard let window = (NSApp.delegate as? AppDelegate)?.window else { return }
+            let n = parts[1].split(separator: " ").compactMap { Double($0) }
+            if parts[1] == "full", let screen = window.screen { window.setFrame(screen.visibleFrame, display: true) }
+            else if n.count == 2 { window.setContentSize(NSSize(width: n[0], height: n[1])) }
             return
         }
         // `tile thirds`, `pane 2`, `pane close 2`, `launch 2 #0`, `launch 2 q3`.

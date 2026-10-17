@@ -122,6 +122,12 @@ user's data.
 round plate (a circle, because it is a dial, not a panel); flick toward one, let go to open it. Nothing highlighted, nothing opens. The hub names
 the file, its folder and when you last touched it. A dot marks files you edited. Never labelled.
 
+*Panes.* Up to four documents tile the content: one, halves, thirds, one and two, four. ••• at the
+top center of a pane (dim until the pointer is in that pane) offers them as small squircle diagrams.
+A new tile is a launcher: a field with no placeholder, then the files most related to what is
+already on screen. Tiles meet at hairlines and resize by dragging them. One tab strip serves all
+panes; the active pane's tab has the accent underline, other visible ones a tertiary one.
+
 There is no status bar. Indexing shows as a 2pt accent line under the title bar; a warning
 icon appears in the toolbar only when something needs attention (it opens Workspace Health).
 

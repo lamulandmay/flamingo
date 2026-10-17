@@ -4,6 +4,12 @@ import FlamingoCore
 /// Panes and layouts. `AppState` owns four panes; `tiling.arrangement` says how many show and
 /// where. Selection still mirrors the active pane exactly as it did with two.
 extension AppState {
+    /// One line per layout or focus change, for the QA scripts.
+    func logTiles(_ why: String) {
+        let a = tiling.arrangement
+        Log.debug("tiles: \(why) layout=\(a.kind.rawValue) order=\(a.visible.map(\.rawValue).joined(separator: ",")) active=\(a.slot(of: activePaneID).map { $0 + 1 } ?? 0) files=\(visiblePanes.map { $0.file?.relativePath ?? "-" }.joined(separator: ","))")
+    }
+
     // MARK: Layout
 
     /// Switches layout. Panes a larger layout reveals start empty (they open as launchers) and
@@ -23,6 +29,7 @@ extension AppState {
             pane(first).focusWhenReady()
         }
         persistWorkspace()
+        logTiles("layout")
     }
 
     /// Installs an arrangement and keeps the active pane on screen: `preferred` takes focus if given.
@@ -103,6 +110,7 @@ extension AppState {
         select(file, anchor: anchor, source: .other)
         hostWindow?.makeFirstResponder(nil)
         activePane.focusWhenReady()
+        logTiles("open")
     }
 
     // MARK: Closing and focus
@@ -131,6 +139,7 @@ extension AppState {
         hostWindow?.makeFirstResponder(nil)
         activePane.focusWhenReady()
         persistWorkspace()
+        logTiles("close")
     }
 
     /// ⌥⌘→ and ⌥⌘←: the next or previous pane, wrapping.
@@ -141,6 +150,7 @@ extension AppState {
         // pane host; no anchor request is regenerated just because focus moved.
         hostWindow?.makeFirstResponder(nil)
         activePane.focusWhenReady()
+        logTiles("focus")
     }
 
     func focusOtherPane() { focusPane(step: 1) }
@@ -193,12 +203,14 @@ extension AppState {
             let arrangement = TileArrangement(kind: tiles.layout, order: tiles.order).repaired()
             tiling.set(arrangement)
             activePaneID = arrangement.visible.contains(tiles.active) ? tiles.active : arrangement.order[0]
+            logTiles("restored")
         } else {
             for id in DocumentPaneID.allCases { pane(id).reset() }
             pane(.primary).restore(split.primary, in: vault)
             pane(.secondary).restore(split.secondary, in: vault)
             tiling.set(TileArrangement(kind: split.visible ? .halves : .single))
             activePaneID = split.visible ? split.activePane : .primary
+            logTiles("restored legacy")
         }
     }
 
