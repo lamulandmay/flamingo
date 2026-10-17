@@ -44,6 +44,17 @@ final class ThoughtReaderTests: LocalModelTestCase {
         XCTAssertEqual(try stored(c.uid!).text, review)
     }
 
+    func testTheFilesThePersonLinkedAreAddedAndWorkAskedForIsAnIntent() async throws {
+        let c = try v.think(review)
+        // A small model that called it a to-do and only named the deck.
+        modelSays(#"{"kind":"todo","action":"review-conflict","objects":["decks/q3-board-review.pptx"],"confidence":0.95}"#)
+        let outcome = await reader.read(uid: try XCTUnwrap(c.uid), on: ThoughtVault.deck)
+        guard case .saved(let u) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertEqual(u.kind, .intent)
+        XCTAssertEqual(u.intent?.objects, ["decks/q3-board-review.pptx#slide 7", "finance/q3-model.xlsx"])
+        XCTAssertEqual(try stored(c.uid!).meta?.kind, .intent)
+    }
+
     func testBelowSixtyPercentNothingIsWritten() async throws {
         let c = try v.think(review)
         let before = try String(contentsOf: v.store.sidecarURL(for: ThoughtVault.deck))

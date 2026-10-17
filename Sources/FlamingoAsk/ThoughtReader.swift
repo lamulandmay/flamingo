@@ -76,7 +76,7 @@ public struct ThoughtReader: Sendable {
                                              purpose: .understanding, label: "understand")
         let done = try await completeLocally(request)
         guard let json = LocalJSON.parse(done), let kindText = json["kind"]?.string,
-              let kind = ThoughtKind(rawValue: kindText.lowercased()) else {
+              let said = ThoughtKind(rawValue: kindText.lowercased()) else {
             throw AskError.stream("The model returned an unusable reading")
         }
         let confidence = min(1, max(0, json["confidence"]?.double ?? 0))
@@ -88,6 +88,16 @@ public struct ThoughtReader: Sendable {
                 if !objects.contains(resolved) { objects.append(resolved) }
             } else { unresolved.append(raw) }
         }
+        // The files the person linked are named by them, whatever the model made of the words.
+        for link in comment.links {
+            guard objects.count < 6, let ref = engine.resolveFile(Wikilink.components(of: link).target, near: file), !ref.isVirtual,
+                  !objects.contains(where: { $0 == ref.relativePath || $0.hasPrefix(ref.relativePath + "#") }) else { continue }
+            objects.append(ref.relativePath)
+        }
+        var kind = said
+        // Asking for work on files is an intent, whatever else the model called it.
+        if ["review-conflict", "compare-versions", "summarize", "find-related"].contains(action), objects.isEmpty == false, kind == .idea || kind == .todo { kind = .intent }
+        if action == "answer", kind == .idea { kind = .question }
         var intent: ThoughtIntent?
         if Self.actions.contains(action), action != "none", !objects.isEmpty || action == "remind" {
             intent = ThoughtIntent(action: action, objects: objects, confidence: confidence, model: done.model,

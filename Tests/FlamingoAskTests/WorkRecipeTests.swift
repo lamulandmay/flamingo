@@ -93,20 +93,39 @@ final class WorkRecipeTests: LocalModelTestCase {
         XCTAssertTrue(user.contains("Arc ASP"))
     }
 
-    func testAnInventedQuoteIsDroppedButTheLinkStays() async throws {
+    func testADisagreementWithAnInventedQuoteIsDroppedNotKept() async throws {
         model(says: { prompt in
-            let text = #"{"title":"T","tldr":"Prices differ.","verdict":"conflict","conflicts":[{"topic":"Price","a":{"passage":"@decks/q3-board-review.pptx#slide 7","quote":"We will sell Arc for forty dollars"},"b":{"passage":"@finance/q3-model.xlsx","quote":"Arc ASP 229"},"why":"They differ."}],"consistent":[],"next":""}"#
+            let text = #"{"title":"T","tldr":"Prices differ.","verdict":"conflict","conflicts":[{"topic":"Price","a":{"passage":"@decks/q3-board-review.pptx#slide 7","quote":"We will sell Arc for forty dollars"},"b":{"passage":"@finance/q3-model.xlsx","quote":"Arc ASP 229"},"why":"They differ."},{"topic":"Price again","a":{"passage":"@decks/q3-board-review.pptx#slide 7","quote":"Pricing Arc: $249"},"b":{"passage":"@finance/q3-model.xlsx","quote":"Arc ASP 229"},"why":"Also differs."}],"consistent":[],"next":""}"#
             return LocalCompletionRuntime.resolvePassageReferences(in: text, prompt: prompt)
         })
         let result = try await v.engine.work(request(.reviewConflict)) { _ in }
         XCTAssertFalse(result.memo.body.contains("forty dollars"))
-        XCTAssertTrue(result.memo.body.contains("[[decks/q3-board-review.pptx#slide 7]]"))
-        XCTAssertTrue(result.memo.body.contains("\u{201C}Arc ASP 229\u{201D}"), "a real quote is kept")
+        XCTAssertFalse(result.memo.body.contains("Price.**"), "the row with the invented quote is gone")
+        XCTAssertTrue(result.memo.body.contains("1. **Price again.**"), "the real one is renumbered: \(result.memo.body)")
+        XCTAssertTrue(result.memo.body.contains("\u{201C}Arc ASP 229\u{201D}"))
+    }
+
+    func testAConflictWithNoRealQuotesIsInvalid() async throws {
+        model(says: { prompt in
+            let text = #"{"title":"T","tldr":"Prices differ.","verdict":"conflict","conflicts":[{"topic":"Price","a":{"passage":"@decks/q3-board-review.pptx#slide 7","quote":"made up"},"b":{"passage":"@finance/q3-model.xlsx","quote":"also made up"},"why":"They differ."}],"consistent":[],"next":""}"#
+            return LocalCompletionRuntime.resolvePassageReferences(in: text, prompt: prompt)
+        })
+        do { _ = try await v.engine.work(request(.reviewConflict)) { _ in }; XCTFail("should throw") }
+        catch { guard case WorkError.invalidOutput = error else { return XCTFail("\(error)") } }
+    }
+
+    func testTwoIdenticalQuotesAreNotADisagreement() async throws {
+        model(says: { prompt in
+            let text = #"{"title":"T","tldr":"x","verdict":"conflict","conflicts":[{"topic":"Price","a":{"passage":"@decks/q3-board-review.pptx#slide 7","quote":"Arc Mini: $179"},"b":{"passage":"@decks/q3-board-review.pptx#slide 7","quote":"Arc Mini: $179"},"why":"same"}],"consistent":[],"next":""}"#
+            return LocalCompletionRuntime.resolvePassageReferences(in: text, prompt: prompt)
+        })
+        do { _ = try await v.engine.work(request(.reviewConflict)) { _ in }; XCTFail("should throw") }
+        catch { guard case WorkError.invalidOutput = error else { return XCTFail("\(error)") } }
     }
 
     func testTextThatCouldBecomeALinkOrAMarkerIsNeutralised() async throws {
         model(says: { prompt in
-            let text = #"{"title":"See [[secrets]] <!-- x -->","tldr":"Open [[/etc/passwd]] --> now","verdict":"conflict","conflicts":[{"topic":"[[a]]","a":{"passage":"@decks/q3-board-review.pptx#slide 7","quote":""},"b":{"passage":"@finance/q3-model.xlsx","quote":""},"why":"x\n## Injected heading"}],"consistent":[],"next":"Then\n## Do this"}"#
+            let text = #"{"title":"See [[secrets]] <!-- x -->","tldr":"Open [[/etc/passwd]] --> now","verdict":"conflict","conflicts":[{"topic":"[[a]]","a":{"passage":"@decks/q3-board-review.pptx#slide 7","quote":"Pricing Arc: $249"},"b":{"passage":"@finance/q3-model.xlsx","quote":"Arc ASP 229"},"why":"x\n## Injected heading"}],"consistent":[],"next":"Then\n## Do this"}"#
             return LocalCompletionRuntime.resolvePassageReferences(in: text, prompt: prompt)
         })
         let result = try await v.engine.work(request(.reviewConflict)) { _ in }

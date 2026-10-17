@@ -130,9 +130,11 @@ enum WorkPrompts {
         case .reviewConflict:
             return """
             Task: decide whether the passages disagree about the same fact (a number, date, name or claim). \
-            List each disagreement: `a` and `b` are two different passages, each with the exact words that \
-            disagree. `verdict` is "conflict", "consistent" or "unclear". Do not invent conflicts; if they \
-            agree, say what they agree on in `consistent`. `tldr` is two sentences at most and states the \
+            A disagreement is two passages giving DIFFERENT values for the SAME thing, for example $229 in \
+            one and $249 in the other. The same value in both is agreement, not a disagreement: never list \
+            it. List each disagreement: `a` and `b` are two different passages, each with the exact words \
+            that disagree. `verdict` is "conflict", "consistent" or "unclear". Do not invent conflicts; if \
+            they agree, say what they agree on in `consistent`. `tldr` is two sentences at most and states the \
             result with the numbers. `next` is one concrete step.
             """
         case .compareVersions:
@@ -202,8 +204,9 @@ enum WorkPrompts {
 // MARK: Validated output
 
 /// A model's reply, checked: every passage number was given to it, every quote is in the passage
-/// it names (a quote that isn't is dropped, never kept), and the text has no way to inject
-/// links or comment markers into a note.
+/// it names (a quote that isn't is dropped, and a disagreement or change whose two quotes aren't
+/// both real is dropped with it), and the text has no way to inject links or comment markers
+/// into a note.
 struct WorkOutput {
     struct Cite { var passage: Passage; var quote: String? }
     var title: String
@@ -237,7 +240,9 @@ struct WorkOutput {
         case .reviewConflict:
             var rows: [String] = []
             for (n, item) in (json["conflicts"]?.array ?? []).prefix(8).enumerated() {
-                guard let a = cite(item["a"]), let b = cite(item["b"]), a.passage.id != b.passage.id else { continue }
+                // A disagreement is two different places, each with the words that disagree, copied from it.
+                guard let a = cite(item["a"]), let b = cite(item["b"]), a.passage.id != b.passage.id,
+                      let qa = a.quote, let qb = b.quote, ThoughtPrivacy.compact(qa) != ThoughtPrivacy.compact(qb) else { continue }
                 note(a); note(b)
                 rows.append("\(n + 1). **\(text("topic", in: item, max: 100)).** \(line(a)) \u{00B7} \(line(b))\n   \(text("why", in: item))")
             }
@@ -252,7 +257,8 @@ struct WorkOutput {
         case .compareVersions:
             var rows: [String] = []
             for item in (json["changes"]?.array ?? []).prefix(10) {
-                guard let before = cite(item["before"]), let after = cite(item["after"]) else { continue }
+                guard let before = cite(item["before"]), let after = cite(item["after"]), before.quote != nil, after.quote != nil,
+                      ThoughtPrivacy.compact(before.quote ?? "") != ThoughtPrivacy.compact(after.quote ?? "") else { continue }
                 note(before); note(after)
                 rows.append("- **\(text("what", in: item, max: 160)).** before: \(line(before)) \u{00B7} after: \(line(after))")
             }

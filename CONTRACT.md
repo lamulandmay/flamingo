@@ -37,6 +37,24 @@ Ten sessions build this in parallel. This file is the one thing everyone reads f
 10. **Read DESIGN.md before writing any view.** No placeholder copy, no labels that restate
     the obvious, no emoji, no "Welcome". If a label can be removed, remove it.
 
+## Privacy: thoughts never leave this Mac
+
+Every feature that reads a thought runs on a model on this Mac and nowhere else: understanding a
+thought, `@ai` / `@flamingo` replies, the night shift and its memos, "Work on this now", echo and
+recall, and the daily briefing's ranking. The models are the local llama-server (loopback), Ollama
+on localhost, and Apple's on-device models. Never Claude, Claude Code, an API key or any cloud provider.
+
+- There is no setting, no consent prompt and no fallback to a remote model. With no local model
+  the job waits or fails quietly; it never escalates.
+- It is built in, not promised. `LocalEndpoint` (FlamingoAsk) can only be constructed for
+  `127.0.0.1`, `localhost` or `::1`, and every thought path takes a `LocalEndpoint` and never reads
+  Ask's provider setting. `FlamingoThoughts` has no remote client to reach for.
+- Chat may use a remote provider for questions about files. Before anything goes to one,
+  `AskEngine.run` removes every thought passage, every section found through a thought, and every
+  conversation turn that quoted or drew on one (`ConversationTurn.thoughtDerived`). Files are
+  still read; thoughts stay home.
+- `LocalOnlyTests` run each thought path through a network that refuses every host but loopback.
+
 ## Module map
 
 | Module | Path | Plan | Depends on |
@@ -50,6 +68,7 @@ Ten sessions build this in parallel. This file is the one thing everyone reads f
 | `FlamingoTrail` | `Sources/FlamingoTrail` | 07 | Core, Design |
 | `FlamingoDesign` | `Sources/FlamingoDesign` | 08 | — |
 | `FlamingoAsk` | `Sources/FlamingoAsk` | 09 | Core, Index, Design |
+| `FlamingoThoughts` | `Sources/FlamingoThoughts` | 16, 17 | Core, Index, Ask, Trail |
 | build, fixtures, QA | `scripts/`, `Resources/`, `fixtures/`, `README.md`, `ISSUES.md` | 10 | — |
 
 Tests live in `Tests/<Module>Tests` and belong to the module's session.
@@ -137,9 +156,19 @@ What the night shift (or "Work on this") writes about a thought, as Markdown Obs
 `.flamingo/work/<yyyy-MM-dd>/<slug>.md`. Front matter: `flamingo: memo`, `thought` (the uid), `on`,
 `recipe`, `verdict`, `sources` (each `path#anchor · modified`), `model`, `provider`, `tokens`,
 `created`; then `# title` and the memo. `.flamingo/work/ledger.jsonl` is the append-only record
-of that work, one JSON object per line. The thought it answers gets a reply whose visible text
+of that work, one JSON object per line (`event` is `night-start`, `queued`, `started`, `finished`,
+`replied`, `failed`, `night-end`, `catchup-start` or `catchup-end`; a job id is
+`<uid>:<recipe>:<8 hex of the sorted path|mtime|size of its sources>`). The thought it answers gets a reply whose visible text
 carries the summary and `[[links]]` to the sources and whose hidden `work` key names the memo.
 Thoughts are only ever read by models running on this Mac.
+
+### Briefing history — `.flamingo/briefing.json`
+
+What the morning briefing remembers, as JSON with sorted keys: `version`, `shown` (a thought's
+`uid` → the briefing days, `yyyy-MM-dd`, it was listed on without being acted on; kept two weeks),
+`seenMemos` (memo paths relative to `.flamingo`), `seenReplies` (uids of model replies) and
+`seenPairs` (suggested connections already shown). It holds no thought text. A briefing day starts
+at 04:00 local time. Written by the shell with `BriefingHistory`.
 
 ### Index — `.flamingo/index.sqlite`
 SQLite with FTS5. Schema is plan 05's. Other modules only use `IndexStore`.
