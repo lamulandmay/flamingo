@@ -14,7 +14,7 @@ APP=$SCR/FlamingoQA.app VAULT=$SCR/vault-$LOOK LOG=$SCR/qa-$LOOK.log
 BUNDLE_ID=com.flamingo.qa-briefing
 CH=qa.briefing.$$
 rm -rf $APP $VAULT
-cp -R build/Flamingo.app $APP; cp -R fixtures/vault $VAULT
+cp -R build/Flamingo.app $APP; cp -Rp fixtures/vault $VAULT
 scripts/briefing-seed.sh $VAULT >/dev/null
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" $APP/Contents/Info.plist
 codesign --force --sign - $APP >/dev/null 2>&1
@@ -80,8 +80,8 @@ Q briefing key esc; sleep 0.5
 Q briefing close; sleep 0.5
 
 echo "== relaunch the same day: no second briefing"
-quit; launch 8
-check "not again" "qa: briefing " "memos=" ; last "qa: briefing memos" 3
+N=$(grep -c "qa: briefing memos" $LOG); quit; launch 8
+[[ $(grep -c "qa: briefing memos" $LOG) == $N ]] && echo "ok   no second briefing on relaunch" || echo "FAIL relaunch opened it again"
 shot relaunch
 quit
 echo "lag:"; grep "worst lag" $LOG | tail -3
