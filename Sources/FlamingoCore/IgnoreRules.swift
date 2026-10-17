@@ -20,9 +20,11 @@ public struct IgnoreRules: Sendable, Equatable {
     public static let fileName = ".flamingoignore"
 
     /// What `<vault>/.flamingo/ignore` holds on first run: caches, package stores, build
-    /// output and VCS internals, so a whole home folder (or `/`) indexes what a person made.
-    /// Patterns with a `/` are anchored to the vault root, so the `Library/...` lines are
-    /// spelled `**/Library/...` to work whether the vault is `~` or `/`.
+    /// output, language environments, app data and VCS internals, so a whole home folder
+    /// (or `/`) indexes what a person made. On one home folder those trees were 82% of the
+    /// indexed text (9.5 of 11.7 GB) beside 80 MB of Markdown. Patterns with a `/` are
+    /// anchored to the vault root, so the `Library/...` lines are spelled `**/Library/...`
+    /// to work whether the vault is `~` or `/`.
     public static let defaultText = """
     # Flamingo skips what matches here. gitignore syntax, one pattern per line.
     # A pattern without a slash matches a name at any depth; `**/` matches any folders.
@@ -31,15 +33,21 @@ public struct IgnoreRules: Sendable, Equatable {
     .flamingo
     .git
     .build
+    build/
     node_modules
     .Trash
     .cache
     .npm
     **/.cargo/registry
+    .rustup
+    .gradle
+    .m2
+    **/go/pkg/mod
     **/Library/Caches
     **/Library/Containers
     **/Library/Developer
-    **/Library/Application Support/Google
+    **/Library/Application Support
+    **/Library/Arduino15
     *.photoslibrary
     *.app
     .ollama
@@ -47,6 +55,23 @@ public struct IgnoreRules: Sendable, Equatable {
     **/Downloads/*.dmg
     __pycache__
     DerivedData
+
+    # Language environments and tool caches
+    .venv
+    venv/
+    site-packages
+    dist-packages
+    conda/
+    .conda
+    miniconda3
+    anaconda3
+    miniforge3
+    .pytest_cache
+    .mypy_cache
+    .ruff_cache
+    .tox
+    .vscode
+    **/.local/share
 
     # Only matter when the vault is /
     /System/Volumes
@@ -58,6 +83,46 @@ public struct IgnoreRules: Sendable, Equatable {
     /.DocumentRevisions-V100
 
     """
+
+    /// Earlier `defaultText`s. An ignore file still holding one of these exactly was never
+    /// edited, so `VaultScanner.writeDefaultIgnoreFile` brings it up to date.
+    public static let previousDefaultTexts = [
+        """
+        # Flamingo skips what matches here. gitignore syntax, one pattern per line.
+        # A pattern without a slash matches a name at any depth; `**/` matches any folders.
+        # Edits take effect on the next reindex.
+
+        .flamingo
+        .git
+        .build
+        node_modules
+        .Trash
+        .cache
+        .npm
+        **/.cargo/registry
+        **/Library/Caches
+        **/Library/Containers
+        **/Library/Developer
+        **/Library/Application Support/Google
+        *.photoslibrary
+        *.app
+        .ollama
+        .docker
+        **/Downloads/*.dmg
+        __pycache__
+        DerivedData
+
+        # Only matter when the vault is /
+        /System/Volumes
+        /Volumes
+        /dev
+        /private/var/vm
+        /.Spotlight-V100
+        /.fseventsd
+        /.DocumentRevisions-V100
+
+        """,
+    ]
 
     /// Rules that ignore nothing.
     public static let empty = IgnoreRules(text: "")
@@ -98,7 +163,16 @@ public struct IgnoreRules: Sendable, Equatable {
             func matches(_ subject: Substring) -> Bool {
                 switch self {
                 case .literal(let s): return subject == s
-                case .suffix(let s): return subject.hasSuffix(s) && !subject.dropLast(s.count).contains("/")
+                case .suffix(let s):
+                    let b = s.utf8
+                    guard b.allSatisfy({ $0 < 0x80 }) else {
+                        return subject.hasSuffix(s) && !subject.dropLast(s.count).contains("/")
+                    }
+                    // An ASCII suffix can be compared byte-wise (it never starts mid-cluster);
+                    // `hasSuffix` and `dropLast` on Substring walk grapheme clusters.
+                    let a = subject.utf8
+                    guard a.count >= b.count, a.suffix(b.count).elementsEqual(b) else { return false }
+                    return !a.dropLast(b.count).contains(UInt8(ascii: "/"))
                 }
             }
         }
@@ -108,14 +182,17 @@ public struct IgnoreRules: Sendable, Equatable {
                 && lhs.directoryOnly == rhs.directoryOnly && lhs.anchored == rhs.anchored
         }
 
-        func matches(_ subject: String) -> Bool {
-            if let fast { return fast.matches(Substring(subject)) }
+        func matches(_ subject: String) -> Bool { matches(Substring(subject)) }
+
+        func matches(_ subject: Substring) -> Bool {
+            if let fast { return fast.matches(subject) }
             if let basenameFilter {
-                let base = subject.lastIndex(of: "/").map { subject[subject.index(after: $0)...] } ?? Substring(subject)
+                let base = subject.utf8.lastIndex(of: UInt8(ascii: "/")).map { subject[subject.utf8.index(after: $0)...] } ?? subject
                 guard basenameFilter.matches(base) else { return false }
             }
-            let range = NSRange(subject.startIndex..<subject.endIndex, in: subject)
-            return regex.firstMatch(in: subject, options: [], range: range) != nil
+            let string = String(subject)
+            let range = NSRange(string.startIndex..<string.endIndex, in: string)
+            return regex.firstMatch(in: string, options: [], range: range) != nil
         }
     }
 
@@ -150,27 +227,50 @@ public struct IgnoreRules: Sendable, Equatable {
         let path = IgnoreRules.normalize(relativePath)
         guard !path.isEmpty else { return false }
         if verdict(for: path, isDirectory: isDirectory) { return true }
-        // Proper ancestors: "a/b/c.txt" -> "a", "a/b".
-        var ancestor = ""
-        let components = path.split(separator: "/", omittingEmptySubsequences: true)
-        for component in components.dropLast() {
-            ancestor = ancestor.isEmpty ? String(component) : ancestor + "/" + component
-            if verdict(for: ancestor, isDirectory: true) { return true }
+        // Proper ancestors: "a/b/c.txt" -> "a", "a/b". Normalized paths have no leading or
+        // trailing slash; empty components ("a//b") are skipped as before.
+        let utf8 = path.utf8
+        var i = utf8.startIndex
+        while let slash = utf8[i...].firstIndex(of: UInt8(ascii: "/")) {
+            let ancestor = path[..<slash]
+            if !ancestor.hasSuffix("/"), verdict(for: Self.collapsingEmptyComponents(ancestor), isDirectory: true) { return true }
+            i = utf8.index(after: slash)
         }
         return false
     }
 
     /// The last-match-wins result for exactly this path, ignoring ancestors. The scanner uses
     /// this directly because it never descends into directories it already skipped.
+    /// `a//b` → `a/b`, as the old component-joining code produced; the common case returns
+    /// the slice's own string.
+    private static func collapsingEmptyComponents(_ s: Substring) -> String {
+        guard s.contains("//") else { return String(s) }
+        return s.split(separator: "/", omittingEmptySubsequences: true).joined(separator: "/")
+    }
+
     func verdict(for path: String, isDirectory: Bool) -> Bool {
-        let basename = path.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init) ?? path
+        guard !patterns.isEmpty else { return false }
+        // The scanner calls this once per file on a whole disk: take the basename as a
+        // slice instead of splitting the path into an array of components.
+        let name = Self.basename(of: path)
         var ignored = false
         for pattern in patterns {
             if pattern.directoryOnly && !isDirectory { continue }
-            let subject = pattern.anchored ? path : basename
-            if pattern.matches(subject) { ignored = !pattern.negated }
+            if pattern.anchored ? pattern.matches(Substring(path)) : pattern.matches(name) { ignored = !pattern.negated }
         }
         return ignored
+    }
+
+    /// The last non-empty `/`-separated component, or `path` itself when there is none. Walks
+    /// UTF-8 bytes: `/` is ASCII, so byte positions are valid string indices.
+    static func basename(of path: String) -> Substring {
+        let utf8 = path.utf8
+        let slash = UInt8(ascii: "/")
+        var end = utf8.endIndex
+        while end > utf8.startIndex, utf8[utf8.index(before: end)] == slash { end = utf8.index(before: end) }
+        var start = end
+        while start > utf8.startIndex, utf8[utf8.index(before: start)] != slash { start = utf8.index(before: start) }
+        return start == end ? Substring(path) : path[start..<end]
     }
 
     // MARK: - Parsing

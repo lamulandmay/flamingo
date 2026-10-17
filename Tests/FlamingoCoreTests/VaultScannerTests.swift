@@ -85,6 +85,14 @@ final class VaultScannerTests: XCTestCase {
         XCTAssertEqual(paths(VaultScanner.files(in: vault, ignore: .empty)), ["deck.key", "flat.app", "notes.txt"])
     }
 
+    func testOfficeOwnerFilesAreExcludedAcrossEveryScannerSurface() throws {
+        for path in ["~$deck.pptx", "folder/~$notes.docx", "~draft.txt", "real.pptx"] { try touch(path) }
+        XCTAssertEqual(Set(paths(VaultScanner.files(in: vault, ignore: .empty))), ["~draft.txt", "real.pptx"])
+        XCTAssertFalse(VaultScanner.children(of: "", in: vault, ignore: .empty).contains { $0.name == "~$deck.pptx" })
+        XCTAssertFalse(VaultScanner.admits("folder/~$notes.docx", isDirectory: false, ignore: .empty))
+        XCTAssertTrue(VaultScanner.admits("~draft.txt", isDirectory: false, ignore: .empty))
+    }
+
     func testHiddenFilesAreListedAndDefaultJunkIsExcluded() throws {
         try touch("keep.txt")
         try touch(".flamingo/notes/x.md")
@@ -111,15 +119,42 @@ final class VaultScannerTests: XCTestCase {
                                 "keep.txt", "sub/.hidden.txt"])
     }
 
-    func testLibraryIsIndexedExceptItsCaches() throws {
+    func testLibraryIsIndexedExceptItsCachesAndAppData() throws {
         try touch("Library/Preferences/x.plist")
         try touch("Library/Caches/com.x/blob")
         try touch("Library/Containers/com.x/Data/y")
         try touch("Library/Developer/Xcode/z")
         try touch("Library/Application Support/Google/Chrome/Default/History")
-        try touch("Library/Application Support/Notes/n.txt")
+        try touch("Library/Application Support/minecraft/saves/level.json")
+        try touch("Library/Arduino15/packages/esp32/tools/x.h")
+        try touch("Library/Mobile Documents/com~apple~CloudDocs/plan.md")
         try touch("proj/Library/x.swift")
-        XCTAssertEqual(scan(), ["Library/Application Support/Notes/n.txt", "Library/Preferences/x.plist", "proj/Library/x.swift"])
+        XCTAssertEqual(scan(), ["Library/Mobile Documents/com~apple~CloudDocs/plan.md", "Library/Preferences/x.plist", "proj/Library/x.swift"])
+    }
+
+    /// Build output, language environments and tool caches are machine-made: on one home
+    /// folder they were most of the indexed text.
+    func testEnvironmentsAndBuildOutputAreSkipped() throws {
+        try touch("proj/build/out/manifest.json")
+        try touch("proj/.venv/lib/python3.12/site-packages/numpy/core.py")
+        try touch("mlx-env/lib/python3.12/site-packages/mlx/nn.py")
+        try touch(".claude-science/conda/envs/r/lib/R/library/base/DESCRIPTION")
+        try touch("proj/.pytest_cache/v/cache/nodeids")
+        try touch(".vscode/extensions/ms-python/x.js")
+        try touch(".local/share/uv/python/cpython/lib/os.py")
+        try touch("proj/src/main.py")
+        try touch("notes/build")
+        XCTAssertEqual(scan(), ["notes/build", "proj/src/main.py"], "a file named like a skipped folder stays")
+    }
+
+    func testAnUnmodifiedOldDefaultIgnoreFileIsUpgraded() throws {
+        let old = try XCTUnwrap(IgnoreRules.previousDefaultTexts.first)
+        try fm.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
+        try old.trimmingCharacters(in: .newlines).write(to: vault.ignoreURL, atomically: true, encoding: .utf8)
+        XCTAssertTrue(VaultScanner.writeDefaultIgnoreFile(in: vault))
+        XCTAssertEqual(try String(contentsOf: vault.ignoreURL, encoding: .utf8), IgnoreRules.defaultText)
+        try (old + "secrets/\n").write(to: vault.ignoreURL, atomically: true, encoding: .utf8)
+        XCTAssertFalse(VaultScanner.writeDefaultIgnoreFile(in: vault), "an edited file is the user's")
     }
 
     func testDefaultIgnoreFileIsWrittenOnceAndThenEditable() throws {
