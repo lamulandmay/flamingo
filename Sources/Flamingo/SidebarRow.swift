@@ -8,6 +8,7 @@ import FlamingoDesign
 struct SidebarRow: View {
     let node: FileNode
     @EnvironmentObject var state: AppState
+    @Environment(\.flamingoRowSelected) private var selected
     @State private var hovering = false
 
     var body: some View {
@@ -23,6 +24,13 @@ struct SidebarRow: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: Theme.Space.s)
+            if node.isPin {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Theme.Color.textTertiary)
+                    .opacity(hovering || selected ? 0.9 : 0.55)
+                    .accessibilityLabel("Pinned folder")
+            }
             if let ref = node.ref, let count = state.commentCounts[ref], count > 0 {
                 Text(String(count))
                     .font(Theme.Font.small)
@@ -33,6 +41,8 @@ struct SidebarRow: View {
         }
         .padding(.trailing, Theme.Space.s)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .opacity(node.isFolder && !node.isWithinPin && !selected && !hovering ? 0.68 : 1)
+        .help(node.isPin ? "Pinned folder · " + (node.id.isEmpty ? state.vault?.name ?? "" : node.id) : node.id)
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
     }
@@ -49,6 +59,6 @@ struct SidebarRowHost: View {
         SidebarRow(node: node)
             .environmentObject(state)
             .environment(\.flamingoRowSelected, selected)
-            .id(node.id)   // a reused cell starts its hover state afresh
+            .id(ObjectIdentifier(node))   // a reused cell starts its hover state afresh
     }
 }

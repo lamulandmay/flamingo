@@ -15,10 +15,10 @@ final class DOCXTests: XCTestCase {
         let e = try report()
         XCTAssertEqual(e.sections.map(\.anchor), [
             "Q3 Field Report", "Overview", "Regional results", "North detail", "Key finding: retention",
-            "Next steps", "Appendix",
+            "Next steps", "Appendix", "Note 1", "Note 2",
         ].map { FileAnchor(kind: .node, value: $0) })
         XCTAssertEqual(e.sections.map(\.title), [nil, "Overview", "Regional results", "North detail",
-                                                 "Key finding: retention", "Next steps", "Appendix"])
+                                                 "Key finding: retention", "Next steps", "Appendix", "Note 1", "Note 2"])
         XCTAssertEqual(e.title, "Q3 Field Report")
         XCTAssertEqual(try Extract.extract(Fixtures.url("report.docx")), e)
     }
@@ -33,6 +33,7 @@ final class DOCXTests: XCTestCase {
             "Key finding: retention\nRetention held at 94 percent for Contoso, owner Dana Whitfield.\nOffice move to Seattle confirmed on 14 October 2026.",
             "Next steps\nHire two analysts\nOpen the Q3-Q4 review\nMinor point\nBudget is unchanged.",
             "Appendix\nMethod notes follow the 2025 template.",
+            "Source: regional CRM export, 2 October.", "Figures are unaudited.",
         ])
     }
 
@@ -44,11 +45,11 @@ final class DOCXTests: XCTestCase {
         XCTAssertEqual(e.text.components(separatedBy: "North doubled its pipeline").count - 1, 1)
     }
 
-    func testNotesFollowSectionsOutsideAnySection() throws {
+    func testNotesHaveTheirOwnSearchableAnchors() throws {
         let e = try report()
-        XCTAssertTrue(e.text.hasSuffix("Appendix\nMethod notes follow the 2025 template.\n\n"
-                                       + "Source: regional CRM export, 2 October.\nFigures are unaudited."))
-        XCTAssertFalse(e.sections.contains { $0.text.contains("CRM export") || $0.text.contains("unaudited") })
+        XCTAssertEqual(e.sections.suffix(2).map(\.anchor.value), ["Note 1", "Note 2"])
+        XCTAssertEqual(e.sections.suffix(2).map(\.text), ["Source: regional CRM export, 2 October.", "Figures are unaudited."])
+        XCTAssertEqual(e.text, e.sections.map(\.text).joined(separator: "\n\n"))
     }
 
     func testMainPartComesFromPackageRelationships() throws {
@@ -101,7 +102,8 @@ final class DOCXTests: XCTestCase {
         // XML cut off mid-document keeps what was read before the break.
         members["word/document.xml"] = String(xml[..<xml.range(of: "<w:tbl>")!.lowerBound])
         let partial = try DOCXExtractor().extract(build(members, "cut.docx"))
-        XCTAssertEqual(partial.sections.map(\.anchor.value), ["Q3 Field Report", "Overview", "Regional results"])
+        XCTAssertEqual(partial.sections.map(\.anchor.value), ["Q3 Field Report", "Overview", "Regional results", "Note 1", "Note 2"])
+        XCTAssertEqual(partial.coverage.state, .partial)
     }
 
     func testBenchmarkThreeHundredPages() throws {

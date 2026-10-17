@@ -652,6 +652,18 @@ final class ReviewRegressionTests: IndexTestCase {
         XCTAssertEqual(try store.search("quokka").first?.file, ref("doc.rtfd"))
     }
 
+    func testUnchangedPackageIsNotReextracted() throws {
+        try write("doc.rtfd/TXT.fltest", "steady narwhal")
+        try write("doc.rtfd/Pictures/notes.fltest", "more")
+        try store.reindex()
+        XCTAssertEqual(store.lastReindex?.extracted, 1)
+        try store.reindex()
+        XCTAssertEqual(store.lastReindex?.extracted, 0, "a package nobody touched is not read again on every pass")
+        try write("doc.rtfd/Pictures/notes.fltest", "more and deeper")
+        try store.reindex()
+        XCTAssertEqual(store.lastReindex?.extracted, 1, "an edit two folders down still counts")
+    }
+
     func testRenameSeenAsUpdateThenRemove() throws {
         let a = try write("a.fltest", "deck")
         let sidecars = SidecarStore(vault: vault)

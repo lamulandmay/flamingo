@@ -15,7 +15,7 @@ final class RegressionTests: XCTestCase {
 
     // 1 + 9: the note's id follows the file's actual identity.
 
-    func testMergedNoteCarriesTheIdOfTheFileItNowDescribes() throws {
+    func testExplicitMergedNoteCarriesTheIdOfTheFileItNowDescribes() throws {
         let a = try tv.file("a.txt")
         let b = try tv.file("b.txt")
         try store.append(Comment(timestamp: ts("2026-10-14 22:05"), text: "about a"), to: a)
@@ -23,7 +23,8 @@ final class RegressionTests: XCTestCase {
         let idA = try XCTUnwrap(try store.document(for: a)?.id)
         try tv.remove("b.txt")
         try tv.rename("a.txt", to: "b.txt")
-        XCTAssertEqual(try store.reconcile(), [SidecarStore.Move(from: a, to: b)])
+        XCTAssertThrowsError(try store.reconcile(), "automatic healing must not merge two file identities")
+        try store.move(sidecarFor: a, to: b) // an explicit merge remains supported
         XCTAssertEqual(try store.document(for: b)?.id, idA, "merged note carries the id of the file now at b.txt")
 
         try tv.rename("b.txt", to: "c.txt")

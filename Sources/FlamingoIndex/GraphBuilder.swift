@@ -18,7 +18,7 @@ extension IndexStore {
              + db.query("""
                 SELECT s.path, group_concat(coalesce(s.title, '') || char(10) || s.text, char(10)) FROM sections s
                 JOIN files f ON f.path = s.path
-                WHERE f.ext IN ('md', 'markdown') AND (instr(s.text, '[[') > 0 OR instr(s.title, '[[') > 0)
+                WHERE f.ext IN ('md', 'markdown', 'mdown', 'mkd', 'mdx') AND (instr(s.text, '[[') > 0 OR instr(s.title, '[[') > 0)
                 GROUP BY s.path ORDER BY s.path
                 """) { ($0.string(0), $0.string(1)) })
         }
@@ -26,7 +26,7 @@ extension IndexStore {
         for p in paths { nodes[p] = Self.node(p) }
         for (p, n) in counts { nodes[p, default: Self.node(p)].commentCount = n }
 
-        let resolver = LinkResolver(paths: paths)
+        let resolver = LinkResolver(paths: paths, aliases: try PathAliases(vault: vault).all())
         // Unresolved targets differing only in case are one node, spelled the same every build.
         var spellings: [String: String] = [:]
         for (_, text) in linking {
@@ -64,21 +64,34 @@ extension IndexStore {
 
     /// Comments on other files whose wikilinks resolve to `ref`, newest first.
     public func backlinks(to ref: FileRef) throws -> [(FileRef, Comment)] {
-        let stem = (ref.name as NSString).deletingPathExtension
         let rows = try read(snapshot: true) { db in
             try db.query("""
-                SELECT path, id, ts, anchor_kind, anchor_value, text FROM comments
+                SELECT path, id, ts, anchor_kind, anchor_value, text, provenance FROM comments
                 WHERE instr(text, '[[') > 0 ORDER BY ts DESC, rowid DESC
-                """) { (path: $0.string(0), comment: Self.comment($0, 1)) }
+                """) { (path: $0.string(0), comment: Self.comment($0, 1, provenanceColumn: 6)) }
         }
-        let resolver = LinkResolver(paths: try indexedPaths())
-        return rows.compactMap { row -> (FileRef, Comment)? in
-            guard row.path != ref.relativePath, row.comment.text.range(of: stem, options: .caseInsensitive) != nil else { return nil }
+        let resolver = LinkResolver(paths: try indexedPaths(), aliases: try PathAliases(vault: vault).all())
+        var found = rows.compactMap { row -> (FileRef, Comment)? in
+            guard row.path != ref.relativePath else { return nil }
             let hits = Wikilink.parse(row.comment.text).contains {
-                $0.range(of: stem, options: .caseInsensitive) != nil && resolver.resolve($0, from: row.path) == ref.relativePath
+                resolver.resolve($0, from: row.path) == ref.relativePath
             }
             return hits ? (FileRef(relativePath: row.path), row.comment) : nil
         }
+        let markdown = try read { db in
+            try db.query("""
+                SELECT s.path, s.anchor_kind, s.anchor_value, s.text, f.mtime FROM sections s
+                JOIN files f ON f.path = s.path WHERE f.ext IN ('md', 'markdown', 'mdown', 'mkd', 'mdx')
+                AND instr(s.text, '[[') > 0 AND (s.ord > 0 OR NOT EXISTS (SELECT 1 FROM sections other WHERE other.path = s.path AND other.ord > 0))
+                """) { ($0.string(0), Self.anchor($0, 1), $0.string(3), $0.double(4)) }
+        }
+        for (path, anchor, text, mtime) in markdown where path != ref.relativePath {
+            guard Wikilink.parse(text).contains(where: { resolver.resolve($0, from: path) == ref.relativePath }) else { continue }
+            let date = Date(timeIntervalSince1970: mtime)
+            let id = SidecarFormat.stableID(target: path, timestamp: "markdown", anchor: anchor, text: text, occurrence: 0)
+            found.append((FileRef(relativePath: path), Comment(id: id, timestamp: date, anchor: anchor, text: text)))
+        }
+        return found.sorted { $0.1.timestamp > $1.1.timestamp }
     }
 
     static func node(_ path: String) -> Graph.Node {
@@ -98,7 +111,7 @@ struct EdgeKey: Hashable {
 struct LinkResolver {
     private let resolver: Wikilink.Resolver
 
-    init(paths: [String]) { resolver = Wikilink.Resolver(candidates: paths.map(FileRef.init(relativePath:))) }
+    init(paths: [String], aliases: [String: String] = [:]) { resolver = Wikilink.Resolver(candidates: paths.map(FileRef.init(relativePath:)), aliases: aliases) }
 
     /// `source` is the linking file's path; `""` when there is none.
     func resolve(_ target: String, from source: String) -> String? {

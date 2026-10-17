@@ -6,11 +6,18 @@ import FlamingoCore
 /// the shell's `AnchorNavigator` while on screen: ⌘↑/⌘↓ skip ten seconds, a chip for
 /// 1:23 seeks there. Never autoplays. Plan 01 owns.
 struct MediaPreview: NSViewRepresentable {
-    let state: AppState
+    let pane: DocumentPane
     let file: FileRef
     let url: URL
     let modified: Date?
     let jump: JumpRequest?
+
+    init(pane: DocumentPane, file: FileRef, url: URL, modified: Date?, jump: JumpRequest?) {
+        self.pane = pane; self.file = file; self.url = url; self.modified = modified; self.jump = jump
+    }
+    init(state: AppState, file: FileRef, url: URL, modified: Date?, jump: JumpRequest?) {
+        self.init(pane: state.activePane, file: file, url: url, modified: modified, jump: jump)
+    }
 
     func makeCoordinator() -> MediaPreviewCoordinator { MediaPreviewCoordinator() }
 
@@ -18,7 +25,7 @@ struct MediaPreview: NSViewRepresentable {
         let view = AVPlayerView()
         view.showsFullScreenToggleButton = true
         view.videoGravity = .resizeAspect
-        context.coordinator.attach(view, state: state)
+        context.coordinator.attach(view, pane: pane)
         return view
     }
 
@@ -36,7 +43,7 @@ final class MediaPreviewCoordinator: NSObject, AnchorNavigator {
     /// Seconds per ⌘↑/⌘↓.
     private static let stepSeconds = 10.0
 
-    private weak var state: AppState?
+    private weak var pane: DocumentPane?
     private weak var playerView: AVPlayerView?
     private var player: AVPlayer?
     private var timeObserver: Any?
@@ -51,25 +58,27 @@ final class MediaPreviewCoordinator: NSObject, AnchorNavigator {
 
     var anchorKind: FileAnchor.Kind { .time }
 
-    func attach(_ view: AVPlayerView, state: AppState) {
-        self.state = state
+    func attach(_ view: AVPlayerView, pane: DocumentPane) {
+        self.pane = pane
         playerView = view
+        pane.requestFocus = { [weak view] in if let view { view.window?.makeFirstResponder(view) } }
     }
 
     func detach() {
         unload()
-        if let state, state.navigator === self { state.navigator = nil }
+        if let pane, pane.navigator === self { pane.navigator = nil }
         playerView = nil
     }
 
     /// From `updateNSView`: swaps the player when the file (or its contents) changed,
     /// then applies a pending jump request exactly once.
     func show(_ file: FileRef, url: URL, modified: Date?, jump: JumpRequest?) {
-        guard let state, let playerView else { return }
+        guard let pane, let playerView else { return }
         inViewUpdate = true
         defer { inViewUpdate = false }
-        if state.navigator !== self { state.navigator = self }
+        if pane.navigator !== self { pane.navigator = self }
 
+        let firstPresentation = self.url == nil
         if url != self.url || modified != self.modified {
             unload()
             self.file = file
@@ -89,8 +98,8 @@ final class MediaPreviewCoordinator: NSObject, AnchorNavigator {
         }
         if let jump, jump.file == file, jump.id != lastAppliedJumpID {
             lastAppliedJumpID = jump.id
-            seek(to: jump.anchor)
-        }
+            seek(to: firstPresentation ? (pane.anchor ?? jump.anchor) : jump.anchor)
+        } else if firstPresentation, let anchor = pane.anchor { seek(to: anchor) }
     }
 
     private func unload() {
@@ -119,10 +128,10 @@ final class MediaPreviewCoordinator: NSObject, AnchorNavigator {
 
     func jump(to anchor: FileAnchor) {
         // A stale navigator (selection just changed, view not yet swapped) must not move.
-        guard let state, state.selected == file else { return }
+        guard let pane, pane.file == file else { return }
         // `AppState.jumpToAnchor` publishes the same request; mark it applied so
         // `updateNSView` does not seek a second time.
-        if let request = state.jumpRequest, request.file == file, request.anchor == anchor {
+        if let request = pane.jumpRequest, request.file == file, request.anchor == anchor {
             lastAppliedJumpID = request.id
         }
         seek(to: anchor)
@@ -160,11 +169,11 @@ final class MediaPreviewCoordinator: NSObject, AnchorNavigator {
     /// Deferred while SwiftUI is updating the view: publishing from inside an update is
     /// not allowed.
     private func publish(_ anchor: FileAnchor) {
-        guard let state, let file, state.selected == file, state.navigator === self else { return }
+        guard let pane, let file, pane.file == file, pane.navigator === self else { return }
         if inViewUpdate {
             Task { @MainActor [weak self] in self?.publish(anchor) }
             return
         }
-        if state.anchor != anchor { state.anchor = anchor }
+        if pane.anchor != anchor { pane.anchor = anchor }
     }
 }

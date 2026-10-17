@@ -9,6 +9,8 @@ import FlamingoExtract
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
     private var swipes: SwipeNavigator?
+    var undoRouting: UndoRouting?
+    var globalSearchShortcut: GlobalSearchShortcut?
     let state = AppState()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -40,6 +42,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.isMovableByWindowBackground = true
         w.minSize = NSSize(width: 820, height: 480)
         w.tabbingMode = .disallowed
+        // Closing only hides it, so the Dock icon can show it again.
+        w.isReleasedWhenClosed = false
         w.backgroundColor = Theme.NS.bg
         w.contentView = NSHostingView(rootView: RootView().environmentObject(state))
         if !w.setFrameUsingName("FlamingoMain") { w.center() }
@@ -47,6 +51,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.delegate = self
         window = w
         state.hostWindow = w
+        undoRouting = UndoRouting(window: w, history: state.actionHistory,
+                                  undo: { [weak self] in self?.state.undoAction() },
+                                  redo: { [weak self] in self?.state.redoAction() })
         swipes = SwipeNavigator(state: state, window: w)
         state.windowWidth = w.frame.width
         w.makeKeyAndOrderFront(nil)
@@ -54,6 +61,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         CaptureController.shared.installInAppHotkey()
         CaptureController.shared.installGlobalHotkey()   // stays off until the captureGlobal default is on
+        globalSearchShortcut = GlobalSearchShortcut { [weak self] in
+            // Leave the Carbon callback before showing the nonactivating search panel.
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                PaletteController.shared.showFromAnyApp(state: self.state)
+            }
+        }
+        globalSearchShortcut?.install()
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--vault"), i + 1 < args.count {
             state.open(URL(fileURLWithPath: args[i + 1]))
@@ -77,9 +92,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// ⌘Q is the only way to quit. Closing the window leaves Flamingo running; the Dock icon
+    /// brings the window back.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard state.preserveOpenDrafts() else { window?.makeKeyAndOrderFront(nil); return .terminateCancel }
+        return .terminateNow
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool { state.preserveOpenDrafts() }
 
     func applicationWillTerminate(_ notification: Notification) {
+        globalSearchShortcut?.uninstall()
+        state.persistWorkspace()
+        _ = state.preserveOpenDrafts()
         state.session?.trail.flush()
         state.session?.stop()
     }
@@ -106,7 +133,7 @@ enum AppIcon {
             let inset = rect.insetBy(dx: side * 0.1, dy: side * 0.1)
             let radius = inset.width * 0.225
             Theme.NS.accent.setFill()
-            NSBezierPath(roundedRect: inset, xRadius: radius, yRadius: radius).fill()
+            NSBezierPath(squircleIn: inset, radius: radius).fill()
             let config = NSImage.SymbolConfiguration(pointSize: side * 0.46, weight: .medium)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [.white]))
             if let symbol = (NSImage(systemSymbolName: "bird.fill", accessibilityDescription: nil)

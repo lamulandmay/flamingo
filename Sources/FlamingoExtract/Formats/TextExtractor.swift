@@ -36,10 +36,13 @@ public struct TextExtractor: Extractor {
         let (data, truncated) = try Self.read(url, limit: notebook ? Self.notebookReadLimit : Self.readLimit)
         if notebook { return try Self.notebook(data, url) }
         let text = try Self.decode(data, url: url, truncated: truncated, html: Self.html.contains(ext))
-        if Self.isBlank(text) { return Extracted(text: "") }
-        if Self.markdown.contains(ext) { return MarkdownOutline.extract(text) }
-        if Self.html.contains(ext) { return HTMLText.extract(text) }
-        return Extracted(sections: [Section(anchor: Self.firstLine, text: text)])
+        var out: Extracted
+        if Self.isBlank(text) { out = Extracted(text: "") }
+        else if Self.markdown.contains(ext) { out = MarkdownOutline.extract(text) }
+        else if Self.html.contains(ext) { out = HTMLText.extract(text) }
+        else { out = Extracted(sections: [Section(anchor: Self.firstLine, text: text)]) }
+        if truncated { out.coverage = ExtractionCoverage(.partial, reason: "Source text exceeds the byte budget.") }
+        return out
     }
 
     // MARK: - Reading and decoding

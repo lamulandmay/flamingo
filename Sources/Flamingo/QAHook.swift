@@ -1,4 +1,5 @@
 import AppKit
+import FlamingoCore
 
 /// Headless QA, on only when `FLAMINGO_DEBUG` is set: keys sent as a distributed notification
 /// are delivered to the app's frontmost window, even while another app is active (macOS
@@ -7,9 +8,13 @@ import AppKit
 ///     postnote com.flamingo.qa "key 126"         ↑
 ///     postnote com.flamingo.qa "key 40 cmd"      ⌘K
 ///     postnote com.flamingo.qa "type clamp"
+///     postnote com.flamingo.qa "menu Leave a Thought"
+///     postnote com.flamingo.qa "focus ThoughtNSTextView"
+///     postnote com.flamingo.qa "thought see [[q3-model.xlsx]]"
 @MainActor
 enum QAHook {
-    static let name = Notification.Name("com.flamingo.qa")
+    /// `FLAMINGO_QA_CHANNEL` picks another name, so concurrent test builds don't hear each other.
+    static let name = Notification.Name(ProcessInfo.processInfo.environment["FLAMINGO_QA_CHANNEL"] ?? "com.flamingo.qa")
     private static var observer: NSObjectProtocol?
 
     static func install() {
@@ -27,6 +32,44 @@ enum QAHook {
         guard parts.count == 2 else { return }
         if parts[0] == "type" {
             for ch in parts[1] { send(code: 0, chars: String(ch), flags: []) }
+            return
+        }
+        // `thought Pricing contradicts [[q3-model.xlsx]]`: saves on the open file and celebrates,
+        // as the capture panel does, without needing the panel to hold key focus.
+        if parts[0] == "thought" {
+            guard let state = (NSApp.delegate as? AppDelegate)?.state, let file = state.selected else { return }
+            let comment = Comment(anchor: state.anchor, text: parts[1])
+            Task { @MainActor in
+                do { try await state.saveComment(comment, to: file); state.celebrate(comment, on: file) }
+                catch { Log.debug("qa: thought not saved: \(error)") }
+            }
+            return
+        }
+        // `menu Leave a Thought`: a background app's key equivalents don't fire, so run the item.
+        if parts[0] == "menu" {
+            func find(_ menu: NSMenu?) -> NSMenuItem? {
+                for item in menu?.items ?? [] {
+                    if item.title == parts[1], item.action != nil { return item }
+                    if let hit = find(item.submenu) { return hit }
+                }
+                return nil
+            }
+            guard let item = find(NSApp.mainMenu), let action = item.action else { return Log.debug("qa: no menu item \(parts[1])") }
+            NSApp.sendAction(action, to: item.target, from: item)
+            return
+        }
+        // `focus ThoughtNSTextView`: the keyboard into the first view of that class, for
+        // fields that don't take focus on their own and can't be clicked headlessly.
+        if parts[0] == "focus" {
+            func find(_ view: NSView) -> NSView? {
+                if String(describing: type(of: view)) == parts[1] { return view }
+                for sub in view.subviews { if let hit = find(sub) { return hit } }
+                return nil
+            }
+            let windows = NSApp.orderedWindows.filter(\.isVisible)
+            guard let (window, view) = windows.lazy.compactMap({ w in w.contentView.flatMap(find).map { (w, $0) } }).first
+            else { return Log.debug("qa: no view \(parts[1])") }
+            window.makeFirstResponder(view)
             return
         }
         let args = parts[1].split(separator: " ").map(String.init)
@@ -53,7 +96,7 @@ enum QAHook {
         let map: [UInt16: String] = [0: "a", 11: "b", 8: "c", 2: "d", 14: "e", 3: "f", 5: "g", 4: "h", 34: "i", 38: "j",
                                      40: "k", 37: "l", 46: "m", 45: "n", 31: "o", 35: "p", 12: "q", 15: "r", 1: "s",
                                      17: "t", 32: "u", 9: "v", 13: "w", 7: "x", 16: "y", 6: "z", 18: "1", 19: "2",
-                                     20: "3", 21: "4", 33: "[", 30: "]"]
+                                     20: "3", 21: "4", 33: "[", 30: "]", 42: "\\"]
         return map[code] ?? ""
     }
 

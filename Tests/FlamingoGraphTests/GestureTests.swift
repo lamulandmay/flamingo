@@ -6,7 +6,7 @@ import AppKit
 private final class RecordingTarget: GraphInteractionTarget {
     enum Call: Equatable {
         case hover(Int?), click(Int), activate(Int), begin(Int), drag(Int, CGPoint), end(Int), unpin(Int)
-        case fitAll, moved, select(GraphDirection), open, type(String), escape
+        case fitAll, moved, select(GraphDirection), open, type(String), clearSelection, escape
     }
 
     var camera = GraphCamera()
@@ -39,6 +39,7 @@ private final class RecordingTarget: GraphInteractionTarget {
     func moveSelection(_ direction: GraphDirection) { calls.append(.select(direction)) }
     func openSelection() { calls.append(.open) }
     func type(_ text: String) { calls.append(.type(text)) }
+    func clearSelection() { calls.append(.clearSelection) }
     func escape() { calls.append(.escape) }
 
     /// Calls without hover noise.
@@ -373,14 +374,30 @@ final class GestureTests: XCTestCase {
         XCTAssertEqual(target.calls, [.open])
     }
 
+    func testSpaceAndEscapeAreConsumedWithoutRepeatingActions() {
+        XCTAssertTrue(recognizer.keyDown(key(GraphKeyCode.space, " ")))
+        XCTAssertTrue(recognizer.keyDown(key(GraphKeyCode.space, " ", repeat: true)))
+        XCTAssertTrue(recognizer.keyDown(key(GraphKeyCode.escape, "\u{1B}")))
+        XCTAssertTrue(recognizer.keyDown(key(GraphKeyCode.escape, "\u{1B}", repeat: true)))
+        XCTAssertEqual(target.calls, [.clearSelection, .escape])
+    }
+
+    func testCommandAndControlDeselectKeysAreLeftToTheSystem() {
+        for mods in [NSEvent.ModifierFlags.command, .control] {
+            XCTAssertFalse(recognizer.keyDown(key(GraphKeyCode.space, " ", mods)))
+            XCTAssertFalse(recognizer.keyDown(key(GraphKeyCode.escape, "\u{1B}", mods)))
+        }
+        XCTAssertEqual(target.calls, [])
+    }
+
     func testPrintableCharactersGoToFilter() {
         let cases: [(UInt16, String, NSEvent.ModifierFlags)] = [
-            (0, "a", []), (41, ":", .shift), (18, "1", []), (49, " ", []), (32, "ü", .option), (47, ".", []),
+            (0, "a", []), (41, ":", .shift), (18, "1", []), (32, "ü", .option), (47, ".", []),
         ]
         for (code, chars, mods) in cases {
             XCTAssertTrue(recognizer.keyDown(key(code, chars, mods)), chars)
         }
-        XCTAssertEqual(target.calls, [.type("a"), .type(":"), .type("1"), .type(" "), .type("ü"), .type(".")])
+        XCTAssertEqual(target.calls, [.type("a"), .type(":"), .type("1"), .type("ü"), .type(".")])
     }
 
     func testModifiedAndNonPrintableKeysAreNotTyped() {

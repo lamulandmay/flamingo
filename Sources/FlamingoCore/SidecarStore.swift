@@ -120,6 +120,28 @@ public final class SidecarStore: @unchecked Sendable {
         try locked { try write(document, for: ref) }
     }
 
+    /// Restore a captured note only while its current content still matches the
+    /// action's expected state. A nil replacement removes the sidecar, not its file.
+    public func replaceDocument(_ replacement: SidecarDocument?, for ref: FileRef,
+                                expecting expected: SidecarDocument?) throws {
+        try locked {
+            guard try read(ref) == expected else { throw ReplacementError.changedSinceAction(ref.relativePath) }
+            if let replacement { try write(replacement, for: ref) }
+            else { try removeLocked(ref) }
+        }
+    }
+
+    public enum ReplacementError: LocalizedError {
+        case changedSinceAction(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .changedSinceAction(let path):
+                return "Thoughts on \(path) changed since this action. The newer thoughts were preserved."
+            }
+        }
+    }
+
     /// Deletes the note for `ref` (and folders it leaves empty). No error if absent.
     public func removeSidecar(for ref: FileRef) throws {
         try locked { try removeLocked(ref) }
@@ -129,6 +151,45 @@ public final class SidecarStore: @unchecked Sendable {
     /// the two are merged, `new`'s comments first. No-op if `old` has no note.
     public func move(sidecarFor old: FileRef, to new: FileRef) throws {
         try locked { try moveLocked(from: old, to: new) }
+    }
+
+    /// Follows an identity-confirmed rename without moving a replacement file's note.
+    /// A missing or differently identified source note is an idempotent no-op. A
+    /// conflicting destination throws before any note is merged or removed. All checks
+    /// and note writes share the process/advisory lock used by ordinary comment edits.
+    @discardableResult
+    public func move(sidecarFor old: FileRef, to new: FileRef, matching expectedID: UUID) throws -> Bool {
+        try locked { try moveMatchingLocked(from: old, to: new, identity: expectedID) }
+    }
+
+    private func moveMatchingLocked(from old: FileRef, to new: FileRef, identity expectedID: UUID) throws -> Bool {
+        try validate(old); try validate(new)
+        func checkDestination() throws {
+            guard try FileIdentity.existingID(for: vault.url(for: new)) == expectedID else {
+                throw SidecarError.identityMismatch(path: new.relativePath)
+            }
+        }
+        try checkDestination()
+        guard old != new, var document = try read(old), document.id == expectedID else { return false }
+        let oldURL = sidecarURL(for: old), newURL = sidecarURL(for: new)
+        let sameNote = isSameFile(oldURL, newURL)
+        if !sameNote, var destination = try read(new) {
+            guard destination.id == expectedID else { throw SidecarError.identityMismatch(path: new.relativePath) }
+            destination.merge(document)
+            document = destination
+        }
+        document.target = new
+        document.id = expectedID
+        try checkDestination()
+        if sameNote {
+            if rename(oldURL.path, newURL.path) != 0 { throw SidecarError.writeFailed(path: newURL.path, errno: errno) }
+        }
+        // Keep the proven identity; ordinary write() deliberately rebinds a note to
+        // its current source, which is inappropriate when retrying a historical move.
+        try AtomicFile.write(Data(SidecarFormat.render(document).utf8), to: newURL)
+        try checkDestination()
+        if !sameNote { try removeLocked(old) }
+        return true
     }
 
     // MARK: Reconcile
@@ -147,17 +208,26 @@ public final class SidecarStore: @unchecked Sendable {
     /// `id`, or whose id is nowhere, stay as orphans.
     @discardableResult
     public func reconcile() throws -> [Move] {
-        try locked {
+        // The slow parts run before taking the lock: a case-exact existence check per note
+        // (about 90 ms for 1,400 notes) and, only if some note lost its file, a walk of the
+        // whole vault for identities. A thought saved meanwhile waits for the moves alone.
+        // Everything is checked again under the lock before a note moves.
+        var orphans: [(ref: FileRef, id: UUID)] = []
+        for ref in try sidecarRefs() where !vault.existsExactly(ref) {
+            if let id = try? document(for: ref)?.id { orphans.append((ref, id)) }
+        }
+        guard !orphans.isEmpty else { return [] }
+        let carriers = FileIdentity.carriers(in: vault)
+        return try locked {
             var moves: [Move] = []
-            var carriers: [UUID: [FileRef]]? = nil
-            for ref in try sidecarRefsLocked() where !vault.existsExactly(ref) {
-                guard let doc = try? read(ref), let id = doc.id else { continue }
-                if carriers == nil { carriers = FileIdentity.carriers(in: vault) }
-                var candidates = (carriers?[id] ?? []).filter { $0 != ref }
+            for (ref, expected) in orphans where !vault.existsExactly(ref) {
+                guard let doc = try? read(ref), let id = doc.id, id == expected else { continue }
+                var candidates = (carriers[id] ?? []).filter { $0 != ref }
                 if candidates.count > 1 { candidates = candidates.filter { !hasSidecar(for: $0) } }
                 guard candidates.count == 1, let found = candidates.first else { continue }
-                try moveLocked(from: ref, to: found)
-                moves.append(Move(from: ref, to: found))
+                if try moveMatchingLocked(from: ref, to: found, identity: id) {
+                    moves.append(Move(from: ref, to: found))
+                }
             }
             return moves
         }
@@ -190,7 +260,7 @@ public final class SidecarStore: @unchecked Sendable {
             for other in try sidecarRefsLocked() where other != ref {
                 guard let doc = try? read(other), doc.id == carried else { continue }
                 if !vault.existsExactly(other) {
-                    try moveLocked(from: other, to: ref)
+                    _ = try moveMatchingLocked(from: other, to: ref, identity: carried)
                     if let adopted = try read(ref) { return adopted }
                 } else if (try? FileIdentity.existingID(for: vault.url(for: other))) == carried {
                     let fresh = UUID()
@@ -278,19 +348,34 @@ public final class SidecarStore: @unchecked Sendable {
     }
 
     private func sidecarRefsLocked() throws -> [FileRef] {
-        let fm = FileManager.default
-        var isDir: ObjCBool = false
-        guard fm.fileExists(atPath: vault.notesDir.path, isDirectory: &isDir), isDir.boolValue else { return [] }
-        let keys: Set<URLResourceKey> = [.isRegularFileKey]
-        guard let e = fm.enumerator(at: vault.notesDir, includingPropertiesForKeys: Array(keys), options: []) else { return [] }
+        // readdir, not FileManager's enumerator: no URL (and no path standardisation) per note.
+        let root = vault.notesDir.path
         var refs: [FileRef] = []
-        for case let url as URL in e {
-            guard url.pathExtension == "md",
-                  (try? url.resourceValues(forKeys: keys))?.isRegularFile == true,
-                  let ref = target(ofSidecar: url) else { continue }
-            refs.append(ref)
+        func walk(_ rel: String) {
+            let dir = rel.isEmpty ? root : root + "/" + rel
+            guard let entries = VaultScanner.readDirectory(dir) else { return }
+            for entry in entries {
+                let childRel = rel.isEmpty ? entry.name : rel + "/" + entry.name
+                var kind = entry.kind
+                if kind == .unknown {
+                    var st = stat()
+                    guard lstat(dir + "/" + entry.name, &st) == 0 else { continue }
+                    kind = (st.st_mode & S_IFMT) == S_IFDIR ? .directory : ((st.st_mode & S_IFMT) == S_IFREG ? .regular : .other)
+                }
+                switch kind {
+                case .directory:
+                    walk(childRel)
+                case .regular:
+                    // `name.md`; not `.md` or `..md`, which have no extension by URL's rules.
+                    guard entry.name.hasSuffix(".md"), entry.name.dropLast(3).contains(where: { $0 != "." }) else { continue }
+                    refs.append(FileRef(relativePath: String(childRel.dropLast(3))))
+                default:
+                    continue
+                }
+            }
         }
-        return refs.sorted()
+        walk("")
+        return FinderOrder.sorted(refs, by: \.relativePath)
     }
 
     /// Removes `dir` and its parents while they are empty, stopping at `notesDir`.

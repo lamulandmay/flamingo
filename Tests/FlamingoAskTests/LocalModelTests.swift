@@ -50,6 +50,7 @@ final class LocalModelTests: XCTestCase {
         XCTAssertEqual(status, ["loading qwen3.8-27b"])
         XCTAssertEqual(text, "Keep **$49** [1].")
         XCTAssertEqual(answer?.citations.count, 1)
+        XCTAssertEqual(answer?.model, LlamaServer.modelName)
 
         let (request, body) = try XCTUnwrap(MockAPI.requests.first)
         XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8081/v1/chat/completions")
@@ -113,6 +114,14 @@ final class LocalModelTests: XCTestCase {
         let (model, projector) = try LlamaServer.shared.files()
         XCTAssertEqual(model.lastPathComponent, "Qwen-Q5.gguf")
         XCTAssertEqual(projector?.lastPathComponent, "mmproj-F16.gguf")
+        XCTAssertTrue(LlamaServer.shared.modelAlias.hasPrefix("flamingo-"))
+        XCTAssertEqual(LlamaServer.shared.displayName, "Qwen-Q5.gguf")
+    }
+
+    func testDistinctConfiguredModelsCannotReuseTheSameAlias() {
+        XCTAssertEqual(LlamaServer.alias(for: "/models/one.gguf|123"), LlamaServer.alias(for: "/models/one.gguf|123"))
+        XCTAssertNotEqual(LlamaServer.alias(for: "/models/one.gguf|123"), LlamaServer.alias(for: "/models/two.gguf|123"))
+        XCTAssertNotEqual(LlamaServer.alias(for: "/models/one.gguf|123"), LlamaServer.alias(for: "/models/one.gguf|456"))
     }
 }
 

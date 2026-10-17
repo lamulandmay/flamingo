@@ -14,16 +14,19 @@ public struct Passage: Sendable, Equatable, Identifiable {
     public var text: String
     /// When the comment was written. Sections have none.
     public var timestamp: Date?
+    public var provenance: CommentProvenance?
+    public var commentID: UUID?
 
     public init(id: Int, kind: Kind, file: FileRef, anchor: FileAnchor? = nil, title: String? = nil,
-                text: String, timestamp: Date? = nil) {
+                text: String, timestamp: Date? = nil, provenance: CommentProvenance? = nil, commentID: UUID? = nil) {
         self.id = id; self.kind = kind; self.file = file; self.anchor = anchor
         self.title = title; self.text = text; self.timestamp = timestamp
+        self.provenance = provenance; self.commentID = commentID
     }
 
     /// `[3]`, as the model writes it.
     public var tag: String { "[\(id)]" }
-    public var citation: Citation { Citation(file: file, anchor: anchor) }
+    public var citation: Citation { Citation(file: file, anchor: anchor, excerpt: text, commentID: commentID, provenance: provenance) }
 }
 
 extension Passage {
@@ -34,6 +37,10 @@ extension Passage {
         if let anchor { attrs += " at=\"\(anchor.kind.rawValue) \(Self.attribute(anchor.value))\"" }
         if let title, !title.isEmpty { attrs += " title=\"\(Self.attribute(title))\"" }
         if let timestamp { attrs += " date=\"\(Self.day.string(from: timestamp))\"" }
+        if kind == .comment {
+            attrs += " author=\"\(provenance?.origin.rawValue ?? "human")\""
+            if let model = provenance?.model { attrs += " model=\"\(Self.attribute(model))\"" }
+        }
         return "<passage \(attrs)>\n\(Self.body(text))\n</passage>"
     }
 

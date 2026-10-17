@@ -46,6 +46,13 @@ final class SemanticTests: XCTestCase {
         XCTAssertTrue(try store.search("pay cost", limit: 5).allSatisfy { $0.file.relativePath != "lamp.md" }, "below the floor")
     }
 
+    func testLexicalSearchDoesNotMixInMeaningOnlyHits() throws {
+        store.embedPending()
+        XCTAssertFalse(try store.search("pay cost").isEmpty)
+        XCTAssertTrue(try store.search("pay cost", inFolder: nil, includeSemantic: false).isEmpty)
+        XCTAssertTrue(try store.searchSections("pay cost", inFolder: nil, includeSemantic: false).isEmpty)
+    }
+
     func testKeywordHitsStayFirst() throws {
         store.embedPending()
         try write("cheap.md", "Pay what you want for the lamp.")
@@ -69,6 +76,21 @@ final class SemanticTests: XCTestCase {
         XCTAssertEqual(store.embedPending(), 0)
         XCTAssertEqual(try store.search("price", limit: 5).map(\.file.relativePath), ["money.md"])
         XCTAssertTrue(try store.search("pay cost", limit: 5).isEmpty)
+    }
+
+    func testSemanticSearchIndexesTheEndOfLongSectionsAndScopesBeforeRanking() throws {
+        try write("long.txt", String(repeating: "unrelated prelude ", count: 500) + " manufacturer supplier contract agreement")
+        try store.update([FileRef(relativePath: "long.txt")])
+        store.embedPending()
+        let hits = store.semanticSections("supplier", limit: 20)
+        XCTAssertTrue(hits.contains { $0.path == "long.txt" && $0.text.contains("manufacturer") })
+        let spans = try store.read { try $0.scalarInt("SELECT count(*) FROM embedding_spans e JOIN sections s ON e.section = s.rowid WHERE s.path = 'long.txt'") }
+        XCTAssertGreaterThan(spans, 2)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("scoped"), withIntermediateDirectories: true)
+        try write("scoped/private.txt", "manufacturer supplier contract agreement")
+        try store.update([FileRef(relativePath: "scoped/private.txt")])
+        store.embedPending()
+        XCTAssertEqual(store.semanticSections("supplier", limit: 1, folder: "scoped").map(\.path), ["scoped/private.txt"])
     }
 
     func testFusionAddsRanksAndKeepsFirstSeenOrderOnTies() {

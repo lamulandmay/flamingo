@@ -61,6 +61,16 @@ final class TitleTests: XCTestCase {
         XCTAssertEqual(asked.paths, ["tools/fc.py", "tools/fc.py"])
     }
 
+    func testReadingUnchangedTextAgainKeepsTheTitle() throws {
+        store.titlePending()
+        let fc = FileRef(relativePath: "tools/fc.py")
+        try store.update([fc], force: true)   // what a new extractor version or a retry does
+        XCTAssertEqual(store.titlePending(), 0, "the same text is not sent to the model again")
+        XCTAssertEqual(asked.paths, ["tools/fc.py"])
+        XCTAssertEqual(try store.tags(of: fc), ["python", "forecast", "sales"])
+        XCTAssertEqual(try store.search("Waitlist sales forecast", limit: 5).first?.file, fc)
+    }
+
     func testRenameKeepsTheTitle() throws {
         // A file someone commented on carries an identity, so a rename keeps its row.
         _ = try FileIdentity.id(for: root.appendingPathComponent("tools/fc.py"))

@@ -42,6 +42,36 @@ final class PDFTests: XCTestCase {
         let e = try PDFExtractor().extract(f)
         XCTAssertEqual(e.text, "")
         XCTAssertEqual(e.sections, [])
+        XCTAssertEqual(e.coverage.state, .failed)
+        XCTAssertTrue(e.coverage.reason?.contains("password") == true)
+    }
+
+    func testImageOnlyPDFUsesOCRAndResumesBoundedPasses() throws {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 900, height: 700, bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(CGColor(gray: 1, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: 900, height: 700))
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: "PHOENIX PROJECT BUDGET", attributes: [
+            NSAttributedString.Key(kCTFontAttributeName as String): CTFontCreateWithName("Helvetica" as CFString, 40, nil),
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0, alpha: 1),
+        ]))
+        context.textPosition = CGPoint(x: 45, y: 450); CTLineDraw(line, context)
+        let image = try XCTUnwrap(context.makeImage())
+        // Warm the OS model once; its first load is deliberately outside the per-PDF pass.
+        XCTAssertTrue(try ImageExtractor.recognizeText(in: image).joined().contains("PHOENIX"))
+        let doc = PDFDocument()
+        for i in 0..<10 { doc.insert(try XCTUnwrap(PDFPage(image: NSImage(cgImage: image, size: NSSize(width: 900, height: 700)))), at: i) }
+        let file = try Fixtures.tempDir(self).appendingPathComponent("scanned.pdf")
+        XCTAssertTrue(doc.write(to: file))
+        XCTAssertTrue((PDFDocument(url: file)?.page(at: 0)?.string ?? "").isEmpty)
+        var extracted = try PDFExtractor().extract(file)
+        XCTAssertEqual(extracted.coverage.state, .partial)
+        XCTAssertLessThanOrEqual(extracted.coverage.processedUnits ?? 0, PDFExtractor.maxOCRPagesPerPass)
+        for _ in 0..<10 where extracted.coverage.state == .partial {
+            extracted = try PDFExtractor().extract(file, resuming: extracted.sections, processedPages: extracted.coverage.processedUnits ?? 0)
+        }
+        XCTAssertEqual(extracted.coverage.state, .complete)
+        XCTAssertEqual(extracted.coverage.processedUnits, 10)
+        XCTAssertTrue(extracted.sections.allSatisfy { $0.text.contains("PHOENIX") })
     }
 
     func testOwnerPasswordOnlyStillExtracts() throws {

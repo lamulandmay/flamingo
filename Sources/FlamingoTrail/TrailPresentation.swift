@@ -37,7 +37,7 @@ enum TrailPresentation {
         }
         for e in session.events {
             switch e.kind {
-            case .opened:
+            case .opened, .saved:
                 guard let f = e.file else { continue }
                 ensure(f)
                 if let a = e.anchor { anchors[f] = a }
@@ -105,19 +105,22 @@ enum TrailPresentation {
     /// Splits text into plain runs and wikilinks. A link shows its alias if it has one,
     /// otherwise its target as typed.
     static func segments(_ text: String) -> [(text: String, isLink: Bool)] {
-        var out: [(String, Bool)] = []
+        linkSegments(text).map { ($0.text, $0.target != nil) }
+    }
+
+    /// Keep display aliases separate from their real destination.
+    static func linkSegments(_ text: String) -> [(text: String, target: String?)] {
+        var out: [(String, String?)] = []
         var rest = Substring(text)
         while let open = rest.range(of: "[["), let close = rest[open.upperBound...].range(of: "]]") {
             let inner = rest[open.upperBound..<close.lowerBound]
-            if !rest[..<open.lowerBound].isEmpty { out.append((String(rest[..<open.lowerBound]), false)) }
+            if !rest[..<open.lowerBound].isEmpty { out.append((String(rest[..<open.lowerBound]), nil)) }
             if let bar = inner.firstIndex(of: "|") {
-                out.append((String(inner[inner.index(after: bar)...]), true))
-            } else {
-                out.append((String(inner), true))
-            }
+                out.append((String(inner[inner.index(after: bar)...]), String(inner[..<bar])))
+            } else { out.append((String(inner), String(inner))) }
             rest = rest[close.upperBound...]
         }
-        if !rest.isEmpty { out.append((String(rest), false)) }
+        if !rest.isEmpty { out.append((String(rest), nil)) }
         return out
     }
 }

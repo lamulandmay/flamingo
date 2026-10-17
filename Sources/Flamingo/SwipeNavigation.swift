@@ -17,7 +17,8 @@ final class SwipeNavigator {
         self.state = state
         self.window = window
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .swipe]) { [weak self] event in
-            MainActor.assumeIsolated { self?.handle(event) ?? event }
+            let forward = MainActor.assumeIsolated { self.map { $0.handle(event) != nil } ?? true }
+            return forward ? event : nil
         }
     }
 

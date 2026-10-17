@@ -1,8 +1,22 @@
 import XCTest
+import AppKit
 @testable import FlamingoCapture
 import FlamingoCore
 
 final class RailTextTests: XCTestCase {
+    @MainActor
+    func testNativeLinkDelegateOpensExactDestinationAndAnchor() throws {
+        let target = "Research Lab/budget.xlsx#cell Q3!B12"
+        var opened: String?
+        let bridge = RailRichText(text: "See [[\(target)|the budget]]", onLink: { opened = $0 })
+        let attributed = RailRichText.attributed(bridge.text)
+        XCTAssertEqual(attributed.string, "See the budget")
+        let link = try XCTUnwrap(attributed.attribute(.link, at: 5, effectiveRange: nil) as? URL)
+        let coordinator = bridge.makeCoordinator()
+        XCTAssertTrue(coordinator.textView(NSTextView(), clickedOnLink: link, at: 5))
+        XCTAssertEqual(opened, target)
+    }
+
     private func seg(_ text: String, _ target: String? = nil) -> RailSegment { RailSegment(text: text, target: target) }
 
     func testPlainTextIsOneSegment() {

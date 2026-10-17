@@ -7,6 +7,7 @@ import ApplicationServices
 enum AXFrontmost {
     struct Window {
         var documentURL: URL?
+        var sourceURL: URL?
         var title: String?
         /// AppKit global coordinates, bottom-left origin.
         var frame: CGRect?
@@ -22,7 +23,8 @@ enum AXFrontmost {
         if let pos = point(w, kAXPositionAttribute), let size = size(w, kAXSizeAttribute) {
             frame = appKitFrame(axOrigin: pos, size: size, primaryHeight: CGDisplayBounds(CGMainDisplayID()).height)
         }
-        return Window(documentURL: documentURL(from: copy(w, kAXDocumentAttribute) as? String),
+        let raw = copy(w, kAXDocumentAttribute) as? String
+        return Window(documentURL: documentURL(from: raw), sourceURL: raw.flatMap(URL.init(string:)),
                       title: copy(w, kAXTitleAttribute) as? String,
                       frame: frame)
     }

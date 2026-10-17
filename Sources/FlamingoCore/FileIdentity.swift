@@ -25,7 +25,12 @@ public enum FileIdentity {
     /// Reads the id without assigning one. Nil when the file has none (or carries
     /// something that is not a UUID). Throws if the file cannot be read at all.
     public static func existingID(for url: URL) throws -> UUID? {
-        let path = url.path
+        try existingID(atPath: url.path)
+    }
+
+    /// `existingID(for:)` for a file-system path, for loops over many files that would
+    /// otherwise build a URL per file.
+    public static func existingID(atPath path: String) throws -> UUID? {
         var buffer = [UInt8](repeating: 0, count: 64)
         let n = getxattr(path, xattrName, &buffer, buffer.count, 0, 0)
         if n < 0 {
@@ -70,10 +75,12 @@ public enum FileIdentity {
     /// `cp -p`) keep their xattrs, so an id can have several carriers. Refreshes the cache.
     public static func carriers(in vault: Vault) -> [UUID: [FileRef]] {
         var map: [UUID: [FileRef]] = [:]
-        for ref in VaultScanner.files(in: vault) {
-            guard let id = try? existingID(for: vault.url(for: ref)) else { continue }
-            map[id, default: []].append(ref)
+        // Unsorted walk; only the (short) per-id lists need Finder order.
+        VaultScanner.scan(in: vault, ignore: VaultScanner.ignoreRules(in: vault)) { ref in
+            if let id = try? existingID(for: vault.url(for: ref)) { map[id, default: []].append(ref) }
+            return true
         }
+        for (id, refs) in map where refs.count > 1 { map[id] = FinderOrder.sorted(refs, by: \.relativePath) }
         let best = map.compactMapValues { refs in
             refs.min { a, b in a.components.count != b.components.count ? a.components.count < b.components.count : a < b }
         }

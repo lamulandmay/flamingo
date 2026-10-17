@@ -104,7 +104,7 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(s.keyError, "API key rejected")
         XCTAssertEqual(s.draft, "", "the question doesn't land in the key field")
 
-        s.draft = "sk-ant-new"
+        s.keyDraft = "sk-ant-new"
         s.saveKey()
         XCTAssertEqual(stored, ["sk-ant-new"])
         XCTAssertTrue(s.hasKey)

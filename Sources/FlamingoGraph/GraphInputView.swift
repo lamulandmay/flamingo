@@ -21,6 +21,9 @@ final class GraphInputNSView: NSView {
     }
 
     let recognizer = GraphGestureRecognizer()
+    /// The main graph takes the keys as it appears, so arrows work at once. A small graph
+    /// beside other work (the inspector's local graph) takes them only when clicked.
+    var claimsFocusOnAppear = true
     private var trackingArea: NSTrackingArea?
     private var reportedSize: CGSize?
     private var animationLink: CADisplayLink?
@@ -66,6 +69,7 @@ final class GraphInputNSView: NSView {
         reportSize(force: true)
         // SwiftUI inserts the view mid-update; take focus on the next turn so arrows work as
         // soon as the graph shows.
+        guard claimsFocusOnAppear else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, let window = self.window else { return }
             window.makeFirstResponder(self)
@@ -162,6 +166,11 @@ final class GraphInputNSView: NSView {
         recognizer.smartMagnify()
     }
 
+    /// Right-click or ⌃-click: what can be done with the node under the pointer, or with the view.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        recognizer.target?.contextMenu(at: location(of: event))
+    }
+
     private func location(of event: NSEvent) -> CGPoint {
         convert(event.locationInWindow, from: nil)
     }
@@ -230,13 +239,17 @@ extension GraphKeyInput {
 /// anything that should receive its own clicks (the filter field).
 struct GraphInputLayer: NSViewRepresentable {
     let target: GraphInteractionTarget
+    var claimsFocus = true
 
-    init(target: GraphInteractionTarget) {
+    init(target: GraphInteractionTarget, claimsFocus: Bool = true) {
         self.target = target
+        self.claimsFocus = claimsFocus
     }
 
     func makeNSView(context: Context) -> GraphInputNSView {
-        GraphInputNSView(target: target)
+        let view = GraphInputNSView(target: target)
+        view.claimsFocusOnAppear = claimsFocus
+        return view
     }
 
     func updateNSView(_ view: GraphInputNSView, context: Context) {

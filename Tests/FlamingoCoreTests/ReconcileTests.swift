@@ -48,16 +48,18 @@ final class ReconcileTests: XCTestCase {
         XCTAssertEqual(try tv.contents(ofSidecarFor: "a.txt"), before)
     }
 
-    func testRenameOntoFileThatAlreadyHasANoteMerges() throws {
+    func testRenameOntoDifferentIdentityPreservesBothNotes() throws {
         let a = try tv.file("a.txt")
         let b = try tv.file("b.txt")
         try store.append(Comment(timestamp: ts("2026-10-14 22:05"), text: "about a"), to: a)
         try store.append(Comment(timestamp: ts("2026-10-14 22:06"), text: "about b"), to: b)
         try tv.remove("b.txt")
         try tv.rename("a.txt", to: "b.txt")
-        XCTAssertEqual(try store.reconcile(), [SidecarStore.Move(from: a, to: b)])
-        XCTAssertEqual(try store.comments(for: b).map(\.text), ["about b", "about a"])
-        XCTAssertFalse(store.hasSidecar(for: a))
+        let oldBytes = try Data(contentsOf: store.sidecarURL(for: a))
+        let newBytes = try Data(contentsOf: store.sidecarURL(for: b))
+        XCTAssertThrowsError(try store.reconcile())
+        XCTAssertEqual(try Data(contentsOf: store.sidecarURL(for: a)), oldBytes)
+        XCTAssertEqual(try Data(contentsOf: store.sidecarURL(for: b)), newBytes)
     }
 
     func testSeveralRenamesHealInOnePass() throws {

@@ -3,7 +3,7 @@ import Foundation
 /// The filter field's query. Space-separated terms; a node must match all of them.
 ///
 /// - `ext:pptx` matches by extension. `ext:pptx,key` matches either.
-/// - `orphans` matches nodes with no edges.
+/// - `orphans` matches files with no relationships beyond folder containment.
 /// - Anything else matches a substring of the relative path, ignoring case and diacritics.
 struct GraphFilter: Equatable {
     enum Term: Equatable {
@@ -42,12 +42,22 @@ struct GraphFilter: Equatable {
         guard !isEmpty else { return nil }
         let folded = terms.contains { if case .text = $0 { return true } else { return false } }
             ? topology.ids.map(Self.fold) : []
+        // Containment makes the folder map navigable, but does not turn an otherwise
+        // unrelated file into a connected document. Only compute this for orphan queries.
+        var related = [Bool]()
+        if terms.contains(.orphans) {
+            related = Array(repeating: false, count: topology.count)
+            for edge in topology.edges where edge.kind != .folder {
+                related[edge.a] = true
+                related[edge.b] = true
+            }
+        }
         return (0..<topology.count).map { i in
             terms.allSatisfy { term in
                 switch term {
                 case .text(let needle): return folded[i].contains(needle)
                 case .ext(let exts): return exts.contains(topology.exts[i])
-                case .orphans: return topology.neighbors[i].isEmpty
+                case .orphans: return !topology.isFolder[i] && !related[i]
                 }
             }
         }

@@ -184,14 +184,14 @@ public struct SidecarDocument: Equatable, Sendable {
             seen[key] = n + 1
             let id = SidecarFormat.stableID(target: t, timestamp: ts, anchor: anchor, text: c.text, occurrence: n)
             if id != c.id || date != c.timestamp || anchor != c.anchor {
-                items[i] = .comment(Comment(id: id, timestamp: date, anchor: anchor, text: c.text))
+                items[i] = .comment(Comment(id: id, timestamp: date, anchor: anchor, text: c.text, provenance: c.provenance))
             }
         }
     }
 
     /// Timestamp, anchor and text: what makes two comments "the same thought".
     static func contentKey(_ c: Comment) -> String {
-        SidecarFormat.string(fromTimestamp: c.timestamp) + "\n" + (c.anchor?.rendered ?? "") + "\n" + c.text
+        SidecarFormat.string(fromTimestamp: c.timestamp) + "\n" + (c.anchor?.rendered ?? "") + "\n" + c.text + (SidecarFormat.metadata(c.provenance) ?? "")
     }
 
     private var commentItemIndices: [Int] {
@@ -332,7 +332,16 @@ public enum SidecarFormat {
         if let first = lines.first, !first.isEmpty { out += " " + first }
         out += nl
         for line in lines.dropFirst() { out += "  " + line + nl }
+        if let metadata = metadata(c.provenance) { out += "  <!-- flamingo: " + metadata + " -->" + nl }
         return out
+    }
+
+    static func metadata(_ provenance: CommentProvenance?) -> String? {
+        guard let provenance else { return nil }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return (try? encoder.encode(provenance)).flatMap { String(data: $0, encoding: .utf8) }?
+            .replacingOccurrences(of: ">", with: "\\u003e")
     }
 
     // MARK: Parse
@@ -368,6 +377,11 @@ public enum SidecarFormat {
         for line in lines[bodyStart...] {
             if let c = parseCommentStart(line) {
                 flush()
+                current = c
+            } else if var c = current, line.hasPrefix("  <!-- flamingo: "), line.hasSuffix(" -->"),
+                      let data = String(line.dropFirst("  <!-- flamingo: ".count).dropLast(" -->".count)).data(using: .utf8),
+                      let metadata = try? JSONDecoder().decode(CommentProvenance.self, from: data) {
+                c.provenance = metadata
                 current = c
             } else if var c = current, line.unicodeScalars.starts(with: "  ".unicodeScalars) {
                 c.text += "\n" + string(line.unicodeScalars.dropFirst(2))

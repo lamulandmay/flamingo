@@ -40,6 +40,8 @@ final class GraphRenderer {
         static let edgeFadeZoom: CGFloat = 0.25
         static let edgeWidth: CGFloat = Theme.Size.hairline
         static let trailDash: [CGFloat] = [3, 3]
+        /// Folder containment is structure, not a connection: drawn at this share of a link.
+        static let folderEdgeFactor = 0.55
         /// Selection ring sits this far outside the node.
         static let ringGap: CGFloat = 3
         /// Pinned marker ring.
@@ -55,6 +57,25 @@ final class GraphRenderer {
         static let cullMargin: CGFloat = 8
         /// Labels below this opacity are not laid out at all.
         static let labelCutoff = 0.02
+        /// Detail below this opacity contributes neither geometry nor labels.
+        static let detailCutoff = 0.02
+        /// Keeps emerging nodes and edges batched as their detail opacity changes.
+        static let detailLevels = 16
+        /// Suggested (dashed) edges are drawn only for the selected or hovered node, and only
+        /// its strongest few. Explicit links always draw.
+        static let suggestionsShown = 5
+        /// With a file selected (and on screen), everything outside it and its neighbors
+        /// recedes to this, as Obsidian's graph does on hover.
+        static let selectionDim = 0.18
+        /// The most connected nodes on screen are always named, at any zoom.
+        static let alwaysLabeled = 12
+        /// Zoom at which more names start fading in, most connected first, until every node
+        /// is named at `GraphCamera.labelZoom`.
+        static let labelRampStart: CGFloat = 0.45
+        /// Names fade in over this many places in the priority order as zoom grows.
+        static let labelFadeSpan = 4.0
+        /// Past this many visible nodes, zoom-driven names skip the node-obstacle pass.
+        static let obstacleLimit = 4000
     }
 
     /// What the last `draw` did. For tests and the harness.
@@ -86,9 +107,16 @@ final class GraphRenderer {
     }
 
     /// On-screen radius of a node. Use this for hit testing so it matches what's drawn.
-    static func screenRadius(worldRadius: Double, zoom: CGFloat) -> CGFloat {
+    static func screenRadius(worldRadius: Double, zoom: CGFloat,
+                             detailOpacity: Double = 1, isFolder: Bool = false) -> CGFloat {
         let r = CGFloat(worldRadius) * radiusScale(zoom: zoom)
-        return r >= Style.minScreenRadius ? r : Style.minScreenRadius
+        let base = r >= Style.minScreenRadius ? r : Style.minScreenRadius
+        return isFolder ? base * CGFloat(0.8 + 0.2 * clampedDetailOpacity(detailOpacity)) : base
+    }
+
+    @inline(__always)
+    private static func clampedDetailOpacity(_ opacity: Double) -> Double {
+        opacity.isFinite ? min(1, max(0, opacity)) : 0
     }
 
     // MARK: - Topology cache
@@ -102,6 +130,11 @@ final class GraphRenderer {
     private var shadowed: [Bool] = []
     /// Node indices by degree descending, then index: the label priority after the focus sets.
     private var priority: [Int] = []
+    /// Per node: its strongest suggested edges (indices into `topology.edges`).
+    private var topSuggestions: [[Int]] = []
+    /// Per node: neighbors as drawn at rest. Explicit and folder edges, plus the node's own
+    /// strongest suggestions. Hover and selection light these, not every inferred neighbor.
+    private var shownNeighbors: [[Int]] = []
     /// `topology.labels`, untruncated.
     private var labelSource: [String] = []
     /// Measured label size; width -1 = not yet measured.
@@ -136,13 +169,33 @@ final class GraphRenderer {
         }
         familyExts = exts
 
-        struct Pair: Hashable { var a: Int, b: Int }
-        var linked = Set<Pair>()
-        for e in topo.edges where e.kind == .link { linked.insert(Pair(a: e.a, b: e.b)) }
-        shadowed = topo.edges.map { $0.kind == .trail && linked.contains(Pair(a: $0.a, b: $0.b)) }
+        // The topology already merges each pair into one edge of its strongest kind.
+        shadowed = [Bool](repeating: false, count: topo.edges.count)
 
+        let edges = topo.edges
+        var inferred = [[Int]](repeating: [], count: n)
+        var shown = [Set<Int>](repeating: [], count: n)
+        for (k, e) in edges.enumerated() where e.a < n && e.b < n {
+            if e.strokeClass == 1 {
+                inferred[e.a].append(k); inferred[e.b].append(k)
+            } else {
+                shown[e.a].insert(e.b); shown[e.b].insert(e.a)
+            }
+        }
+        topSuggestions = inferred.map { ks in
+            Array(ks.sorted { edges[$0].weight != edges[$1].weight ? edges[$0].weight > edges[$1].weight : $0 < $1 }
+                .prefix(Style.suggestionsShown))
+        }
+        for i in 0..<n {
+            for k in topSuggestions[i] { shown[i].insert(edges[k].a == i ? edges[k].b : edges[k].a) }
+        }
+        shownNeighbors = shown.map { $0.sorted() }
         let degree = topo.neighbors.map(\.count)
-        priority = Array(0..<n).sorted { degree[$0] != degree[$1] ? degree[$0] > degree[$1] : $0 < $1 }
+        let calmDegree = shownNeighbors.map(\.count)
+        priority = Array(0..<n).sorted {
+            calmDegree[$0] != calmDegree[$1] ? calmDegree[$0] > calmDegree[$1]
+                : degree[$0] != degree[$1] ? degree[$0] > degree[$1] : $0 < $1
+        }
         labelSource = topo.labels
         if measured.count > Self.measuredLimit { measured.removeAll() }
         labelSize = [CGSize](repeating: CGSize(width: -1, height: -1), count: n)
@@ -200,6 +253,9 @@ final class GraphRenderer {
     private var sx: [CGFloat] = []
     private var sy: [CGFloat] = []
     private var sr: [CGFloat] = []
+    private var detailOpacity: [Double] = []
+    private var detailLevel: [Int] = []
+    private var detailBatchCount = 1
     private var visible: [Bool] = []
     private var flags: [UInt8] = []
     private var placer = LabelPlacer()
@@ -223,6 +279,8 @@ final class GraphRenderer {
             sx = [CGFloat](repeating: 0, count: n)
             sy = [CGFloat](repeating: 0, count: n)
             sr = [CGFloat](repeating: 0, count: n)
+            detailOpacity = [Double](repeating: 1, count: n)
+            detailLevel = [Int](repeating: 0, count: n)
             visible = [Bool](repeating: false, count: n)
             flags = [UInt8](repeating: 0, count: n)
         }
@@ -243,20 +301,37 @@ final class GraphRenderer {
         let m = Style.cullMargin
         let maxX = size.width + m, maxY = size.height + m
         let pos = frame.positions, rad = frame.topology.radius
+        let detail = frame.detailOpacity, folders = frame.topology.isFolder
+        detailBatchCount = 1
         var count = 0
         for i in 0..<n {
+            let opacity = i < detail.count ? Self.clampedDetailOpacity(detail[i]) : 1
+            detailOpacity[i] = opacity
+            detailLevel[i] = max(1, Int((opacity * Double(Style.detailLevels)).rounded())) - 1
+            if opacity >= Style.detailCutoff && opacity < 1 { detailBatchCount = Style.detailLevels }
             let p = pos[i]
             let x = (p.x - cx) * zoom + hw
             let y = (p.y - cy) * zoom + hh
             var r = CGFloat(rad[i]) * scale
             if !(r >= minR) { r = minR }
+            if i < folders.count && folders[i] { r *= CGFloat(0.8 + 0.2 * opacity) }
             sx[i] = x; sy[i] = y; sr[i] = r
             // NaN fails every comparison, so a NaN position is never visible.
-            let v = x + r >= -m && x - r <= maxX && y + r >= -m && y - r <= maxY
+            let v = opacity >= Style.detailCutoff && x + r >= -m && x - r <= maxX && y + r >= -m && y - r <= maxY
             visible[i] = v
             if v { count += 1 }
         }
         return count
+    }
+
+    @inline(__always)
+    private func detailBucket(_ node: Int) -> Int {
+        detailBatchCount == 1 ? 0 : detailLevel[node]
+    }
+
+    @inline(__always)
+    private func detailBatchOpacity(_ bucket: Int) -> Double {
+        detailBatchCount == 1 ? 1 : Double(bucket + 1) / Double(Style.detailLevels)
     }
 
     /// Indices of nodes `draw` would consider on screen (including the cull margin).
@@ -291,7 +366,8 @@ final class GraphRenderer {
         let rawHover = frame.hoverAmount.isFinite ? min(max(frame.hoverAmount, 0), 1) : 0
         let focusAmount = hov != nil ? rawHover : (drag != nil ? 1 : 0)
         let focusOn = focus != nil && focusAmount > 0.001
-        let neighbors = topo.neighbors
+        // A calm frame lights only what is drawn; a local graph shows every neighbor.
+        let neighbors = frame.calm ? shownNeighbors : topo.neighbors
         if let f = focus {
             flags[f] |= Flag.focusSet | Flag.focusNode
             for j in neighbors[f] where j < n { flags[j] |= Flag.focusSet }
@@ -307,20 +383,117 @@ final class GraphRenderer {
             if let s = sel { flags[s] &= ~Flag.filtered }
         }
 
-        // Opacity levels: bit 0 = dimmed by hover, bit 1 = dimmed by the filter.
+        // Opacity levels: bit 0 = dimmed by hover, bit 1 = dimmed by the filter, bit 2 =
+        // outside the selection's neighborhood. Hovering hands the dimming over to the hover.
         let dimmed = Theme.Opacity.dimmed
         let hoverDim = focusOn ? 1 - focusAmount * (1 - dimmed) : 1
-        let levels: [Double] = [1, hoverDim, dimmed, hoverDim * dimmed]
+        let spotlight = frame.calm && sel.map { visible[$0] } == true
+        let selDim = spotlight ? 1 - (1 - Style.selectionDim) * (1 - (focusOn ? focusAmount : 0)) : 1
+        let levels: [Double] = (0..<8).map { bits in
+            (bits & 1 != 0 ? hoverDim : 1) * (bits & 2 != 0 ? dimmed : 1) * (bits & 4 != 0 ? selDim : 1)
+        }
         let selNode: Int = sel ?? -1, focusNode: Int = focus ?? -1, dragNode: Int = drag ?? -1
+        var suggested = Set<Int>()
+        if frame.calm {
+            for i in [sel, focus, drag] { if let i, i < topSuggestions.count { suggested.formUnion(topSuggestions[i]) } }
+        }
 
         drawEdges(topo, n: n, size: size, sel: selNode, focus: focusNode, drag: dragNode,
-                  focusOn: focusOn, focusAmount: focusAmount, levels: levels,
+                  focusOn: focusOn, focusAmount: focusAmount, levels: levels, spotlight: spotlight,
+                  suggested: frame.calm ? suggested : nil,
                   fade: Self.edgeFade(zoom: frame.camera.zoom), pal: pal, in: &context)
         drawNodes(frame, n: n, sel: selNode, focus: focusNode, drag: dragNode,
-                  focusOn: focusOn, focusAmount: focusAmount, levels: levels, pal: pal, in: &context)
+                  focusOn: focusOn, focusAmount: focusAmount, levels: levels, spotlight: spotlight, pal: pal, in: &context)
+        if let link = frame.link { drawLink(link, n: n, pal: pal, in: &context) }
+        if let c = frame.celebration { drawCelebration(c, n: n, in: &context) }
+        if let caption = frame.caption {
+            let text = context.resolve(Text(caption).font(Theme.Font.mono).foregroundColor(Color(pal.secondary)))
+            context.draw(text, at: CGPoint(x: Theme.Space.l, y: size.height - Theme.Space.l), anchor: .bottomLeading)
+        }
         drawLabels(frame, n: n, bounds: bounds, sel: selNode, focus: focusNode, drag: dragNode,
-                   focusAmount: focusAmount, levels: levels, focusOn: focusOn, pal: pal, in: &context)
+                   focusAmount: focusAmount, levels: levels, focusOn: focusOn, spotlight: spotlight,
+                   neighbors: neighbors, pal: pal, in: &context)
     }
+
+    /// The connection being drawn with ⌥-drag: a dashed accent line from the node, snapping
+    /// to the file under the pointer, which gets a ring.
+    private func drawLink(_ link: (from: Int, to: CGPoint, over: Int?), n: Int, pal: Palette,
+                          in context: inout GraphicsContext) {
+        guard link.from < n, link.from < sx.count else { return }
+        let start = CGPoint(x: sx[link.from], y: sy[link.from])
+        var end = link.to
+        if let o = link.over, o < n { end = CGPoint(x: sx[o], y: sy[o]) }
+        var line = Path()
+        line.move(to: start)
+        line.addLine(to: end)
+        context.stroke(line, with: Self.shade(pal.accent, 0.9),
+                       style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [4, 3]))
+        if let o = link.over, o < n {
+            let r = sr[o] + Style.ringGap + 1
+            context.stroke(Path(ellipseIn: CGRect(x: end.x - r, y: end.y - r, width: 2 * r, height: 2 * r)),
+                           with: Self.shade(pal.accent, 0.9), lineWidth: 1.5)
+        }
+    }
+
+    /// A new connection: a line in the thought's tint grows from rim to rim with a drop of
+    /// light at its head, rings ripple out where it leaves and lands, both ends stay ringed
+    /// while it holds, and everything fades into the ordinary edge underneath.
+    private func drawCelebration(_ c: GraphFrame.Celebration, n: Int, in context: inout GraphicsContext) {
+        guard c.from < n, c.from < sx.count else { return }
+        let T = CelebrationTime.self
+        let tint = Theme.Color.thought(c.level)
+        let level = CGFloat(c.level)
+        let alone = c.to.isEmpty
+        let shown = 1 - Self.clamp01((c.t - T.fadeStart(alone: alone)) / T.fade)
+        let a = CGPoint(x: sx[c.from], y: sy[c.from])
+
+        func ripple(_ p: CGPoint, _ radius: CGFloat, since t0: Double) {
+            let dt = c.t - t0
+            guard dt >= 0, dt < T.ripple else { return }
+            let e = Self.easeOut(dt / T.ripple)
+            let r = radius + Style.ringGap + CGFloat(e) * (14 + 4 * level)
+            context.stroke(Path(ellipseIn: Self.circle(p.x, p.y, r)), with: .color(tint.opacity((1 - e) * 0.8)),
+                           style: StrokeStyle(lineWidth: 1.5 + CGFloat(1 - e)))
+        }
+        func ring(_ p: CGPoint, _ radius: CGFloat, since t0: Double) {
+            let on = Self.clamp01((c.t - t0) / 0.15) * shown
+            guard on > 0 else { return }
+            context.stroke(Path(ellipseIn: Self.circle(p.x, p.y, radius + Style.ringGap)),
+                           with: .color(tint.opacity(0.9 * on)), lineWidth: 1.5)
+        }
+
+        ripple(a, sr[c.from], since: T.depart)
+        ring(a, sr[c.from], since: T.depart)
+        for b in c.to where b < n && b < sx.count {
+            let end = CGPoint(x: sx[b], y: sy[b])
+            let dx = end.x - a.x, dy = end.y - a.y
+            let d = max(hypot(dx, dy), 0.001)
+            let ux = dx / d, uy = dy / d
+            let from = CGPoint(x: a.x + ux * (sr[c.from] + Style.ringGap), y: a.y + uy * (sr[c.from] + Style.ringGap))
+            let to = CGPoint(x: end.x - ux * (sr[b] + Style.ringGap), y: end.y - uy * (sr[b] + Style.ringGap))
+            let p = CGFloat(Self.easeOut((c.t - T.depart) / T.travel))
+            guard p > 0, d > sr[c.from] + sr[b] + 2 * Style.ringGap else { continue }
+            let head = CGPoint(x: from.x + (to.x - from.x) * p, y: from.y + (to.y - from.y) * p)
+            var line = Path()
+            line.move(to: from)
+            line.addLine(to: head)
+            context.stroke(line, with: .color(tint.opacity(0.95 * shown)),
+                           style: StrokeStyle(lineWidth: 2 + 0.5 * level, lineCap: .round))
+            if p < 1 {
+                let r: CGFloat = 3 + 0.5 * level
+                var halo = context
+                halo.addFilter(.blur(radius: 5))
+                halo.fill(Path(ellipseIn: Self.circle(head.x, head.y, 2.2 * r)), with: .color(tint.opacity(0.35 + 0.15 * Double(level))))
+                context.fill(Path(ellipseIn: Self.circle(head.x, head.y, r)), with: .color(tint))
+            }
+            ripple(end, sr[b], since: T.arrive)
+            ring(end, sr[b], since: T.arrive)
+        }
+        stats.batches += 1
+    }
+
+    private static func clamp01(_ x: Double) -> Double { min(1, max(0, x)) }
+    private static func easeOut(_ x: Double) -> Double { let u = 1 - clamp01(x); return 1 - u * u * u }
 
     @inline(__always)
     private static func valid(_ i: Int?, _ n: Int) -> Int? {
@@ -330,14 +503,16 @@ final class GraphRenderer {
 
     // MARK: Edges
 
+    /// `suggested` nil draws every suggested edge (a local graph); otherwise only these.
     private func drawEdges(_ topo: GraphTopology, n: Int, size: CGSize, sel: Int, focus: Int, drag: Int,
-                           focusOn: Bool, focusAmount: Double, levels: [Double], fade: Double, pal: Palette,
+                           focusOn: Bool, focusAmount: Double, levels: [Double], spotlight: Bool,
+                           suggested: Set<Int>?, fade: Double, pal: Palette,
                            in context: inout GraphicsContext) {
-        // Bucket = kind * 12 + emphasis * 4 + level. Emphasis: 0 normal, 1 focus, 2 selection.
-        var paths: [CGMutablePath] = []
-        paths.reserveCapacity(24)
-        for _ in 0..<24 { paths.append(CGMutablePath()) }
-        var used = [Bool](repeating: false, count: 24)
+        // Bucket = (kind * 32 + emphasis * 8 + level) * detailCount + detail.
+        // Emphasis: 0 normal, 1 focus, 2 a link of the selection (accent), 3 a suggestion of
+        // the selection (grey, at focus strength). Allocate only occupied detail buckets.
+        let detailCount = detailBatchCount
+        var paths = [CGMutablePath?](repeating: nil, count: 96 * detailCount)
 
         let edges = topo.edges
         let m = Style.cullMargin
@@ -347,8 +522,10 @@ final class GraphRenderer {
         for k in 0..<edges.count {
             if shadowed[k] { continue }
             let e = edges[k]
+            if e.strokeClass == 1, let suggested, !suggested.contains(k) { continue }
             let a = e.a, b = e.b
             if a >= n || b >= n { continue }
+            if min(detailOpacity[a], detailOpacity[b]) < Style.detailCutoff { continue }
             let ax = sx[a], ay = sy[a], bx = sx[b], by = sy[b]
             if (ax < -m && bx < -m) || (ax > maxX && bx > maxX)
                 || (ay < -m && by < -m) || (ay > maxY && by > maxY) { continue }
@@ -362,34 +539,40 @@ final class GraphRenderer {
             let ux = dx / d, uy = dy / d
 
             let touchesFocus = a == focus || b == focus || a == drag || b == drag
-            let emphasis = (a == sel || b == sel) ? 2 : (touchesFocus ? 1 : 0)
+            let touchesSel = a == sel || b == sel
+            let emphasis = touchesSel ? (e.strokeClass == 0 ? 2 : 3) : (touchesFocus ? 1 : 0)
             var level = 0
             if focusOn && !touchesFocus { level |= 1 }
             if (flags[a] | flags[b]) & Flag.filtered != 0 { level |= 2 }
-            let bucket = (e.kind == .trail ? 12 : 0) + emphasis * 4 + level
-            let path = paths[bucket]
+            if spotlight && !touchesSel && !(focusOn && touchesFocus) { level |= 4 }
+            let detail = min(detailBucket(a), detailBucket(b))
+            let bucket = (e.strokeClass * 32 + emphasis * 8 + level) * detailCount + detail
+            if paths[bucket] == nil { paths[bucket] = CGMutablePath() }
+            let path = paths[bucket]!
             path.move(to: CGPoint(x: ax + ux * ra, y: ay + uy * ra))
             path.addLine(to: CGPoint(x: bx - ux * rb, y: by - uy * rb))
-            used[bucket] = true
             drawn += 1
         }
         stats.drawnEdges = drawn
 
         let solid = StrokeStyle(lineWidth: Style.edgeWidth)
         let dashed = StrokeStyle(lineWidth: Style.edgeWidth, dash: Style.trailDash)
-        // Faint first so emphasis lands on top: level 3...0 within emphasis 0, then 1, then 2.
-        for emphasis in 0..<3 {
-            for level in stride(from: 3, through: 0, by: -1) {
-                for kind in stride(from: 1, through: 0, by: -1) {
-                    let bucket = kind * 12 + emphasis * 4 + level
-                    guard used[bucket] else { continue }
-                    let isLink = kind == 0
+        // Faint first so emphasis lands on top: level 7...0 within emphasis 0, then 1, 3, 2.
+        for emphasis in [0, 1, 3, 2] {
+            for level in stride(from: 7, through: 0, by: -1) {
+                for kind in stride(from: 2, through: 0, by: -1) {
+                    // 0 explicit: solid. 1 inferred: dashed. 2 folder containment: solid, fainter.
+                    let isLink = kind != 1
+                    let structural = kind == 2 ? Style.folderEdgeFactor : 1
                     let color: Color.Resolved
                     var alpha: Double
                     switch emphasis {
                     case 2:
                         color = pal.accent
                         alpha = isLink ? Style.accentLinkOpacity : Style.accentTrailOpacity
+                    case 3:
+                        color = pal.secondary
+                        alpha = isLink ? Style.linkFocusOpacity : Style.trailFocusOpacity
                     case 1:
                         color = pal.secondary
                         let lo = (isLink ? Style.linkOpacity : Style.trailOpacity) * fade
@@ -399,9 +582,14 @@ final class GraphRenderer {
                         color = pal.secondary
                         alpha = (isLink ? Style.linkOpacity : Style.trailOpacity) * fade
                     }
-                    alpha *= levels[level]
-                    context.stroke(Path(paths[bucket]), with: Self.shade(color, alpha), style: isLink ? solid : dashed)
-                    stats.batches += 1
+                    alpha *= levels[level] * structural
+                    for detail in 0..<detailCount {
+                        let bucket = (kind * 32 + emphasis * 8 + level) * detailCount + detail
+                        guard let path = paths[bucket] else { continue }
+                        context.stroke(Path(path), with: Self.shade(color, alpha * detailBatchOpacity(detail)),
+                                       style: isLink ? solid : dashed)
+                        stats.batches += 1
+                    }
                 }
             }
         }
@@ -410,7 +598,7 @@ final class GraphRenderer {
     // MARK: Nodes
 
     private func drawNodes(_ frame: GraphFrame, n: Int, sel: Int, focus: Int, drag: Int,
-                           focusOn: Bool, focusAmount: Double, levels: [Double], pal: Palette,
+                           focusOn: Bool, focusAmount: Double, levels: [Double], spotlight: Bool, pal: Palette,
                            in context: inout GraphicsContext) {
         let families = pal.families.count
         let accentSlot = families
@@ -420,60 +608,62 @@ final class GraphRenderer {
         let folderSlot = families + 2
         let missing = frame.topology.missing
         let isFolder = frame.topology.isFolder
-        let bucketCount = (families + 3) * 4
-        var paths: [CGMutablePath] = []
-        paths.reserveCapacity(bucketCount)
-        for _ in 0..<bucketCount { paths.append(CGMutablePath()) }
-        var used = [Bool](repeating: false, count: bucketCount)
+        let detailCount = detailBatchCount
+        let bucketCount = (families + 3) * 8 * detailCount
+        var paths = [CGMutablePath?](repeating: nil, count: bucketCount)
 
         for i in 0..<n where visible[i] {
             if i == sel || i == focus || i == drag { continue }
             let f = flags[i]
-            let slot = f & Flag.selSet != 0 ? accentSlot : (i < isFolder.count && isFolder[i] ? folderSlot : (i < missing.count && missing[i] ? ghostSlot : family[i]))
-            var level = 0
-            if focusOn && f & Flag.focusSet == 0 { level |= 1 }
-            if f & Flag.filtered != 0 { level |= 2 }
+            // Neighbors of the selection keep their family colour; only the selection is coral.
+            let slot = i < isFolder.count && isFolder[i] ? folderSlot : (i < missing.count && missing[i] ? ghostSlot : family[i])
+            let level = nodeLevel(f, focusOn: focusOn, spotlight: spotlight)
             let r = sr[i]
-            let bucket = slot * 4 + level
-            paths[bucket].addEllipse(in: CGRect(x: sx[i] - r, y: sy[i] - r, width: r + r, height: r + r))
-            used[bucket] = true
+            let bucket = (slot * 8 + level) * detailCount + detailBucket(i)
+            if paths[bucket] == nil { paths[bucket] = CGMutablePath() }
+            paths[bucket]!.addEllipse(in: CGRect(x: sx[i] - r, y: sy[i] - r, width: r + r, height: r + r))
         }
-        for level in stride(from: 3, through: 0, by: -1) {
+        for level in stride(from: 7, through: 0, by: -1) {
             for slot in 0...folderSlot {
-                let bucket = slot * 4 + level
-                guard used[bucket] else { continue }
-                if slot == folderSlot {
-                    context.stroke(Path(paths[bucket]), with: Self.shade(pal.secondary, 0.8 * levels[level]),
-                                   lineWidth: Style.edgeWidth * 1.5)
-                } else if slot == ghostSlot {
-                    context.stroke(Path(paths[bucket]), with: Self.shade(pal.tertiary, levels[level]),
-                                   lineWidth: Style.edgeWidth)
-                } else {
-                    let color = slot == accentSlot ? pal.accent : pal.families[slot]
-                    context.fill(Path(paths[bucket]), with: Self.shade(color, Style.nodeOpacity * levels[level]))
+                for detail in 0..<detailCount {
+                    let bucket = (slot * 8 + level) * detailCount + detail
+                    guard let path = paths[bucket] else { continue }
+                    let alpha = levels[level] * detailBatchOpacity(detail)
+                    if slot == folderSlot {
+                        context.stroke(Path(path), with: Self.shade(pal.secondary, 0.8 * alpha),
+                                       lineWidth: Style.edgeWidth * 1.5)
+                    } else if slot == ghostSlot {
+                        context.stroke(Path(path), with: Self.shade(pal.tertiary, alpha),
+                                       lineWidth: Style.edgeWidth)
+                    } else {
+                        let color = slot == accentSlot ? pal.accent : pal.families[slot]
+                        context.fill(Path(path), with: Self.shade(color, Style.nodeOpacity * alpha))
+                    }
+                    stats.batches += 1
                 }
-                stats.batches += 1
             }
         }
 
-        // Pinned markers: one ring path per level.
+        // Pinned markers: one ring path per dimming and detail level.
         if !frame.pinned.isEmpty {
-            var rings: [CGMutablePath?] = [nil, nil, nil, nil]
+            var rings = [CGMutablePath?](repeating: nil, count: 8 * detailCount)
             let gap = Style.pinGap
             for i in frame.pinned where i >= 0 && i < n && visible[i] && i != sel {
-                let f = flags[i]
-                var level = 0
-                if focusOn && f & Flag.focusSet == 0 { level |= 1 }
-                if f & Flag.filtered != 0 { level |= 2 }
+                let level = nodeLevel(flags[i], focusOn: focusOn, spotlight: spotlight)
                 let r = sr[i] + gap
-                if rings[level] == nil { rings[level] = CGMutablePath() }
-                rings[level]!.addEllipse(in: CGRect(x: sx[i] - r, y: sy[i] - r, width: r + r, height: r + r))
+                let bucket = level * detailCount + detailBucket(i)
+                if rings[bucket] == nil { rings[bucket] = CGMutablePath() }
+                rings[bucket]!.addEllipse(in: CGRect(x: sx[i] - r, y: sy[i] - r, width: r + r, height: r + r))
             }
             let style = StrokeStyle(lineWidth: Style.edgeWidth)
-            for level in stride(from: 3, through: 0, by: -1) {
-                guard let p = rings[level] else { continue }
-                context.stroke(Path(p), with: Self.shade(pal.secondary, Style.pinRingOpacity * levels[level]), style: style)
-                stats.batches += 1
+            for level in stride(from: 7, through: 0, by: -1) {
+                for detail in 0..<detailCount {
+                    guard let p = rings[level * detailCount + detail] else { continue }
+                    context.stroke(Path(p),
+                                   with: Self.shade(pal.secondary, Style.pinRingOpacity * levels[level] * detailBatchOpacity(detail)),
+                                   style: style)
+                    stats.batches += 1
+                }
             }
         }
 
@@ -483,32 +673,52 @@ final class GraphRenderer {
         if focus >= 0, focus != sel, focus != drag { specials.append(focus) }
         for i in specials where visible[i] {
             let f = flags[i]
-            let color = f & Flag.selSet != 0 ? pal.accent : pal.families[family[i]]
+            let color = pal.families[family[i]]
             let strength = i == drag ? 1 : focusAmount
             var alpha = Style.nodeOpacity + (1 - Style.nodeOpacity) * strength
             if f & Flag.filtered != 0 { alpha *= levels[2] }
-            context.fill(Path(ellipseIn: Self.circle(sx[i], sy[i], sr[i])), with: Self.shade(color, alpha))
+            alpha *= detailOpacity[i]
+            let shape = Path(ellipseIn: Self.circle(sx[i], sy[i], sr[i]))
+            if isFolder[i] || missing[i] { context.stroke(shape, with: Self.shade(color, alpha), lineWidth: Style.edgeWidth * 1.5) }
+            else { context.fill(shape, with: Self.shade(color, alpha)) }
             stats.batches += 1
         }
         if sel >= 0, visible[sel] {
             // Never dimmed: see the filter note in `draw`.
             let r = sr[sel]
-            context.fill(Path(ellipseIn: Self.circle(sx[sel], sy[sel], r)), with: Self.shade(pal.accent, 1))
+            let shape = Path(ellipseIn: Self.circle(sx[sel], sy[sel], r))
+            if isFolder[sel] || missing[sel] { context.stroke(shape, with: Self.shade(pal.accent, detailOpacity[sel]), lineWidth: Style.edgeWidth * 1.5) }
+            else { context.fill(shape, with: Self.shade(pal.accent, detailOpacity[sel])) }
             context.stroke(Path(ellipseIn: Self.circle(sx[sel], sy[sel], r + Style.ringGap)),
-                           with: Self.shade(pal.accent, Style.selectionRingOpacity),
+                           with: Self.shade(pal.accent, Style.selectionRingOpacity * detailOpacity[sel]),
                            style: StrokeStyle(lineWidth: Style.edgeWidth))
             stats.batches += 2
+        }
+        for i in frame.multiSelected where i >= 0 && i < n && visible[i] {
+            context.stroke(Path(ellipseIn: Self.circle(sx[i], sy[i], sr[i] + Style.ringGap + 3)),
+                           with: Self.shade(pal.accent, detailOpacity[i]), lineWidth: 2)
+            stats.batches += 1
         }
         if let p = frame.pulse, visible.indices.contains(p.node), visible[p.node] {
             // Ease-out ring: grows ~16pt past the node and fades to nothing.
             let e = 1 - pow(1 - p.progress, 3)
             let r = sr[p.node] + Style.ringGap + CGFloat(e) * 16
-            let alpha = (1 - e) * 0.7
+            let alpha = (1 - e) * 0.7 * detailOpacity[p.node]
             context.stroke(Path(ellipseIn: Self.circle(sx[p.node], sy[p.node], r)),
                            with: Self.shade(pal.accent, alpha),
                            style: StrokeStyle(lineWidth: Style.edgeWidth * (1 + CGFloat(1 - e))))
             stats.batches += 1
         }
+    }
+
+    /// A node's dimming bits: outside the hover, filtered out, outside the selection's light.
+    @inline(__always)
+    private func nodeLevel(_ f: UInt8, focusOn: Bool, spotlight: Bool) -> Int {
+        var level = 0
+        if focusOn && f & Flag.focusSet == 0 { level |= 1 }
+        if f & Flag.filtered != 0 { level |= 2 }
+        if spotlight && f & Flag.selSet == 0 && !(focusOn && f & Flag.focusSet != 0) { level |= 4 }
+        return level
     }
 
     @inline(__always)
@@ -519,10 +729,18 @@ final class GraphRenderer {
     // MARK: Labels
 
     private func drawLabels(_ frame: GraphFrame, n: Int, bounds: CGRect, sel: Int, focus: Int, drag: Int,
-                            focusAmount: Double, levels: [Double], focusOn: Bool, pal: Palette,
-                            in context: inout GraphicsContext) {
+                            focusAmount: Double, levels: [Double], focusOn: Bool, spotlight: Bool,
+                            neighbors: [[Int]], pal: Palette, in context: inout GraphicsContext) {
         let labelAmount = frame.labelAmount.isFinite ? min(max(frame.labelAmount, 0), 1) : 0
-        let zoomLabels = labelAmount > Style.labelCutoff
+        // How many names zoom allows: the most connected few always, then more as zoom grows,
+        // in priority order, each fading in over `labelFadeSpan` places.
+        let visibleCount = stats.visibleNodes
+        let zoom = frame.camera.zoom.isFinite ? frame.camera.zoom : 1
+        let t = min(1, max(0, Double((zoom - Style.labelRampStart) / (GraphCamera.labelZoom - Style.labelRampStart))))
+        let ramp = t * t * (3 - 2 * t)
+        var budget = Double(Style.alwaysLabeled) + Double(max(0, visibleCount - Style.alwaysLabeled)) * max(ramp, labelAmount)
+        if let limit = frame.labelLimit { budget = min(budget, Double(limit)) }
+        let zoomLabels = budget > 0
         guard zoomLabels || sel >= 0 || focus >= 0 || drag >= 0 else { return }
 
         generation &+= 1
@@ -533,7 +751,7 @@ final class GraphRenderer {
         placedAlpha.removeAll(keepingCapacity: true)
         placedStrong.removeAll(keepingCapacity: true)
 
-        let ctx = LabelPass(labelAmount: labelAmount, focusAmount: focusAmount, focusOn: focusOn,
+        let ctx = LabelPass(labelAmount: 1, focusAmount: focusAmount, focusOn: focusOn, spotlight: spotlight,
                             levels: levels, sel: sel, focus: focus, drag: drag, bounds: bounds)
         // Priority: selected, dragged, hovered, hovered's neighbors, then (only when zoom labels
         // are showing) selected's neighbors and everything else by degree.
@@ -541,18 +759,27 @@ final class GraphRenderer {
         if drag >= 0 { consider(drag, ctx, &context) }
         if focus >= 0 {
             consider(focus, ctx, &context)
-            for j in frame.topology.neighbors[focus] where j < n { consider(j, ctx, &context) }
+            for j in neighbors[focus] where j < n { consider(j, ctx, &context) }
         }
         if zoomLabels {
             // Labels that only show because of zoom also keep clear of other nodes; the ones
             // above (selected, dragged, hovered and its neighbors) always show.
-            for i in 0..<n where visible[i] {
-                placer.insertObstacle(LabelLayout.obstacleRect(center: CGPoint(x: sx[i], y: sy[i]), radius: sr[i]), owner: i)
+            if visibleCount <= Style.obstacleLimit {
+                for i in 0..<n where visible[i] {
+                    placer.insertObstacle(LabelLayout.obstacleRect(center: CGPoint(x: sx[i], y: sy[i]), radius: sr[i]), owner: i)
+                }
             }
-            if sel >= 0 {
-                for j in frame.topology.neighbors[sel] where j < n { consider(j, ctx, &context) }
+            if sel >= 0, frame.labelLimit == nil {
+                for j in neighbors[sel] where j < n { consider(j, ctx, &context) }
             }
-            for i in priority where i < n && visible[i] { consider(i, ctx, &context) }
+            var rank = 0.0
+            for i in frame.labelOrder ?? priority where i < n && visible[i] {
+                guard rank < budget else { break }
+                var pass = ctx
+                pass.labelAmount = min(1, (budget - rank) / Style.labelFadeSpan)
+                consider(i, pass, &context)
+                rank += 1
+            }
         }
 
         // Draw faint labels first so the strong ones sit on top where antialiasing touches.
@@ -572,6 +799,7 @@ final class GraphRenderer {
         var labelAmount: Double
         var focusAmount: Double
         var focusOn: Bool
+        var spotlight: Bool
         var levels: [Double]
         var sel: Int, focus: Int, drag: Int
         var bounds: CGRect
@@ -580,6 +808,7 @@ final class GraphRenderer {
     private func consider(_ i: Int, _ p: LabelPass, _ context: inout GraphicsContext) {
         if stamp[i] == generation { return }
         stamp[i] = generation
+        guard detailOpacity[i] >= Style.detailCutoff else { return }
         // Labels can hang off-screen while their node is barely outside; nodes far outside can't.
         let x = sx[i], y = sy[i]
         guard x.isFinite, y.isFinite else { return }
@@ -589,6 +818,7 @@ final class GraphRenderer {
         var level = 0
         if p.focusOn && f & Flag.focusSet == 0 && i != p.sel { level |= 1 }
         if f & Flag.filtered != 0 { level |= 2 }
+        if p.spotlight && f & Flag.selSet == 0 && !(p.focusOn && f & Flag.focusSet != 0) { level |= 4 }
         var alpha = p.labelAmount * p.levels[level]
         var strong = false
         if i == p.sel || i == p.drag {
@@ -601,6 +831,7 @@ final class GraphRenderer {
         } else if f & Flag.focusSet != 0 {
             alpha = max(alpha, p.focusAmount * filterAlpha)
         }
+        alpha *= detailOpacity[i]
         guard alpha > Style.labelCutoff else { return }
 
         if labelSize[i].width < 0 {

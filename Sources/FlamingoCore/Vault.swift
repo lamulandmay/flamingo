@@ -19,6 +19,8 @@ public struct Vault: Hashable, Sendable {
     public var ignoreURL: URL { stateDir.appendingPathComponent("ignore") }
     /// `<root>/.flamingo/pins.json`: the folders the sidebar shows. See `Pins`.
     public var pinsURL: URL { stateDir.appendingPathComponent(Pins.fileName) }
+    /// `<root>/.flamingo/bookmarks.json`: the sidebar's bookmarks, in Obsidian's format. See `Bookmarks`.
+    public var bookmarksURL: URL { stateDir.appendingPathComponent(Bookmarks.fileName) }
 
     /// The folder's display name.
     public var name: String { root.lastPathComponent }

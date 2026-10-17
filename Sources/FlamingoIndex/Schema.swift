@@ -100,4 +100,94 @@ enum Schema {
     ALTER TABLE files ADD COLUMN titled_by TEXT;
     PRAGMA user_version = 4;
     """
+    static let v5 = """
+    ALTER TABLE files ADD COLUMN extraction_state TEXT NOT NULL DEFAULT 'complete';
+    ALTER TABLE files ADD COLUMN extraction_reason TEXT;
+    ALTER TABLE files ADD COLUMN attempted_at REAL;
+    ALTER TABLE files ADD COLUMN retry_after REAL;
+    ALTER TABLE files ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE files ADD COLUMN processed_units INTEGER;
+    ALTER TABLE files ADD COLUMN total_units INTEGER;
+    ALTER TABLE comments ADD COLUMN provenance TEXT;
+    CREATE INDEX files_extraction_state ON files(extraction_state, retry_after);
+    CREATE TABLE embedding_spans(
+        section INTEGER NOT NULL,
+        offset INTEGER NOT NULL,
+        model TEXT NOT NULL,
+        vector BLOB NOT NULL,
+        PRIMARY KEY(section, offset)
+    );
+    INSERT INTO embedding_spans SELECT section, 0, model, vector FROM embeddings;
+    DELETE FROM embeddings WHERE section IN (SELECT rowid FROM sections WHERE length(text) + length(coalesce(title, '')) > 2000);
+    CREATE TRIGGER sections_spans_ad AFTER DELETE ON sections BEGIN
+        DELETE FROM embedding_spans WHERE section = old.rowid;
+    END;
+    CREATE TRIGGER sections_spans_au AFTER UPDATE OF title, text ON sections BEGIN
+        DELETE FROM embedding_spans WHERE section = old.rowid;
+    END;
+    PRAGMA user_version = 5;
+    """
+
+    static let v6 = """
+    CREATE TABLE pending_renames(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_path TEXT NOT NULL,
+        to_path TEXT NOT NULL
+    );
+    PRAGMA user_version = 6;
+    """
+
+    static let v7 = """
+    ALTER TABLE pending_renames ADD COLUMN file_identity TEXT;
+    PRAGMA user_version = 7;
+    """
+
+    /// Semantic search, additive and idempotent, so it can be applied lazily by the writer
+    /// (`IndexStore.ensureSemanticSchema`) without a `user_version` bump, or folded into a
+    /// numbered step later (`semanticColumns` first, guarded by `table_info`).
+    ///
+    /// - `embedding_spans` (v5) holds one row per embedded chunk: `offset`/`length` locate the
+    ///   chunk in its section's text, `hash` identifies the exact model input, and `vector` is
+    ///   a Float32 scale followed by Int8 components (`VectorCodec`). A row with offset -1 and
+    ///   an empty vector marks a section with nothing worth embedding.
+    /// - `comment_vectors`: the same for thoughts, keyed by the comment's rowid.
+    /// - `semantic_cache`: vectors of chunks whose rows were deleted (a file re-extracted,
+    ///   renamed or retitled), keyed by input hash, so unchanged text is never sent to a model
+    ///   twice. Pruned by age and size after each embedding pass.
+    static let semanticColumns: [(table: String, column: String, ddl: String)] = [
+        ("embedding_spans", "hash", "ALTER TABLE embedding_spans ADD COLUMN hash INTEGER"),
+        ("embedding_spans", "length", "ALTER TABLE embedding_spans ADD COLUMN length INTEGER"),
+    ]
+
+    static let semantic = """
+    CREATE INDEX IF NOT EXISTS embedding_spans_model ON embedding_spans(model, section);
+    CREATE TABLE IF NOT EXISTS comment_vectors(
+        comment INTEGER PRIMARY KEY,
+        model TEXT NOT NULL,
+        hash INTEGER NOT NULL,
+        vector BLOB NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS semantic_cache(
+        model TEXT NOT NULL,
+        hash INTEGER NOT NULL,
+        vector BLOB NOT NULL,
+        ts REAL NOT NULL,
+        PRIMARY KEY(model, hash)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS semantic_cache_ts ON semantic_cache(ts);
+    CREATE TRIGGER IF NOT EXISTS embedding_spans_keep AFTER DELETE ON embedding_spans
+    WHEN old.hash IS NOT NULL AND length(old.vector) > 0 BEGIN
+        INSERT OR IGNORE INTO semantic_cache(model, hash, vector, ts) VALUES (old.model, old.hash, old.vector, strftime('%s', 'now'));
+    END;
+    CREATE TRIGGER IF NOT EXISTS comments_vectors_ad AFTER DELETE ON comments BEGIN
+        DELETE FROM comment_vectors WHERE comment = old.rowid;
+    END;
+    CREATE TRIGGER IF NOT EXISTS comments_vectors_au AFTER UPDATE OF text ON comments BEGIN
+        DELETE FROM comment_vectors WHERE comment = old.rowid;
+    END;
+    CREATE TRIGGER IF NOT EXISTS comment_vectors_keep AFTER DELETE ON comment_vectors BEGIN
+        INSERT OR IGNORE INTO semantic_cache(model, hash, vector, ts) VALUES (old.model, old.hash, old.vector, strftime('%s', 'now'));
+    END;
+    """
+
 }

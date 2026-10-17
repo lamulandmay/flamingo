@@ -8,7 +8,7 @@ extension IndexStore {
     /// that hit everywhere are skipped so the graph gains signal, not noise.
     func mentionEdges(paths: [String]) throws -> [EdgeKey: Double] {
         var candidates: [(path: String, phrase: String)] = []
-        for p in paths {
+        for p in paths where !Self.isMachineListing(p) {
             guard let phrase = Self.mentionPhrase(for: p) else { continue }
             candidates.append((p, phrase))
         }
@@ -28,16 +28,67 @@ extension IndexStore {
                 let rows = try stmt.query([c.phrase, Self.mentionHitCap + 1]) { ($0.string(0), $0.int(1)) }
                 // Hitting everywhere means the name is a common phrase, not a reference.
                 guard rows.count <= Self.mentionHitCap else { continue }
-                for (source, n) in rows where source != c.path {
+                for (source, n) in rows where source != c.path && !Self.isMachineListing(source) {
                     weights[EdgeKey(source: source, target: c.path, kind: .mention), default: 0] += Double(min(n, 5))
                 }
             }
         }
-        return weights
+        return Self.strongestMentions(weights)
     }
 
     static let mentionQueryCap = 6000
     static let mentionHitCap = 40
+    /// A file that names more files than this is a list, not a reference; keep its strongest.
+    static let mentionSourceCap = 20
+    /// Mentions a file keeps, either direction. A guess is worth showing only when it is
+    /// among the few strongest; past that the graph is noise.
+    static let mentionNodeCap = 5
+
+    /// The strongest mentions first, each kept while its naming file is under
+    /// `mentionSourceCap` and both of its files are under `mentionNodeCap`. Deterministic:
+    /// ties go by path.
+    static func strongestMentions(_ weights: [EdgeKey: Double]) -> [EdgeKey: Double] {
+        let ranked = weights.sorted {
+            $0.value != $1.value ? $0.value > $1.value : ($0.key.source, $0.key.target) < ($1.key.source, $1.key.target)
+        }
+        var named: [String: Int] = [:], degree: [String: Int] = [:]
+        var kept: [EdgeKey: Double] = [:]
+        for (key, w) in ranked {
+            guard named[key.source, default: 0] < mentionSourceCap,
+                  degree[key.source, default: 0] < mentionNodeCap,
+                  degree[key.target, default: 0] < mentionNodeCap else { continue }
+            named[key.source, default: 0] += 1
+            degree[key.source, default: 0] += 1
+            degree[key.target, default: 0] += 1
+            kept[key] = w
+        }
+        return kept
+    }
+
+    /// Files that list other files' names for a machine, not a reader: package records and
+    /// manifests, lockfiles, logs, transcripts, and anything inside an installed package, a
+    /// build folder or a hidden folder. They neither mention nor are mentioned.
+    static func isMachineListing(_ path: String) -> Bool {
+        let parts = path.split(separator: "/")
+        guard let name = parts.last?.lowercased() else { return true }
+        for dir in parts.dropLast() {
+            let d = dir.lowercased()
+            if d.hasPrefix(".") || machineFolders.contains(d) || d.hasSuffix(".dist-info") || d.hasSuffix(".egg-info") { return true }
+        }
+        if machineFiles.contains(name) { return true }
+        return machineExts.contains((name as NSString).pathExtension)
+    }
+
+    static let machineFolders: Set<String> = [
+        "conda-meta", "site-packages", "dist-packages", "node_modules", "bower_components", "build",
+        "deriveddata", "pods", "__pycache__", "venv", "anaconda3", "miniconda3", "miniforge3",
+    ]
+    static let machineFiles: Set<String> = [
+        "record", "paths.json", "installer", "wheel", "top_level.txt", "sources.txt", "package-lock.json",
+        "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "pipfile.lock", "cargo.lock",
+        "gemfile.lock", "composer.lock", "podfile.lock", "go.sum", "packages.lock.json", "uv.lock",
+    ]
+    static let machineExts: Set<String> = ["log", "jsonl", "lock"]
     static let documentExts: Set<String> = ["pptx", "key", "docx", "pages", "xlsx", "numbers", "pdf", "md", "markdown", "txt", "csv", "rtf"]
 
     static let genericStems: Set<String> = [

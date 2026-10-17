@@ -36,6 +36,7 @@ struct GraphKeyInput {
 enum GraphKeyCode {
     static let returnKey: UInt16 = 36
     static let keypadEnter: UInt16 = 76
+    static let space: UInt16 = 49
     static let escape: UInt16 = 53
     static let left: UInt16 = 123
     static let right: UInt16 = 124
@@ -87,6 +88,8 @@ final class GraphGestureRecognizer {
         case pressed(start: CGPoint, node: Int?, grab: CGSize, clickCount: Int, isDouble: Bool)
         case draggingNode(node: Int, grab: CGSize)
         case panning(last: CGPoint)
+        /// ⌥-drag from a node: drawing a connection.
+        case linking(node: Int)
     }
 
     private struct LastClick { var node: Int? }
@@ -94,6 +97,9 @@ final class GraphGestureRecognizer {
     private struct ZoomAnimation { var from: CGFloat; var to: CGFloat; var start: TimeInterval }
 
     private var press = Press.idle
+    private var pressAdditive = false
+    /// ⌥ was down on the press: a drag from a node draws a connection instead of moving it.
+    private var pressLinks = false
     /// Last value sent to `target.hover`.
     private(set) var hovered: Int?
     /// Last known pointer location; nil once it leaves the view.
@@ -123,6 +129,8 @@ final class GraphGestureRecognizer {
     func mouseDown(at p: CGPoint, clickCount: Int, modifiers: NSEvent.ModifierFlags = []) -> Bool {
         guard !modifiers.contains(.control) else { return false }
         finishPress(at: p)   // a lost mouseUp (modal, window switch) must not leave a drag open
+        pressAdditive = modifiers.contains(.command)
+        pressLinks = modifiers.contains(.option)
         pointer = p
         guard let target else { return true }
         let node = target.node(atScreen: p)
@@ -154,7 +162,11 @@ final class GraphGestureRecognizer {
         case let .pressed(start, node, grab, _, _):
             guard hypot(p.x - start.x, p.y - start.y) > Self.dragThreshold else { return }
             lastClick = nil
-            if let node {
+            if let node, pressLinks {
+                press = .linking(node: node)
+                target.beginLink(from: node, to: p)
+                target.updateLink(to: p, over: target.node(atScreen: p))
+            } else if let node {
                 press = .draggingNode(node: node, grab: grab)
                 setHover(node)
                 target.beginNodeDrag(node)
@@ -172,6 +184,8 @@ final class GraphGestureRecognizer {
             target.dragNode(node, toWorld: world(p, offset: grab))
         case .panning:
             pan(to: p)
+        case .linking:
+            target.updateLink(to: p, over: target.node(atScreen: p))
         }
     }
 
@@ -185,19 +199,22 @@ final class GraphGestureRecognizer {
         case let .pressed(_, node, _, clickCount, isDouble):
             lastClick = LastClick(node: node)
             guard let target else { return }
-            if isDouble {
+            if isDouble && !pressAdditive {
                 if let node { target.activate(node) } else { fitAll() }
             } else if clickCount <= 2, let node {
                 // clickCount 2 that isn't a double on the same thing (the second press
                 // landed elsewhere) counts as a single click. Triple clicks do nothing.
                 // Selecting is harmless before a possible second click, so never defer.
-                target.click(node)
+                target.click(node, additive: pressAdditive)
             }
         case let .draggingNode(node, _):
             target?.endNodeDrag(node)
             refreshHover(at: p)
         case .panning:
             onPanningChanged(false)
+            refreshHover(at: p)
+        case let .linking(node):
+            target?.endLink(from: node, onto: target?.node(atScreen: p))
             refreshHover(at: p)
         }
     }
@@ -295,6 +312,9 @@ final class GraphGestureRecognizer {
         case GraphKeyCode.returnKey, GraphKeyCode.keypadEnter:
             if !key.isRepeat { target.openSelection() }
             return true
+        case GraphKeyCode.space:
+            if !key.isRepeat { target.clearSelection() }
+            return true
         case GraphKeyCode.escape:
             if !key.isRepeat { target.escape() }
             return true
@@ -322,6 +342,11 @@ final class GraphGestureRecognizer {
 
     /// Esc, from keyDown or `cancelOperation(_:)`.
     func escape() {
+        if case let .linking(node) = press {
+            press = .idle
+            target?.endLink(from: node, onto: nil)
+            return
+        }
         target?.escape()
     }
 
@@ -411,6 +436,10 @@ final class GraphGestureRecognizer {
         switch press {
         case .idle, .pressed: press = .idle
         case .draggingNode, .panning: mouseUp(at: p)
+        case let .linking(node):
+            // A lost mouseUp cancels the line rather than connecting wherever it was.
+            press = .idle
+            target?.endLink(from: node, onto: nil)
         }
     }
 

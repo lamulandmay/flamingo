@@ -20,7 +20,7 @@ let package = Package(
             path: "Sources/Flamingo"
         ),
         // Pure model layer: vault, file identity, sidecar notes, wikilinks, graph model.
-        .target(name: "FlamingoCore", path: "Sources/FlamingoCore"),
+        .target(name: "FlamingoCore", path: "Sources/FlamingoCore", resources: [.copy("Templates")]),
         // Design tokens and reusable components. Depends on nothing.
         .target(name: "FlamingoDesign", path: "Sources/FlamingoDesign"),
         // Comment capture: hotkey, floating panel, frontmost-app context.
@@ -44,5 +44,6 @@ let package = Package(
         .testTarget(name: "FlamingoAskTests", dependencies: ["FlamingoAsk"], path: "Tests/FlamingoAskTests"),
         .testTarget(name: "FlamingoCaptureTests", dependencies: ["FlamingoCapture", "FlamingoCore"], path: "Tests/FlamingoCaptureTests"),
         .testTarget(name: "FlamingoGraphTests", dependencies: ["FlamingoGraph", "FlamingoCore"], path: "Tests/FlamingoGraphTests"),
+        .testTarget(name: "FlamingoAppTests", dependencies: ["Flamingo"], path: "Tests/FlamingoAppTests"),
     ]
 )

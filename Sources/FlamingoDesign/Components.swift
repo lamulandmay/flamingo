@@ -136,7 +136,7 @@ public struct Chip: View {
     }
 
     private var label: some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+        let shape = Squircle(radius: Theme.Radius.s)
         return Text(text)
             .font(mono ? Theme.Font.monoSmall : Theme.Font.small)
             .foregroundStyle(Theme.Color.textSecondary)
@@ -242,7 +242,7 @@ public struct PanelChrome<Content: View>: View {
     }
 
     public var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Theme.Radius.l, style: .continuous)
+        let shape = Squircle(radius: Theme.Radius.l)
         content
             .frame(width: width)
             .background(VisualEffect(.sidebar, blending: nil, state: .active))
@@ -276,8 +276,8 @@ public struct Toast: View {
         }
         .padding(.horizontal, Theme.Space.m)
         .frame(height: 28)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).fill(Theme.Color.bgRaised))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous)
+        .background(Squircle(radius: Theme.Radius.m).fill(Theme.Color.bgRaised))
+        .overlay(Squircle(radius: Theme.Radius.m)
             .strokeBorder(Theme.Color.hairline, lineWidth: Theme.Size.hairline))
         .transition(.opacity)
     }
@@ -294,7 +294,7 @@ public enum FlamingoMode: Int, CaseIterable, Identifiable, Hashable, Sendable {
         case .files: "folder"
         case .graph: "point.3.connected.trianglepath.dotted"
         case .trail: "point.topleft.down.to.point.bottomright.curvepath"
-        case .ask: "text.bubble"
+        case .ask: "sparkle"
         }
     }
     /// For menus, tooltips and VoiceOver. Never drawn in the control itself.
@@ -303,11 +303,13 @@ public enum FlamingoMode: Int, CaseIterable, Identifiable, Hashable, Sendable {
         case .files: "Files"
         case .graph: "Graph"
         case .trail: "Trail"
-        case .ask: "Ask"
+        case .ask: "Chat"
         }
     }
     /// ⌘1–⌘4.
     public var key: KeyEquivalent { KeyEquivalent(Character(String(rawValue + 1))) }
+    /// The views the toolbar switches between. Chat is a sidebar, not a view.
+    public static let views: [FlamingoMode] = [.files, .graph, .trail]
 }
 
 /// Four SF Symbols, no text. Selected mode is accent on a raised segment.
@@ -323,12 +325,12 @@ public struct SegmentedModes: View {
 
     public var body: some View {
         HStack(spacing: 2) {
-            ForEach(FlamingoMode.allCases) { m in
+            ForEach(FlamingoMode.views) { m in
                 ModeSegment(mode: m, selected: selection == m) { selection = m }
             }
         }
         .padding(2)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.m, style: .continuous).fill(Theme.Color.hover))
+        .background(Squircle(radius: Theme.Radius.m).fill(Theme.Color.hover))
         .animation(Theme.Motion.fast, value: selection)
     }
 }
@@ -346,7 +348,7 @@ private struct ModeSegment: View {
                 .foregroundStyle(selected ? Theme.Color.accent : Theme.Color.textSecondary)
                 .opacity(selected || hovering ? 1 : Theme.Opacity.rest)
                 .frame(width: 32, height: 22)
-                .background(RoundedRectangle(cornerRadius: Theme.Radius.m - 2, style: .continuous)
+                .background(ConcentricSquircle(parentRadius: Theme.Radius.m, padding: 2)
                     .fill(Theme.Color.fill)
                     .opacity(selected ? 1 : 0))
                 .contentShape(Rectangle())
@@ -406,7 +408,7 @@ public struct SearchField: View {
         }
         .padding(.horizontal, Theme.Space.s)
         .frame(height: Theme.Size.row)
-        .background(RoundedRectangle(cornerRadius: Theme.Radius.m - 2, style: .continuous).fill(Theme.Color.fill))
+        .background(Squircle(radius: Theme.Radius.m - 2).fill(Theme.Color.fill))
         .focusRing(isFocused, radius: Theme.Radius.m - 2)
         .animation(Theme.Motion.fast, value: text.isEmpty)
     }
@@ -493,7 +495,8 @@ extension View {
     /// A 2pt accent ring just outside the view, the way macOS draws focus.
     public func focusRing(_ visible: Bool, radius: CGFloat = Theme.Radius.s) -> some View {
         overlay(
-            RoundedRectangle(cornerRadius: radius + 2, style: .continuous)
+            // The child's own outline grown 2pt along its normals: concentric at every point.
+            ConcentricSquircle(parentRadius: radius, padding: -2)
                 .strokeBorder(Theme.Color.accent.opacity(0.55), lineWidth: 2)
                 .padding(-2)
                 .opacity(visible ? 1 : 0)
@@ -534,7 +537,7 @@ private struct FlamingoRow: ViewModifier {
             .lineLimit(1)
             .padding(.horizontal, Theme.Space.s)
             .frame(maxWidth: .infinity, minHeight: Theme.Size.row, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+            .background(Squircle(radius: Theme.Radius.s)
                 .fill(selected ? Theme.Color.selection : hovering ? Theme.Color.hover : .clear))
             .contentShape(Rectangle())
             .onHover { hovering = $0 }

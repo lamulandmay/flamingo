@@ -245,4 +245,44 @@ enum LayoutStore {
         cache.lock.lock(); defer { cache.lock.unlock() }
         cache.entries[key] = layout
     }
+
+    /// Replace positions and pins only for the nodes in this snapshot. Folder-scoped views
+    /// must not erase the rest of a vault's layout.
+    static func merging(_ snapshot: SavedLayout, into previous: SavedLayout?) -> SavedLayout {
+        var all = previous ?? SavedLayout(nodes: [:], pinned: [])
+        all.nodes.merge(snapshot.nodes) { _, new in new }
+        var pins = Set(all.pinned)
+        pins.subtract(snapshot.nodes.keys)
+        pins.formUnion(snapshot.pinned)
+        all.pinned = pins.sorted()
+        return all
+    }
+
+    private static let writes = DispatchQueue(label: "com.flamingo.graph-layout", qos: .utility)
+
+    /// Undo must finish writing before it is reported as successful. Wait behind existing
+    /// queued snapshots so an older background save cannot overwrite the restored layout.
+    static func restore(_ snapshot: SavedLayout, key: String, vault: Vault?) throws -> SavedLayout {
+        cache.lock.lock()
+        let merged: SavedLayout
+        do {
+            merged = merging(snapshot, into: cache.entries[key])
+            if let vault { try writes.sync { try save(merged, to: vault) } }
+            cache.entries[key] = merged
+        } catch { cache.lock.unlock(); throw error }
+        cache.lock.unlock()
+        NotificationCenter.default.post(name: GraphUndoNotification.layout, object: key)
+        return merged
+    }
+
+    @discardableResult
+    static func remember(_ snapshot: SavedLayout, key: String, vault: Vault?) -> SavedLayout {
+        cache.lock.lock()
+        let merged = merging(snapshot, into: cache.entries[key])
+        cache.entries[key] = merged
+        // Enqueue while holding the cache lock, preserving snapshot order across engine and UI.
+        if let vault { writes.async { try? save(merged, to: vault) } }
+        cache.lock.unlock()
+        return merged
+    }
 }

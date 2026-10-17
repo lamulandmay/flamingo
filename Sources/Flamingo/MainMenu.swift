@@ -33,6 +33,14 @@ enum MainMenu {
         recentItem.submenu = recent
         recentMenu = recent
         fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "New File…", action: #selector(AppDelegate.newFile(_:)), keyEquivalent: "n")
+        let newNote = fileMenu.addItem(withTitle: "New Note", action: #selector(AppDelegate.newNote(_:)), keyEquivalent: "n")
+        newNote.keyEquivalentModifierMask = [.command, .option]
+        fileMenu.addItem(withTitle: "Save", action: #selector(AppDelegate.saveDocument(_:)), keyEquivalent: "s")
+        let newFolder = fileMenu.addItem(withTitle: "New Folder", action: #selector(AppDelegate.newFolder(_:)), keyEquivalent: "n")
+        newFolder.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(withTitle: "Bookmark", action: #selector(AppDelegate.toggleBookmark(_:)), keyEquivalent: "d")
+        fileMenu.addItem(.separator())
         let thought = fileMenu.addItem(withTitle: "Leave a Thought", action: #selector(AppDelegate.leaveThought(_:)), keyEquivalent: "c")
         thought.keyEquivalentModifierMask = [.command, .shift]
         fileMenu.addItem(withTitle: "Capture from Any App", action: #selector(AppDelegate.toggleGlobalCapture(_:)), keyEquivalent: "")
@@ -42,17 +50,20 @@ enum MainMenu {
         let reveal = fileMenu.addItem(withTitle: "Reveal in Finder", action: #selector(AppDelegate.revealInFinder(_:)), keyEquivalent: "r")
         reveal.keyEquivalentModifierMask = [.command, .shift]
         fileMenu.addItem(withTitle: "Copy Path", action: #selector(AppDelegate.copyPath(_:)), keyEquivalent: "")
+        fileMenu.addItem(withTitle: "Copy File", action: #selector(AppDelegate.copyFile(_:)), keyEquivalent: "")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Reindex Vault", action: #selector(AppDelegate.reindex(_:)), keyEquivalent: "")
         fileMenu.addItem(.separator())
-        fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileMenu.addItem(withTitle: "Close Tab", action: #selector(AppDelegate.closeDocument(_:)), keyEquivalent: "w")
+        let closeWindow = fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        closeWindow.keyEquivalentModifierMask = [.command, .shift]
         fileItem.submenu = fileMenu
 
         // Edit
         let editItem = NSMenuItem(); main.addItem(editItem)
         let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Undo", action: #selector(AppDelegate.performUndo(_:)), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: #selector(AppDelegate.performRedo(_:)), keyEquivalent: "z")
         redo.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(.separator())
         editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
@@ -70,8 +81,36 @@ enum MainMenu {
             item.tag = m.rawValue
         }
         viewMenu.addItem(.separator())
-        let rail = viewMenu.addItem(withTitle: "Comments", action: #selector(AppDelegate.toggleRail(_:)), keyEquivalent: "i")
+        for (i, style) in FolderStyle.allCases.enumerated() {
+            let item = viewMenu.addItem(withTitle: style.title, action: #selector(AppDelegate.setFolderStyle(_:)), keyEquivalent: style.key)
+            item.keyEquivalentModifierMask = [.command, .option]
+            item.tag = i
+        }
+        viewMenu.addItem(.separator())
+        viewMenu.addItem(withTitle: "Connect Files", action: #selector(AppDelegate.toggleConnectGrid(_:)), keyEquivalent: "j")
+        viewMenu.addItem(.separator())
+        let sidebar = viewMenu.addItem(withTitle: "Left Sidebar", action: #selector(AppDelegate.toggleSidebar(_:)), keyEquivalent: "s")
+        sidebar.keyEquivalentModifierMask = [.command, .control]
+        for (i, tab) in SidebarTab.allCases.enumerated() {
+            let item = viewMenu.addItem(withTitle: tab.title, action: #selector(AppDelegate.showSidebarTab(_:)), keyEquivalent: "")
+            item.tag = i
+            item.indentationLevel = 1
+        }
+        let split = viewMenu.addItem(withTitle: "Split View", action: #selector(AppDelegate.toggleSplit(_:)), keyEquivalent: "\\")
+        split.keyEquivalentModifierMask = [.command]
+        let focusPane = viewMenu.addItem(withTitle: "Focus Other Pane", action: #selector(AppDelegate.focusOtherPane(_:)), keyEquivalent: String(Character(UnicodeScalar(NSRightArrowFunctionKey)!)))
+        focusPane.keyEquivalentModifierMask = [.command, .option]
+        viewMenu.addItem(withTitle: "Open Current File Beside", action: #selector(AppDelegate.openCurrentBeside(_:)), keyEquivalent: "")
+        let rail = viewMenu.addItem(withTitle: "Inspector", action: #selector(AppDelegate.toggleRail(_:)), keyEquivalent: "i")
         rail.keyEquivalentModifierMask = [.command, .option]
+        for (i, tab) in InspectorTab.allCases.enumerated() where tab != .chat {
+            let item = viewMenu.addItem(withTitle: tab.title, action: #selector(AppDelegate.showInspectorTab(_:)), keyEquivalent: String(i + 1))
+            item.keyEquivalentModifierMask = [.command, .control]
+            item.tag = i
+            item.indentationLevel = 1
+        }
+        viewMenu.addItem(withTitle: "Wander Suggestions", action: #selector(AppDelegate.startWander(_:)), keyEquivalent: "")
+        viewMenu.addItem(withTitle: "Replay Graph History", action: #selector(AppDelegate.replayGraph(_:)), keyEquivalent: "")
         viewMenu.addItem(withTitle: "Record Trail", action: #selector(AppDelegate.toggleTrailRecording(_:)), keyEquivalent: "")
         viewMenu.addItem(.separator())
         let up = String(Character(UnicodeScalar(NSUpArrowFunctionKey)!))
@@ -96,9 +135,30 @@ enum MainMenu {
         let goMenu = NSMenu(title: "Go")
         goMenu.addItem(withTitle: "Open Quickly…", action: #selector(AppDelegate.showPalette(_:)), keyEquivalent: "k")
         goMenu.addItem(withTitle: "Search…", action: #selector(AppDelegate.showSearch(_:)), keyEquivalent: "f")
+        let globalSearch = goMenu.addItem(withTitle: "Search from Any App", action: #selector(AppDelegate.toggleGlobalSearch(_:)), keyEquivalent: "")
+        globalSearch.toolTip = "Show search with Control-Option-F"
+        let searchAll = goMenu.addItem(withTitle: "Search in All Files", action: #selector(AppDelegate.searchInSidebar(_:)), keyEquivalent: "f")
+        searchAll.keyEquivalentModifierMask = [.command, .shift]
+        goMenu.addItem(withTitle: "Reveal in File Explorer", action: #selector(AppDelegate.revealInExplorer(_:)), keyEquivalent: "")
+        goMenu.addItem(withTitle: "Random File", action: #selector(AppDelegate.openRandomFile(_:)), keyEquivalent: "")
         goMenu.addItem(.separator())
         goMenu.addItem(withTitle: "Back", action: #selector(AppDelegate.goBack(_:)), keyEquivalent: "[")
         goMenu.addItem(withTitle: "Forward", action: #selector(AppDelegate.goForward(_:)), keyEquivalent: "]")
+        goMenu.addItem(.separator())
+        // Finder's Go menu, with Finder's keys.
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let places: [(String, URL, String, NSEvent.ModifierFlags)] = [
+            ("Desktop", home.appendingPathComponent("Desktop"), "d", [.command, .shift]),
+            ("Documents", home.appendingPathComponent("Documents"), "o", [.command, .shift]),
+            ("Downloads", home.appendingPathComponent("Downloads"), "l", [.command, .option]),
+            ("Home", home, "h", [.command, .shift]),
+            ("Applications", URL(fileURLWithPath: "/Applications"), "a", [.command, .shift]),
+        ]
+        for (title, url, key, modifiers) in places {
+            let item = goMenu.addItem(withTitle: title, action: #selector(AppDelegate.goToPlace(_:)), keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers
+            item.representedObject = url
+        }
         goItem.submenu = goMenu
 
         // Window
@@ -151,21 +211,54 @@ extension AppDelegate: NSMenuItemValidation {
         Defaults.recentVaults = []
         MainMenu.refreshRecents()
     }
+    @objc func performUndo(_ sender: Any?) { undoRouting?.perform(.undo) }
+    @objc func performRedo(_ sender: Any?) { undoRouting?.perform(.redo) }
     @objc func leaveThought(_ sender: Any?) { state.leaveThought() }
     @objc func toggleGlobalCapture(_ sender: Any?) { state.captureGlobal.toggle() }
     @objc func toggleTrailRecording(_ sender: Any?) { state.trailEnabled.toggle() }
     @objc func openExternally(_ sender: Any?) { state.openExternally() }
     @objc func revealInFinder(_ sender: Any?) { state.revealInFinder() }
     @objc func copyPath(_ sender: Any?) { state.copyPath() }
+    @objc func copyFile(_ sender: Any?) { state.copyFiles() }
+    @objc func toggleGlobalSearch(_ sender: Any?) {
+        if globalSearchShortcut?.toggle() == false {
+            state.showToast(ToastMessage(text: "Control-Option-F is already used by macOS or another app."))
+        }
+    }
     @objc func reindex(_ sender: Any?) { state.reindex(force: true) }
     @objc func setMode(_ sender: NSMenuItem) {
         if let m = AppState.Mode(rawValue: sender.tag) { state.mode = m }
     }
+    @objc func setFolderStyle(_ sender: NSMenuItem) { state.showFolderStyle(FolderStyle.allCases[sender.tag]) }
+    @objc func goToPlace(_ sender: NSMenuItem) { if let url = sender.representedObject as? URL { state.openFavorite(url) } }
     @objc func toggleRail(_ sender: Any?) { state.toggleRail() }
+    @objc func showInspectorTab(_ sender: NSMenuItem) { state.showInspector(InspectorTab.allCases[sender.tag]) }
+    @objc func startWander(_ sender: Any?) { state.startWander() }
+    @objc func toggleConnectGrid(_ sender: Any?) { state.connectGridShown.toggle() }
+    @objc func replayGraph(_ sender: Any?) { state.replayGraph() }
+    @objc func toggleSplit(_ sender: Any?) { state.toggleSplit() }
+    @objc func focusOtherPane(_ sender: Any?) { state.focusOtherPane() }
+    @objc func openCurrentBeside(_ sender: Any?) { if let file = state.selected { state.openBeside(file, anchor: state.anchor) } }
     @objc func previousAnchor(_ sender: Any?) { state.stepAnchor(-1) }
     @objc func nextAnchor(_ sender: Any?) { state.stepAnchor(1) }
     @objc func showPalette(_ sender: Any?) { state.showPalette(.commands) }
     @objc func showSearch(_ sender: Any?) { state.showPalette(.search) }
+    @objc func newNote(_ sender: Any?) { state.newNote() }
+    @objc func newFile(_ sender: Any?) { state.showNewFile() }
+    @objc func saveDocument(_ sender: Any?) { state.saveDocument() }
+    /// ⌘W closes one thing: the panel or sheet that has focus, else one tab (or the focused
+    /// pane in split view). It never closes the main window, so it can't quit Flamingo.
+    @objc func closeDocument(_ sender: Any?) {
+        if let key = NSApp.keyWindow, key !== window { key.performClose(sender); return }
+        if state.canCloseDocument { state.closeCurrentDocument() } else { NSSound.beep() }
+    }
+    @objc func newFolder(_ sender: Any?) { state.newFolder() }
+    @objc func toggleBookmark(_ sender: Any?) { state.toggleBookmarkCurrent() }
+    @objc func toggleSidebar(_ sender: Any?) { state.toggleSidebar() }
+    @objc func showSidebarTab(_ sender: NSMenuItem) { state.showSidebarTab(SidebarTab.allCases[sender.tag]) }
+    @objc func searchInSidebar(_ sender: Any?) { state.showSidebarSearch() }
+    @objc func revealInExplorer(_ sender: Any?) { state.revealCurrentFile() }
+    @objc func openRandomFile(_ sender: Any?) { state.openRandomFile() }
     @objc func goBack(_ sender: Any?) { state.goBack() }
     @objc func goForward(_ sender: Any?) { state.goForward() }
 
@@ -173,22 +266,74 @@ extension AppDelegate: NSMenuItemValidation {
         let hasVault = state.vault != nil
         let hasFile = state.selected != nil
         switch item.action {
+        case #selector(performUndo(_:)), #selector(performRedo(_:)):
+            let direction: UndoRouting.Direction = item.action == #selector(performUndo(_:)) ? .undo : .redo
+            let status = undoRouting?.menu(direction)
+            item.title = status?.title ?? (direction == .undo ? "Undo" : "Redo")
+            return status?.enabled == true
         case #selector(setMode(_:)):
-            item.state = item.tag == state.mode.rawValue ? .on : .off
+            let chat = item.tag == AppState.Mode.ask.rawValue
+            item.state = chat ? (state.railShown && state.inspectorTab == .chat ? .on : .off) : (item.tag == state.mode.rawValue ? .on : .off)
+            return hasVault
+        case #selector(goToPlace(_:)):
+            return hasVault
+        case #selector(setFolderStyle(_:)):
+            item.state = FolderStyle.allCases[item.tag] == state.browser.style ? .on : .off
             return hasVault
         case #selector(toggleRail(_:)):
             item.state = state.railShown ? .on : .off
             return true
+        case #selector(showInspectorTab(_:)):
+            item.state = state.railShown && InspectorTab.allCases[item.tag] == state.inspectorTab ? .on : .off
+            return hasVault
+        case #selector(toggleConnectGrid(_:)):
+            item.state = state.connectGridShown ? .on : .off
+            return state.vault != nil
+        case #selector(startWander(_:)), #selector(replayGraph(_:)):
+            return hasVault
+        case #selector(toggleSplit(_:)):
+            item.state = state.splitVisible ? .on : .off
+            return hasFile || state.splitVisible
+        case #selector(focusOtherPane(_:)):
+            return state.splitVisible
+        case #selector(openCurrentBeside(_:)):
+            return hasFile
         case #selector(toggleGlobalCapture(_:)):
             item.state = state.captureGlobal ? .on : .off
+            return true
+        case #selector(toggleGlobalSearch(_:)):
+            item.state = globalSearchShortcut?.isEnabled == true ? .on : .off
             return true
         case #selector(toggleTrailRecording(_:)):
             item.state = state.trailEnabled ? .on : .off
             return true
-        case #selector(leaveThought(_:)):
+        case #selector(leaveThought(_:)), #selector(newNote(_:)), #selector(newFile(_:)), #selector(newFolder(_:)), #selector(searchInSidebar(_:)):
             return hasVault
+        case #selector(saveDocument(_:)):
+            return state.selected.flatMap { state.textBuffers[$0.relativePath] }?.dirty == true
+        case #selector(closeDocument(_:)):
+            if let key = NSApp.keyWindow, key !== window { item.title = "Close"; return true }
+            item.title = state.splitVisible ? "Close Pane" : "Close Tab"
+            // Always enabled, so ⌘W with nothing to close beeps instead of reaching the window.
+            return true
+        case #selector(toggleBookmark(_:)):
+            item.title = state.selected.map { state.isBookmarked($0.relativePath, folder: false) } == true ? "Remove Bookmark" : "Bookmark"
+            return hasFile || !(state.selectedFolder ?? "").isEmpty
+        case #selector(toggleSidebar(_:)):
+            item.state = state.sidebarCollapsed ? .off : .on
+            return true
+        case #selector(showSidebarTab(_:)):
+            item.state = !state.sidebarCollapsed && SidebarTab.allCases[item.tag] == state.sidebarTab ? .on : .off
+            return hasVault
+        case #selector(revealInExplorer(_:)):
+            return hasFile
+        case #selector(openRandomFile(_:)):
+            return !state.files.isEmpty
         case #selector(revealInFinder(_:)), #selector(copyPath(_:)):
             return hasFile
+        case #selector(copyFile(_:)):
+            item.title = hasFile ? "Copy File" : "Copy Folder"
+            return hasFile || state.selectedFolder != nil
         case #selector(openExternally(_:)):
             item.title = "Open in " + (state.defaultAppName(for: state.selected) ?? "Default App")
             return hasFile

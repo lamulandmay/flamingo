@@ -49,6 +49,43 @@ enum Defaults {
         set { d.set(Double(newValue), forKey: "sidebarWidth") }
     }
 
+    static var inspectorWidth: CGFloat {
+        get { let w = d.double(forKey: "inspectorWidth"); return w == 0 ? 320 : CGFloat(w) }
+        set { d.set(Double(newValue), forKey: "inspectorWidth") }
+    }
+
+    /// The folder surface's view: Finder columns (the default) or icons.
+    static var folderStyle: FolderStyle {
+        get { d.string(forKey: "folderStyle").flatMap(FolderStyle.init(rawValue:)) ?? .columns }
+        set { d.set(newValue.rawValue, forKey: "folderStyle") }
+    }
+
+    static var inspectorTab: InspectorTab {
+        get { d.string(forKey: "inspectorTab").flatMap(InspectorTab.init(rawValue:)) ?? .thoughts }
+        set { d.set(newValue.rawValue, forKey: "inspectorTab") }
+    }
+
+    static var sidebarTab: SidebarTab {
+        get { d.string(forKey: "sidebarTab").flatMap(SidebarTab.init(rawValue:)) ?? .files }
+        set { d.set(newValue.rawValue, forKey: "sidebarTab") }
+    }
+
+    static var sidebarCollapsed: Bool {
+        get { d.bool(forKey: "sidebarCollapsed") }
+        set { d.set(newValue, forKey: "sidebarCollapsed") }
+    }
+
+    static var fileSort: FileSort {
+        get { d.string(forKey: "fileSort").flatMap(FileSort.init(rawValue:)) ?? .nameAscending }
+        set { d.set(newValue.rawValue, forKey: "fileSort") }
+    }
+
+    /// On unless turned off: the explorer has always followed the selection.
+    static var autoReveal: Bool {
+        get { d.object(forKey: "autoReveal") as? Bool ?? true }
+        set { d.set(newValue, forKey: "autoReveal") }
+    }
+
     // MARK: Per-vault memory
 
     private static func key(_ name: String, _ vault: Vault) -> String {
@@ -67,5 +104,19 @@ enum Defaults {
     }
     static func setExpandedFolders(_ paths: Set<String>, in vault: Vault) {
         d.set(Array(paths).sorted(), forKey: key("expanded", vault))
+    }
+
+    static func showsAllUnpinnedFolders(in vault: Vault) -> Bool {
+        d.bool(forKey: key("allUnpinnedFolders", vault))
+    }
+    static func setShowsAllUnpinnedFolders(_ show: Bool, in vault: Vault) {
+        d.set(show, forKey: key("allUnpinnedFolders", vault))
+    }
+
+    static func foldedBookmarkGroups(in vault: Vault) -> Set<Int64> {
+        Set((d.array(forKey: key("foldedBookmarks", vault)) as? [NSNumber] ?? []).map(\.int64Value))
+    }
+    static func setFoldedBookmarkGroups(_ ctimes: Set<Int64>, in vault: Vault) {
+        d.set(ctimes.sorted().map { NSNumber(value: $0) }, forKey: key("foldedBookmarks", vault))
     }
 }

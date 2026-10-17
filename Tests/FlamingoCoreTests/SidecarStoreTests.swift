@@ -31,6 +31,32 @@ final class SidecarStoreTests: XCTestCase {
         XCTAssertEqual(try store.sidecarRefs(), [])
     }
 
+    func testSnapshotReplacementRestoresNoteAndCanRemoveItWithoutTouchingSource() throws {
+        let ref = try tv.file("snapshot.txt")
+        let source = try Data(contentsOf: tv.vault.url(for: ref))
+        try store.append(Comment(text: "original"), to: ref)
+        let original = try XCTUnwrap(store.document(for: ref))
+        try store.append(Comment(text: "new"), to: ref)
+        let changed = try XCTUnwrap(store.document(for: ref))
+        try store.replaceDocument(original, for: ref, expecting: changed)
+        XCTAssertEqual(try store.document(for: ref), original)
+        try store.replaceDocument(nil, for: ref, expecting: original)
+        XCTAssertNil(try store.document(for: ref))
+        try store.replaceDocument(original, for: ref, expecting: nil)
+        XCTAssertEqual(try store.document(for: ref), original)
+        XCTAssertEqual(try Data(contentsOf: tv.vault.url(for: ref)), source)
+    }
+
+    func testSnapshotReplacementPreservesConcurrentEditsFromAnotherStore() throws {
+        let ref = try tv.file("snapshot.txt")
+        try store.append(Comment(text: "original"), to: ref)
+        let expected = try XCTUnwrap(store.document(for: ref))
+        try SidecarStore(vault: tv.vault).append(Comment(text: "another window"), to: ref)
+        let newer = try store.document(for: ref)
+        XCTAssertThrowsError(try store.replaceDocument(nil, for: ref, expecting: expected))
+        XCTAssertEqual(try store.document(for: ref), newer)
+    }
+
     func testAppendCreatesSidecarWithFrontmatterAndIdentity() throws {
         let ref = try tv.file("decks/q3.pptx")
         try store.append(Comment(timestamp: ts("2026-10-14 22:05"), anchor: FileAnchor(kind: .slide, value: "7"), text: "Pricing contradicts [[q3-model.xlsx]]"), to: ref)

@@ -17,6 +17,11 @@ struct QuestionField: NSViewRepresentable {
     var focusRequest = 0
     /// Learns the field, so the key monitor can tell when it has the keys.
     var host: HostWindow?
+    /// Off for a field that lives beside other work (the chat in the right sidebar): it
+    /// takes the keys only when asked through `focusRequest`, never by arriving or by the
+    /// window becoming key.
+    var claimsFocus = true
+    var maxLines = 4
     var onSubmit: () -> Void
 
     func makeNSView(context: Context) -> NSTextField {
@@ -30,7 +35,9 @@ struct QuestionField: NSViewRepresentable {
         field.usesSingleLineMode = secure
         field.cell?.wraps = !secure
         field.cell?.isScrollable = secure
-        field.maximumNumberOfLines = secure ? 1 : 4
+        field.maximumNumberOfLines = secure ? 1 : maxLines
+        (field as? FocusingField)?.autoClaim = claimsFocus
+        (field as? FocusingSecureField)?.autoClaim = claimsFocus
         field.setContentHuggingPriority(.defaultHigh, for: .vertical)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         field.setAccessibilityLabel(accessibility)
@@ -59,7 +66,7 @@ struct QuestionField: NSViewRepresentable {
         field.preferredMaxLayoutWidth = width
         let height = field.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)).height
         let line = ceil(font.ascender - font.descender + font.leading)
-        return CGSize(width: width, height: min(max(height ?? line, line), line * 4))
+        return CGSize(width: width, height: min(max(height ?? line, line), line * CGFloat(secure ? 1 : maxLines)))
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -99,7 +106,9 @@ extension NSTextField {
     }
 }
 
-private protocol FocusClaiming: NSTextField {}
+private protocol FocusClaiming: NSTextField {
+    var autoClaim: Bool { get }
+}
 
 extension FocusClaiming {
     func claimFocus() {
@@ -118,7 +127,7 @@ private final class FocusObserver {
     func watch(_ field: FocusClaiming) {
         if let token { NotificationCenter.default.removeObserver(token) }
         token = nil
-        guard let window = field.window else { return }
+        guard let window = field.window, field.autoClaim else { return }
         token = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak field] _ in
             DispatchQueue.main.async { field?.claimFocus() }
         }
@@ -129,6 +138,7 @@ private final class FocusObserver {
 }
 
 private final class FocusingField: NSTextField, FocusClaiming {
+    var autoClaim = true
     private let observer = FocusObserver()
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -137,6 +147,7 @@ private final class FocusingField: NSTextField, FocusClaiming {
 }
 
 private final class FocusingSecureField: NSSecureTextField, FocusClaiming {
+    var autoClaim = true
     private let observer = FocusObserver()
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()

@@ -9,6 +9,9 @@ struct History {
         var anchor: FileAnchor?
         var mode: AppState.Mode = .files
         var folder: String?
+        /// A folder outside the vault the folder surface showed (a Finder favorite such as
+        /// /Applications), when that is where the user was.
+        var place: URL?
         /// When it was pushed and whether it came from scrubbing the sidebar, so a run of
         /// arrow-key hops collapses into the file the user rested on.
         var pushedAt = Date()
@@ -29,7 +32,7 @@ struct History {
     /// Records a new place. Drops any forward entries. Consecutive duplicates collapse, and a
     /// transient entry that was pushed moments ago is replaced rather than kept.
     mutating func push(_ entry: Entry) {
-        if let c = current, c.file == entry.file, c.mode == entry.mode, c.folder == entry.folder {
+        if let c = current, c.file == entry.file, c.mode == entry.mode, c.folder == entry.folder, c.place == entry.place {
             entries[index].anchor = entry.anchor ?? c.anchor
             entries[index].transient = false
             return
@@ -75,5 +78,31 @@ struct History {
     mutating func replace(with files: [FileRef]) {
         entries = files.map { Entry(file: $0, anchor: nil) }
         index = entries.count - 1
+    }
+
+    mutating func restore(entries: [Entry], index: Int) {
+        self.entries = Array(entries.suffix(cap))
+        self.index = min(max(-1, index - max(0, entries.count - cap)), self.entries.count - 1)
+    }
+
+    mutating func relocate(_ old: String, to new: String) {
+        for i in entries.indices {
+            if let path = entries[i].file?.relativePath, path == old || path.hasPrefix(old + "/") {
+                entries[i].file = FileRef(relativePath: new + path.dropFirst(old.count))
+            }
+            if let path = entries[i].folder, path == old || path.hasPrefix(old + "/") {
+                entries[i].folder = new + path.dropFirst(old.count)
+            }
+        }
+    }
+
+    mutating func remove(_ path: String) {
+        let cur = current
+        func contains(_ candidate: String) -> Bool { candidate == path || candidate.hasPrefix(path + "/") }
+        entries.removeAll { entry in
+            entry.file.map { contains($0.relativePath) }
+                ?? entry.folder.map { contains($0) } ?? false
+        }
+        index = cur.flatMap { entries.firstIndex(of: $0) } ?? (entries.count - 1)
     }
 }

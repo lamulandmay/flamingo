@@ -13,12 +13,14 @@ extension AskEngine {
                          anchor: FileAnchor = FileAnchor(kind: .region, value: "full")) async throws -> Comment {
         guard let jpeg = Self.jpeg(image, maxPixels: 1024) else { throw AskError.stream("Not an image") }
         let url = try await llama { }
-        let endpoint = ChatEndpoint(baseURL: url, model: LlamaServer.modelName, kind: .llama)
+        let endpoint = ChatEndpoint(baseURL: url, model: LlamaServer.shared.modelAlias, kind: .llama)
+        let model = LlamaServer.shared.displayName
         let body = Prompt.describeBody(endpoint, jpeg: jpeg, name: file.name)
         let text = try await chat.send(body, to: endpoint) { _ in }
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw AskError.stream("No description") }
-        let comment = Comment(anchor: anchor, text: text)
+        let comment = Comment(anchor: anchor, text: text,
+                              provenance: CommentProvenance(origin: .ai, model: model, reason: "Image description"))
         let sidecars = SidecarStore(vault: index.vault)
         try sidecars.append(comment, to: file)
         try? index.update([file])   // the comment is searchable at once, without waiting on the watcher

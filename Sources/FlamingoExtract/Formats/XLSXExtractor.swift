@@ -15,7 +15,20 @@ public struct XLSXExtractor: Extractor {
 
     public init() {}
 
-    public func extract(_ url: URL) throws -> Extracted {
+    public func extract(_ url: URL) throws -> Extracted { try read(url, selectedCell: nil) }
+
+    /// Reads an exact spreadsheet coordinate without inferring it from flattened rows.
+    /// Accepts `Sheet name!B12` and Excel's quoted `'Sheet name'!B12` spelling.
+    public func cell(_ anchor: FileAnchor, in url: URL) throws -> Section? {
+        guard anchor.kind == .cell, let bang = anchor.value.lastIndex(of: "!") else { return nil }
+        var name = String(anchor.value[..<bang])
+        if name.hasPrefix("'"), name.hasSuffix("'") { name = String(name.dropFirst().dropLast()).replacingOccurrences(of: "''", with: "'") }
+        let address = String(anchor.value[anchor.value.index(after: bang)...]).replacingOccurrences(of: "$", with: "").uppercased()
+        guard address.range(of: "^[A-Z]{1,3}[1-9][0-9]*$", options: .regularExpression) != nil else { return nil }
+        return try read(url, selectedCell: (name, address)).sections.first
+    }
+
+    private func read(_ url: URL, selectedCell: (sheet: String, address: String)?) throws -> Extracted {
         let zip = try ZipArchive(url)
         func small(_ name: String) -> Bool { zip.sizes[name, default: 0] <= Self.maxSheetBytes }
         // One unzip run covers the usual layout; parts at unusual paths are fetched afterwards.
@@ -38,7 +51,8 @@ public struct XLSXExtractor: Extractor {
         }
         let sharedPart = target(rels.values.first { $0.type == "sharedStrings" })
         let stylesPart = target(rels.values.first { $0.type == "styles" })
-        let sheetParts = sheets.compactMap(\.part)
+        let selectedSheets = selectedCell.map { cell in sheets.filter { $0.name == cell.sheet } } ?? sheets
+        let sheetParts = selectedSheets.compactMap(\.part)
         fetch(sheetParts.filter(small) + [sharedPart, stylesPart].compactMap { $0 })
         for part in sheetParts where !small(part) { parts[part] = zip.readPrefix(part, maxBytes: Self.maxSheetBytes) }
 
@@ -46,11 +60,22 @@ public struct XLSXExtractor: Extractor {
             shared: sharedPart.flatMap { parts[$0] }.map(SharedStringsParser.strings) ?? [],
             dateStyles: Self.dateStyles(stylesPart.flatMap { parts[$0] }),
             date1904: ["1", "true"].contains(workbook.first("workbookPr")?.attr("date1904") ?? ""))
-        let sections = sheets.map { sheet in
-            Section(anchor: FileAnchor(kind: .sheet, value: sheet.name), title: sheet.name,
-                    text: sheet.part.flatMap { parts[$0] }.map { SheetParser.text(of: $0, context) } ?? "")
+        if let cell = selectedCell {
+            guard let sheet = selectedSheets.first, let part = sheet.part, let data = parts[part] else { return .empty }
+            let found = SheetParser.value(of: data, context, at: cell.address)
+            guard found.complete || found.value != nil else { throw ExtractError.malformed("Cell lies outside the parsed worksheet budget.") }
+            return Extracted(sections: [Section(anchor: FileAnchor(kind: .cell, value: cell.sheet + "!" + cell.address),
+                                                title: cell.sheet + "!" + cell.address, text: found.value ?? "(empty cell)")])
         }
-        return Extracted(sections: sections, title: Self.title(parts["docProps/core.xml"]))
+        var complete = true
+        let sections = selectedSheets.map { sheet in
+            let result = sheet.part.flatMap { parts[$0] }.map { SheetParser.read($0, context) }
+            if result?.complete != true { complete = false }
+            return Section(anchor: FileAnchor(kind: .sheet, value: sheet.name), title: sheet.name, text: result?.text ?? "")
+        }
+        var out = Extracted(sections: sections, title: Self.title(parts["docProps/core.xml"]))
+        if !complete { out.coverage = ExtractionCoverage(.partial, reason: "A worksheet is missing, truncated, or exceeds the cell/byte budget.") }
+        return out
     }
 
     /// Parts a workbook almost always needs, picked by name so a single unzip run fetches them.
@@ -177,14 +202,24 @@ private struct LocalNames {
 private final class SheetParser: NSObject, XMLParserDelegate {
     struct Context { var shared: [String]; var dateStyles: [Bool]; var date1904: Bool }
 
-    static func text(of data: Data, _ context: Context) -> String {
+    static func read(_ data: Data, _ context: Context) -> (text: String, complete: Bool) {
         let p = SheetParser(context)
         let xml = XMLParser(data: data)
         xml.shouldResolveExternalEntities = false
         xml.delegate = p
-        _ = xml.parse() // A truncated or capped sheet keeps the rows read so far.
+        let complete = xml.parse() // A truncated or capped sheet keeps the rows read so far.
         p.endRow()
-        return p.out
+        return (p.out, complete)
+    }
+
+    static func value(of data: Data, _ context: Context, at address: String) -> (value: String?, complete: Bool) {
+        let parser = SheetParser(context)
+        parser.desiredReference = address
+        let xml = XMLParser(data: data)
+        xml.shouldResolveExternalEntities = false
+        xml.delegate = parser
+        let complete = xml.parse()
+        return (parser.foundValue, complete)
     }
 
     private let ctx: Context
@@ -193,6 +228,8 @@ private final class SheetParser: NSObject, XMLParserDelegate {
     // The open cell.
     private var col = -1, type = "", style = 0, value = ""
     private var inCell = false, inInline = false, collecting = false, phonetic = 0
+    private var desiredReference: String?, currentReference = "", foundValue: String?
+    private var rowNumber = 0
 
     private init(_ context: Context) { ctx = context }
 
@@ -201,6 +238,9 @@ private final class SheetParser: NSObject, XMLParserDelegate {
         switch local(name) {
         case "c":
             if let r = attributes["r"], let c = XLSXExtractor.column(r) { col = c } else { col += 1 }
+            var number = col + 1, letters = ""
+            while number > 0 { number -= 1; letters = String(UnicodeScalar(65 + number % 26)!) + letters; number /= 26 }
+            currentReference = (attributes["r"] ?? letters + String(rowNumber)).uppercased()
             type = attributes["t"] ?? ""
             if let s = attributes["s"], let i = Int(s) { style = i } else { style = 0 }
             value = ""
@@ -209,7 +249,7 @@ private final class SheetParser: NSObject, XMLParserDelegate {
         case "is": inInline = inCell
         case "t": collecting = inInline && phonetic == 0
         case "rPh": phonetic += 1
-        case "row": col = -1
+        case "row": col = -1; rowNumber = attributes["r"].flatMap(Int.init) ?? rowNumber + 1
         default: break
         }
     }
@@ -233,6 +273,10 @@ private final class SheetParser: NSObject, XMLParserDelegate {
     /// except runs wider than `maxPaddedGap`, which become one tab.
     private func endCell(_ parser: XMLParser) {
         inCell = false
+        if let desiredReference {
+            if currentReference == desiredReference { foundValue = render() ?? ""; parser.abortParsing() }
+            return
+        }
         guard !value.isEmpty, count < XLSXExtractor.maxCellsPerSheet, let text = render(), !text.isEmpty else { return }
         let gap = col - prev - 1
         let tabs = gap > XLSXExtractor.maxPaddedGap ? 1 : max(gap, 0) + (prev < 0 ? 0 : 1)

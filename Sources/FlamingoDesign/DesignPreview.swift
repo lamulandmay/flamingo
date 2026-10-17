@@ -197,9 +197,9 @@ private struct DesignSheet: View {
 
     private func swatch(_ name: String, _ c: SwiftUI.Color) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
-            RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+            Squircle(radius: Theme.Radius.s)
                 .fill(c)
-                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s, style: .continuous)
+                .overlay(Squircle(radius: Theme.Radius.s)
                     .strokeBorder(Theme.Color.hairline, lineWidth: 1))
                 .frame(width: 64, height: 32)
             Text(name).font(Theme.Font.monoSmall).foregroundStyle(Theme.Color.textTertiary)

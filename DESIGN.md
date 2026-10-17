@@ -7,7 +7,9 @@ Premiere's panel system. Dark-first. Content fills the window. Chrome recedes.
 
 1. **If a label can be removed, remove it.** A list of files does not need a header that
    says "Files". A comment field does not need a placeholder that says "Type a comment".
-   The cursor blinking in an empty field is the affordance.
+   The cursor blinking in an empty field is the affordance. One exception: the Thoughts
+   tab's composer reads "Thought on q3.pptx". Unlabeled, people couldn't tell it was where
+   thoughts are written.
 2. **No copy that talks to the user.** No "Welcome to Flamingo". No "Get started by…".
    No "No results found 😔". Empty states are either nothing, or one short noun phrase in
    tertiary color ("No vault open"). No exclamation marks. No emoji anywhere.
@@ -46,12 +48,13 @@ same values through `Theme.NS`, never `NSColor.labelColor` and friends.
 | `Color.selection` | Accent at 26% (16% in light). Text on it stays `text`. |
 | `Color.fill` / `hover` | Translucent greys for fields, chips, row hover. They work on material and on `bg`. |
 | `Color.onAccent` | Text on a solid accent fill (rare). |
+| `Color.thought(level)` | A saved thought's strength: blush (spark), the accent (solid), flamingo (woven). Only while a new connection is shown off: its line, the drop at its head, the rings on both ends. |
 | `Color.family(ext:)` | Nine muted hues: deck, document, sheet, pdf, image, media, model, code, note. `FileFamily(ext:)` gives the family itself. |
 | `Font.body` 13, `small` 11, `title` 15 semibold | Text. `bodyMedium` for emphasis. |
 | `Font.mono` 12, `monoSmall` 11 | Paths, anchors, the target line under the comment field. |
 | `Font.caps` + `capsTracking` | The rare section marker. Use `SectionMarker("Pinned")` or `.capsStyle()`. |
 | `Space` xs 4 · s 8 · m 12 · l 16 · xl 24 · xxl 32 | Everything. |
-| `Radius` s 4 · m 8 · l 12 | Rows and chips, fields and toasts, panels. Nested shapes use `outer − inset` (`Radius.m - 2`). |
+| `Radius` s 4 · m 8 · l 12 | Rows and chips, fields and toasts, panels. Draw every rounded shape as `Squircle(radius:)` (continuous curvature: cubic Béziers, zero curvature at the edges, peak at the 45° apex), never `RoundedRectangle`, `cornerRadius` or an arc. A shape nested with uniform padding inside another is `ConcentricSquircle(parentRadius:padding:)`, the parent's outline offset along its normals, never a smaller copy. AppKit uses `NSBezierPath(squircleIn:radius:)` and `CALayer.applySquircle`. |
 | `Motion.fast` 150ms, `normal` 220ms | Ease-out. `fastSeconds` / `normalSeconds` for AppKit. |
 | `Size.row` 26 · `sidebar` 240 · `rail` 280 · `panel` 560 · `icon` 14 · `iconSmall` 13 | Layout. |
 | `Opacity.rest` .75 · `dimmed` .3 · `disabled` .35 | Hover raises `rest` to 1. Graph and faded history use `dimmed`. |
@@ -72,7 +75,7 @@ in light and dark. Screenshot it and you have the style guide.
 | `SectionMarker("Pinned")` | 11pt medium, tracked, uppercase, tertiary. Rare. |
 | `PanelChrome(width:shadow:) { … }` | Command palette, search, comment panel: sidebar material, `Radius.l`, hairline, shadow. In an `NSPanel`, pass `shadow: false`. |
 | `VisualEffect(material:blending:state:)` | `NSVisualEffectView` for SwiftUI. Sidebar background. |
-| `SegmentedModes(selection:)` | Four symbols, no text, accent when selected. Binds a `FlamingoMode` or an `Int` (0–3). `FlamingoMode.title` and `.key` feed menus. |
+| `SegmentedModes(selection:)` | Three symbols (`FlamingoMode.views`: files, graph, trail), no text, accent when selected. `.ask` is the inspector's Chat tab. `FlamingoMode.title` and `.key` feed menus. |
 | `SearchField(text:focused:onSubmit:onExit:)` | No placeholder. Accent focus ring. |
 | `IconButton(_:help:isOn:action:)` | 13pt symbol. `help` is the tooltip and VoiceOver label, never drawn. |
 | `ProgressHairline(value:)` | 2pt accent line. Fades at 1. `nil` pulses. |
@@ -94,17 +97,53 @@ in Info.plist.
 ## Layout
 
 ```
-┌─────────┬────────────────────────────────────┬──────────┐
-│ sidebar │ content (preview / graph / trail / │ comments │
-│  240pt  │  ask)                              │  rail    │
-│         │                                    │  280pt   │
-└─────────┴────────────────────────────────────┴──────────┘
+┌──┬─────────┬──────────────────────────────────────┬──────────────┐
+│r │ sidebar │ content (files / graph / trail)      │ inspector    │
+│i │ ⇔ 180–  │                                      │ ⇔ 260–720pt  │
+│b │  480pt  │                                      │ thoughts ·   │
+│  │         │                                      │ connections ·│
+│  │         │                                      │ outline·chat │
+└──┴─────────┴──────────────────────────────────────┴──────────────┘
 ```
 
-Titlebar is transparent; the traffic lights float over the sidebar. A segmented control
-in the toolbar area switches mode (⌘1–4). The command palette (⌘K) and comment panel
-(⌘⇧C) are floating panels centered in the window, 560pt wide, with the sidebar material
-and a hairline.
+Titlebar is transparent; the traffic lights float over the sidebar. Both sidebars put their
+tab icons in the title bar row and resize by dragging their hairline (double-click resets).
+The toolbar switches between three views (⌘1–3). Chat is not a view: it is the inspector's
+last tab, reachable from every view with ⌘4. The command palette (⌘K) floats near the top of
+the window like Spotlight; the comment panel (⌘⇧C) is centred, 560pt, sidebar material.
+
+With no file open the content is the folder surface: Finder's column view (one list per
+folder, the selection opening the next, a preview column for a file) or its icon view, toggled
+by two icons in the toolbar. Finder's Favorites sit above the file tree, unlabelled, with
+Finder's own glyphs. Column rows use real system icons, like thumbnails, because they are the
+user's data.
+
+There is no status bar. Indexing shows as a 2pt accent line under the title bar; a warning
+icon appears in the toolbar only when something needs attention (it opens Workspace Health).
+
+## Connections
+
+One pair of files is one connection; every reason is evidence on it.
+
+- Explicit, drawn solid: a `[[link]]` written in a thought or note (either direction), or a
+  connection made by hand (⌥-drag between graph nodes, + in the Connections tab, accepting
+  a suggestion).
+- Suggested, drawn dashed: one file names the other, the two say similar things, one is a
+  copy or likely version of the other, or they were opened in the same sessions. A suggestion is accepted (✓, becomes hand-made) or dismissed
+  (×, hidden everywhere, stored in `.flamingo/connections-dismissed.json`).
+- Folder containment is structure, drawn faint, and never listed as a connection.
+
+A new connection is shown off once. Saving a thought that links files, or ⌥-dragging one
+file onto another, draws the line in: in Graph the camera settles on the pair; anywhere else
+a small graph appears in the top-right corner (of the window, or of the screen when the
+thought came from another app), does the same, and goes. The line's tint is the thought's
+strength (`ThoughtStrength`: a link, a reason, specifics). It leaves with one note and lands
+with the rest, a tap with each (`Chime`); a thought that links nothing gets only the notes.
+Hovering holds the corner graph; clicking it opens Graph on the file.
+
+The Connections tab lists explicit connections, a hairline, then suggestions, each with the
+line of evidence worth reading and the reasons as glyphs (link, pin, doc-on-doc, quote,
+square-on-square, clock). Wander (dice) walks suggestions across the whole vault one pair at a time.
 
 ## Before you ship a view, check
 

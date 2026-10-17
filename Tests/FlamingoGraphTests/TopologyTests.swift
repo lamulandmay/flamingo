@@ -15,10 +15,29 @@ final class TopologyTests: XCTestCase {
         let t = GraphTopology(g)
         XCTAssertEqual(t.count, 2)
         XCTAssertEqual(t.labels, ["a", "b"])
-        XCTAssertEqual(t.edges.count, 2)
-        XCTAssertEqual(t.edges.first?.weight, 2)
+        // One edge per pair: the link (strongest kind) carries all three weights.
+        XCTAssertEqual(t.edges.count, 1)
+        XCTAssertEqual(t.edges.first?.kind, .link)
+        XCTAssertEqual(t.edges.first?.weight, 3)
         XCTAssertEqual(t.neighbors, [[1], [0]])
         XCTAssertEqual(t.radius[0], 3 + log(4), accuracy: 1e-9)
+    }
+
+    func testPairDrawsAsItsStrongestKind() {
+        let g = Graph(nodes: [.init(id: "a.md", name: "a.md", ext: "md"), .init(id: "b.md", name: "b.md", ext: "md"),
+                              .init(id: "c.md", name: "c.md", ext: "md"), .init(id: "d/", name: "d", ext: "")],
+                      edges: [.init(source: "a.md", target: "b.md", kind: .trail),
+                              .init(source: "b.md", target: "a.md", kind: .mention),
+                              .init(source: "a.md", target: "c.md", kind: .related),
+                              .init(source: "c.md", target: "a.md", kind: .manual),
+                              .init(source: "d/", target: "b.md", kind: .folder)])
+        let t = GraphTopology(g)
+        let kinds = Dictionary(uniqueKeysWithValues: t.edges.map { ([t.ids[$0.a], t.ids[$0.b]].sorted().joined(separator: "-"), $0) })
+        XCTAssertEqual(kinds["a.md-b.md"]?.kind, .mention)
+        XCTAssertEqual(kinds["a.md-b.md"]?.strokeClass, 1)
+        XCTAssertEqual(kinds["a.md-c.md"]?.kind, .manual)
+        XCTAssertEqual(kinds["a.md-c.md"]?.strokeClass, 0)
+        XCTAssertEqual(kinds["b.md-d/"]?.strokeClass, 2)
     }
 
     func testCameraRoundTripAndZoomAnchor() {

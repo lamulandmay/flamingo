@@ -20,15 +20,23 @@ final class VaultWatcherTests: XCTestCase {
         XCTAssertNil(VaultWatcher.classify(relativePath: ".flamingo/index.sqlite", flags: modified))
         XCTAssertNil(VaultWatcher.classify(relativePath: ".flamingo/notes/a.pdf.txt", flags: modified))
         XCTAssertNil(VaultWatcher.classify(relativePath: ".flamingo/notes/.a.pdf.md.tmp", flags: modified))
-        XCTAssertNil(VaultWatcher.classify(relativePath: ".flamingo/notes/.tmp/a.md", flags: modified))
+        XCTAssertEqual(VaultWatcher.classify(relativePath: ".flamingo/notes/.tmp/a.md", flags: modified)?.ref.relativePath, ".tmp/a")
     }
 
     func testIgnoredAndHidden() {
         XCTAssertNil(VaultWatcher.classify(relativePath: ".git/HEAD", flags: modified))
         XCTAssertNil(VaultWatcher.classify(relativePath: "node_modules/x/y.js", flags: modified))
-        XCTAssertNil(VaultWatcher.classify(relativePath: "docs/.hidden.txt", flags: modified))
+        XCTAssertEqual(VaultWatcher.classify(relativePath: "docs/.hidden.txt", flags: modified)?.ref.relativePath, "docs/.hidden.txt")
         XCTAssertNil(VaultWatcher.classify(relativePath: ".DS_Store", flags: modified))
+        XCTAssertNil(VaultWatcher.classify(relativePath: "docs/~$6767.pptx", flags: modified))
+        XCTAssertEqual(VaultWatcher.classify(relativePath: "docs/~draft.txt", flags: modified)?.ref.relativePath, "docs/~draft.txt")
         XCTAssertEqual(VaultWatcher.classify(relativePath: "docs/a.txt", flags: modified)?.ref.relativePath, "docs/a.txt")
+    }
+
+    func testFilesystemRootAndPrefixBoundaries() {
+        XCTAssertEqual(VaultWatcher.relativePath("/Users/example/a.txt", roots: ["/"]), "Users/example/a.txt")
+        XCTAssertEqual(VaultWatcher.relativePath("/vault/.hidden.txt", roots: ["/vault"]), ".hidden.txt")
+        XCTAssertNil(VaultWatcher.relativePath("/vault-other/a", roots: ["/vault"]))
     }
 
     func testXattrOnlyDropped() {
@@ -93,6 +101,27 @@ final class VaultWatcherTests: XCTestCase {
         wait(for: [exp], timeout: 5)
     }
 
+    func testReplayDeliversChangesMadeWhileClosedThenHistoryDone() throws {
+        let (vault, dir) = try makeVault()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        XCTAssertNotNil(VaultWatcher.historyID(for: dir))
+        Thread.sleep(forTimeInterval: 0.3)
+        let since = VaultWatcher.currentEventID
+        try "made while closed".write(to: dir.appendingPathComponent("offline.txt"), atomically: true, encoding: .utf8)
+        Thread.sleep(forTimeInterval: 1.5)   // fseventsd records it
+        let w = VaultWatcher(vault: vault)
+        let seen = expectation(description: "replayed")
+        seen.assertForOverFulfill = false
+        let done = expectation(description: "history done")
+        w.onChange = { if $0.contains(FileRef(relativePath: "offline.txt")) { seen.fulfill() } }
+        w.onHistoryDone = {
+            XCTAssertGreaterThan(w.deliveredThrough ?? 0, since, "a finished replay reaches past where it started")
+            done.fulfill()
+        }
+        w.start(since: since); defer { w.stop() }
+        wait(for: [seen, done], timeout: 10, enforceOrder: true)
+    }
+
     func testSidecarReportsTargetInBothCallbacks() throws {
         let (vault, dir) = try makeVault()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -130,13 +159,17 @@ final class VaultWatcherTests: XCTestCase {
             VaultWatcher.classify(relativePath: p, flags: f, rules: rules)
         }
         XCTAssertEqual(c(".flamingoignore", modified)?.ref.relativePath, "")
+        XCTAssertEqual(c(".flamingo/ignore", modified)?.ref.relativePath, "")
         XCTAssertNil(c("debug.log", modified))
         XCTAssertNil(c("build/out.txt", modified))
         XCTAssertEqual(c("Library/Preferences/x.plist", modified)?.ref.relativePath, "Library/Preferences/x.plist", "whole-Mac vaults index ~/Library")
         XCTAssertEqual(c("proj/Library/notes.txt", modified)?.ref.relativePath, "proj/Library/notes.txt")
         XCTAssertEqual(c("notes.txt", modified)?.ref.relativePath, "notes.txt")
         let dropped = FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs)
-        XCTAssertEqual(c(".flamingo/notes", dropped)?.ref.relativePath, "", "lost sidecar events mean a rescan")
+        XCTAssertEqual(c(".flamingo/notes", dropped), .init(ref: VaultWatcher.allNotes, sidecar: true), "lost sidecar events re-read the notes, not the vault")
+        XCTAssertEqual(c(".flamingo", dropped)?.ref, VaultWatcher.allNotes)
+        XCTAssertNil(c(".flamingo/index.sqlite-wal", dropped), "our own index churn never triggers work")
+        XCTAssertEqual(c("", dropped)?.ref.relativePath, "", "events lost at the root still mean a rescan")
     }
 }
 

@@ -2,19 +2,35 @@ import Foundation
 import FlamingoCore
 import FlamingoIndex
 
-public struct Citation: Sendable, Equatable, Identifiable {
+public struct Citation: Sendable, Equatable, Identifiable, Codable {
     public var id: String { file.relativePath + (anchor?.rendered ?? "") }
     public var file: FileRef
     public var anchor: FileAnchor?
-    public init(file: FileRef, anchor: FileAnchor? = nil) { self.file = file; self.anchor = anchor }
+    public var excerpt: String?
+    public var commentID: UUID?
+    public var provenance: CommentProvenance?
+    public init(file: FileRef, anchor: FileAnchor? = nil, excerpt: String? = nil,
+                commentID: UUID? = nil, provenance: CommentProvenance? = nil) {
+        self.file = file; self.anchor = anchor; self.excerpt = excerpt; self.commentID = commentID; self.provenance = provenance
+    }
+    public static func == (lhs: Citation, rhs: Citation) -> Bool {
+        lhs.file == rhs.file && lhs.anchor == rhs.anchor
+    }
 }
 
-public struct Answer: Sendable, Equatable {
+public struct Answer: Sendable, Equatable, Codable {
     public var text: String
     public var citations: [Citation]
     /// What each `[n]` in `text` points at, for the numbers that resolve to a passage.
     public var sources: [Int: Citation] = [:]
+    public var model: String?
     public init(text: String, citations: [Citation]) { self.text = text; self.citations = citations }
+}
+
+public struct ConversationTurn: Codable, Equatable, Sendable {
+    public var question: String
+    public var answer: String
+    public init(question: String, answer: String) { self.question = question; self.answer = answer }
 }
 
 /// What `askStreaming` yields, in order: passages, then text as it arrives, then the answer.
@@ -52,6 +68,9 @@ public final class AskEngine: @unchecked Sendable {
     /// True when `ANTHROPIC_API_KEY` is set or a key is in the Keychain.
     public static var hasKey: Bool { KeyStore.key() != nil }
 
+    /// Claude can answer: with an API key, or through the user's Claude Code sign-in.
+    public static var claudeReady: Bool { hasKey || ClaudeCodeClient.executable != nil }
+
     /// Stores the key in the Keychain item `com.flamingo.anthropic`.
     public static func setKey(_ key: String) throws { try KeyStore.save(key) }
 
@@ -59,6 +78,26 @@ public final class AskEngine: @unchecked Sendable {
     /// by rank, packed into about 12k tokens and numbered from 1.
     public func retrieve(_ question: String) throws -> [Passage] {
         try Retriever(source: source).retrieve(question)
+    }
+
+    /// Expands a citation from the local index for inspection without making a model call.
+    /// The original file remains the authority; extraction may be incomplete.
+    public func sourceText(for citation: Citation, maxCharacters: Int = 20_000) throws -> String {
+        let text: String?
+        if let id = citation.commentID {
+            text = try source.comments(on: citation.file).first { $0.id == id }?.text
+        } else if let anchor = citation.anchor {
+            let sections = try source.sections(of: citation.file)
+            let section = sections.first { $0.anchor == anchor }
+                ?? (anchor.kind == .line ? sections.filter {
+                    $0.anchor.kind == .line && (Int($0.anchor.value) ?? Int.max) <= (Int(anchor.value) ?? 0)
+                }.max { (Int($0.anchor.value) ?? 0) < (Int($1.anchor.value) ?? 0) } : nil)
+                ?? (anchor.kind == .cell ? sections.first { $0.anchor.kind == .sheet && anchor.value.hasPrefix($0.anchor.value + "!") } : nil)
+            text = section?.text
+        } else { text = try source.text(of: citation.file) }
+        guard let text, !text.isEmpty else { throw AskError.stream("This source changed or is no longer indexed. Open the file to inspect it.") }
+        let limit = max(1, min(maxCharacters, 50_000))
+        return String(text.prefix(limit)) + (text.count > limit ? "\n[…section continues in the file]" : "")
     }
 
     public func ask(_ question: String) async throws -> Answer {
@@ -73,10 +112,17 @@ public final class AskEngine: @unchecked Sendable {
     /// Retrieves, streams the answer as it's written, and finishes with `.answer`.
     /// Cancelling the consuming task cancels the request.
     public func askStreaming(_ question: String) -> AsyncThrowingStream<Delta, Error> {
+        askStreaming(question, history: [])
+    }
+
+    public func askStreaming(_ question: String, history: [ConversationTurn], file: FileRef? = nil, context: AskContext = .empty) -> AsyncThrowingStream<Delta, Error> {
         AsyncThrowingStream { continuation in
             let task = Task.detached { [self] in
                 do {
-                    try await self.run(question) { continuation.yield($0) }
+                    let scoped: PassageSource
+                    if let file { scoped = SelectedFileSource(base: self.source, file: file) }
+                    else { scoped = self.source }
+                    try await self.run(question, history: history, source: scoped, context: context) { continuation.yield($0) }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -91,6 +137,8 @@ public final class AskEngine: @unchecked Sendable {
     let source: PassageSource
     var client = MessagesClient()
     var chat = ChatClient()
+    var claudeCode = ClaudeCodeClient()
+    var hasClaudeCode: @Sendable () -> Bool = { ClaudeCodeClient.executable != nil }
     var keyProvider: @Sendable () -> String? = { KeyStore.key() }
     var providerChoice: @Sendable () -> AskProvider = { AskProvider.preferred }
     var isOnline: @Sendable () -> Bool = { Reachability.shared.isOnline }
@@ -104,67 +152,92 @@ public final class AskEngine: @unchecked Sendable {
         self.client = client
         self.keyProvider = key
         self.providerChoice = { .claude }
+        // Tests never reach a real Claude Code install.
+        self.hasClaudeCode = { false }
     }
 
     /// Claude when chosen, or on auto with a key and a network; otherwise a local model.
     /// On auto, Claude going offline before any text falls back to the local model.
-    private func run(_ question: String, yield: @escaping @Sendable (Delta) -> Void) async throws {
+    private func run(_ question: String, history: [ConversationTurn], source: PassageSource, context: AskContext = .empty, yield: @escaping @Sendable (Delta) -> Void) async throws {
         let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty else { return }
         let choice = providerChoice()
         switch choice {
         case .claude:
-            try await runClaude(question, yield: yield)
+            if keyProvider() == nil, hasClaudeCode() {
+                try await runClaudeCode(question, history: history, source: source, context: context, yield: yield)
+            } else {
+                try await runClaude(question, history: history, source: source, context: context, yield: yield)
+            }
         case .llama, .ollama:
-            try await runLocal(question, kind: choice, yield: yield)
+            try await runLocal(question, history: history, source: source, context: context, kind: choice, yield: yield)
         case .auto:
-            guard keyProvider() != nil, isOnline() else { return try await runLocal(question, kind: .llama, yield: yield) }
+            // Automatic sends passages to Claude only with an API key the user entered for
+            // Flamingo. Claude Code's sign-in is used only when "Claude" is chosen outright,
+            // so files never leave the Mac because some other tool happens to be installed.
+            guard keyProvider() != nil, isOnline() else { return try await runLocal(question, history: history, source: source, context: context, kind: .llama, yield: yield) }
             let shown = Flag()
             do {
-                try await runClaude(question) { delta in
+                try await runClaude(question, history: history, source: source, context: context) { delta in
                     if case .text = delta { shown.set() }
                     yield(delta)
                 }
             } catch AskError.offline where !shown.value {
-                try await runLocal(question, kind: .llama, yield: yield)
+                try await runLocal(question, history: history, source: source, context: context, kind: .llama, yield: yield)
             }
         }
     }
 
     /// One pass, no search tool. The 27B falls back to Ollama when it can't be started.
-    private func runLocal(_ question: String, kind: AskProvider, yield: @escaping @Sendable (Delta) -> Void) async throws {
+    private func runLocal(_ question: String, history: [ConversationTurn], source: PassageSource, context: AskContext = .empty, kind: AskProvider, yield: @escaping @Sendable (Delta) -> Void) async throws {
         var endpoint: ChatEndpoint
         if kind == .ollama {
             endpoint = ChatEndpoint(baseURL: ChatEndpoint.ollama, model: AskProvider.ollamaModel, kind: .ollama)
         } else {
             do {
-                let url = try await llama { yield(.status("loading \(LlamaServer.modelName)")) }
-                endpoint = ChatEndpoint(baseURL: url, model: LlamaServer.modelName, kind: .llama)
+                let url = try await llama { yield(.status("loading \(LlamaServer.shared.displayName)")) }
+                endpoint = ChatEndpoint(baseURL: url, model: LlamaServer.shared.modelAlias, kind: .llama)
             } catch AskError.unavailable(_) where providerChoice() == .auto {
                 endpoint = ChatEndpoint(baseURL: ChatEndpoint.ollama, model: AskProvider.ollamaModel, kind: .ollama)
             }
         }
         try Task.checkCancellation()
-        let passages = try Retriever(source: source).retrieve(question, budgetTokens: Prompt.localBudget(endpoint.kind))
+        let passages = try gather(question, history: history, source: source, context: context, budget: Prompt.localBudget(endpoint.kind)).passages
         yield(.passages(passages))
         let sources = Dictionary(uniqueKeysWithValues: passages.map { ($0.id, $0.citation) })
-        let body = Prompt.localBody(endpoint, question: question, passages: passages, today: Date())
+        let body = Prompt.localBody(endpoint, question: question, passages: passages, today: Date(), history: history, context: context)
+        let modelName = endpoint.kind == .llama ? LlamaServer.shared.displayName : endpoint.model
         let text = try await chat.send(body, to: endpoint) { yield(.text($0)) }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AskError.stream("No answer") }
-        yield(.answer(CitationParser.answer(text: text, sources: sources)))
+        var answer = CitationParser.answer(text: text, sources: sources)
+        answer.model = modelName
+        yield(.answer(answer))
+    }
+
+    /// Claude Code's sign-in, one pass: the same passages and prompt as a local model gets,
+    /// at Claude's quality and speed.
+    private func runClaudeCode(_ question: String, history: [ConversationTurn], source: PassageSource, context: AskContext, yield: @escaping @Sendable (Delta) -> Void) async throws {
+        let passages = try gather(question, history: history, source: source, context: context, budget: 12_000).passages
+        yield(.passages(passages))
+        let sources = Dictionary(uniqueKeysWithValues: passages.map { ($0.id, $0.citation) })
+        let user = Prompt.userText(question, passages: passages, today: Date(), history: history, context: context)
+        let text = try await claudeCode.send(system: Prompt.localSystem, user: user) { yield(.text($0)) }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AskError.stream("No answer") }
+        var answer = CitationParser.answer(text: text, sources: sources)
+        answer.model = "claude-" + claudeCode.model
+        yield(.answer(answer))
     }
 
     /// Retrieve, then let the model search up to `Prompt.maxSearches` times before it answers.
-    private func runClaude(_ question: String, yield: @escaping @Sendable (Delta) -> Void) async throws {
+    private func runClaude(_ question: String, history: [ConversationTurn], source: PassageSource, context: AskContext = .empty, yield: @escaping @Sendable (Delta) -> Void) async throws {
         guard let key = keyProvider() else { throw AskError.noKey }
 
-        let retriever = Retriever(source: source)
-        let passages = try retriever.retrieve(question)
+        let (passages, retriever) = try gather(question, history: history, source: source, context: context, budget: 12_000)
         yield(.passages(passages))
         var sources = Dictionary(uniqueKeysWithValues: passages.map { ($0.id, $0.citation) })
 
         let model = self.model
-        var messages: [JSON] = [Prompt.question(question, passages: passages, today: Date())]
+        var messages: [JSON] = [Prompt.question(question, passages: passages, today: Date(), history: history, context: context)]
         var searches = 0
         var forceAnswer = false
         for turn in 0... {
@@ -182,7 +255,9 @@ public final class AskEngine: @unchecked Sendable {
             guard message.stopReason == "tool_use", !calls.isEmpty, !forceAnswer else {
                 let text = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { throw AskError.stream("No answer") }
-                yield(.answer(CitationParser.answer(text: message.text, sources: sources)))
+                var answer = CitationParser.answer(text: message.text, sources: sources)
+                answer.model = model
+                yield(.answer(answer))
                 return
             }
             if !message.text.isEmpty { yield(.discard) }
@@ -215,6 +290,37 @@ public final class AskEngine: @unchecked Sendable {
             if turn >= Prompt.maxSearches { forceAnswer = true }
         }
     }
+
+    /// The open file's best sections first (about a third of the budget), then the vault's,
+    /// numbered on from them. Returns the vault retriever for the model's own searches.
+    func gather(_ question: String, history: [ConversationTurn], source: PassageSource, context: AskContext, budget: Int) throws -> (passages: [Passage], retriever: Retriever) {
+        let query = Self.retrievalQuestion(question, history: history)
+        var out: [Passage] = []
+        if let open = context.openFile, !(source is SelectedFileSource) {
+            // "Summarize this", "what does it say?": nothing to search the vault for.
+            let aboutOpen = QueryPlan.terms(question).count <= 1 && !Set(QueryPlan.words(question)).isDisjoint(with: Self.followUpWords)
+            let local = Retriever(source: SelectedFileSource(base: source, file: open))
+            local.sectionLimit = aboutOpen ? 20 : 6
+            out = (try? local.retrieve(query, budgetTokens: aboutOpen ? budget : budget / 3)) ?? []
+            if aboutOpen, !out.isEmpty { return (out, Retriever(source: source, firstID: (out.map(\.id).max() ?? 0) + 1)) }
+        }
+        let retriever = Retriever(source: source, firstID: (out.map(\.id).max() ?? 0) + 1)
+        retriever.skip(out)
+        let used = out.map(Retriever.tokens).reduce(0, +)
+        out += try retriever.retrieve(query, budgetTokens: max(1000, budget - used))
+        return (out, retriever)
+    }
+
+    /// A follow-up ("and the deck?", "why?") borrows the last question's words; a question
+    /// that stands on its own doesn't, so a change of subject isn't searched for the old one.
+    static func retrievalQuestion(_ question: String, history: [ConversationTurn]) -> String {
+        guard let last = history.last else { return question }
+        let words = Set(QueryPlan.words(question))
+        let followUp = QueryPlan.terms(question).count <= 2 || !words.isDisjoint(with: followUpWords)
+        return followUp ? String(last.question.prefix(250)) + " " + question : question
+    }
+
+    static let followUpWords: Set<String> = ["it", "its", "that", "this", "those", "these", "they", "them", "there", "he", "she", "one", "ones", "same", "also", "else"]
 
     struct ToolCall {
         var id: String

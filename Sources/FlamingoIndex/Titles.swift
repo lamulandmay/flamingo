@@ -111,7 +111,7 @@ extension IndexStore {
     public func titlePending() -> Int {
         let titler = embedding.lock.withLock { embedding.titler }
         var count = 0
-        while !Self.onLowBattery(), let next = (try? untitled(limit: 1))?.first {
+        while !embedding.lock.withLock({ embedding.cancelled }), !Self.onLowBattery(), let next = (try? untitled(limit: 1))?.first {
             let result: (title: String, tags: [String])?
             if next.text.trimmingCharacters(in: .whitespacesAndNewlines).count < 40 {
                 result = nil

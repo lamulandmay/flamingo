@@ -26,6 +26,17 @@ final class XLSXTests: XCTestCase {
             """)
     }
 
+    func testExactCellPreservesSparseCoordinatesAndQuotedNames() throws {
+        let extractor = XLSXExtractor(), url = Fixtures.url("model.xlsx")
+        XCTAssertEqual(try extractor.cell(.init(kind: .cell, value: "'Q3 Model'!$D$2"), in: url)?.text, "1525.5")
+        XCTAssertEqual(try extractor.cell(.init(kind: .cell, value: "Assumptions!B1"), in: url)?.text, "2025-01-01")
+        XCTAssertEqual(try extractor.cell(.init(kind: .cell, value: "Q3 Model!C4"), in: url)?.text, "(empty cell)")
+        XCTAssertEqual(try extractor.cell(.init(kind: .cell, value: "Q3 Model!AZ8"), in: url)?.text, "away")
+        XCTAssertEqual(try extractor.cell(.init(kind: .cell, value: "Q3 Model!B8"), in: url)?.text, "(empty cell)")
+        XCTAssertNil(try extractor.cell(.init(kind: .cell, value: "Missing!B1"), in: url))
+        XCTAssertNil(try extractor.cell(.init(kind: .sheet, value: "Q3 Model"), in: url))
+    }
+
     func testDatesUseTheCellStyle() throws {
         XCTAssertEqual(sheet(try model(), "Assumptions"), """
             Start date\t2025-01-01
@@ -103,7 +114,9 @@ final class XLSXTests: XCTestCase {
         let filler = "<extLst><ext uri=\"{flamingo}\">\(String(repeating: "A", count: XLSXExtractor.maxSheetBytes))</ext></extLst>"
         let sheet = Self.worksheet(rows.joined()).replacingOccurrences(of: "</worksheet>", with: filler + "</worksheet>")
         try Fixtures.zip(Self.workbook(sheets: [sheet]), to: f)
-        let lines = try XLSXExtractor().extract(f).sections[0].text.split(separator: "\n")
+        let extracted = try XLSXExtractor().extract(f)
+        XCTAssertEqual(extracted.coverage.state, .partial)
+        let lines = extracted.sections[0].text.split(separator: "\n")
         XCTAssertEqual(lines.count, XLSXExtractor.maxCellsPerSheet / 10)
         XCTAssertEqual(lines.last, "50000\t50001\t50002\t50003\t50004\t50005\t50006\t50007\t50008\t50009")
     }

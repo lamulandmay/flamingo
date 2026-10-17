@@ -10,42 +10,48 @@ struct PaletteView: View {
     @ObservedObject var model: PaletteModel
 
     var body: some View {
-        PanelChrome(shadow: false) {
-            VStack(spacing: 0) {
-                field
-                if !model.items.isEmpty {
-                    Hairline()
-                    results
-                }
-                if let status = model.status {
-                    Hairline()
-                    Text(status)
-                        .font(Theme.Font.small)
-                        .monospacedDigit()
-                        .foregroundStyle(Theme.Color.textTertiary)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, Theme.Space.m)
-                        .frame(height: PaletteController.statusHeight)
-                }
-            }
-            .frame(maxHeight: .infinity, alignment: .top)
-        }
-    }
-
-    /// The magnifier is the only sign of search mode.
-    private var field: some View {
-        HStack(spacing: Theme.Space.s) {
-            if model.mode == .search {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: Theme.Size.iconSmall))
+        VStack(spacing: 0) {
+            HStack(spacing: Theme.Space.s) {
+                Image(systemName: model.query.hasPrefix(">") ? "command" : "magnifyingglass")
                     .foregroundStyle(Theme.Color.textTertiary)
-                    .accessibilityHidden(true)
+                PaletteField(model: model)
+                ForEach(model.filters, id: \.self) { filter in
+                    Text(filter)
+                        .font(Theme.Font.monoSmall)
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .padding(.horizontal, Theme.Space.s)
+                        .frame(height: 20)
+                        .background(Squircle(radius: Theme.Radius.s).fill(Theme.Color.fill))
+                }
+                if model.searching { ProgressView().controlSize(.small) }
             }
-            PaletteField(model: model)
+            .padding(.horizontal, Theme.Space.l).frame(height: PaletteController.fieldHeight + 6)
+            Hairline()
+            HStack(spacing: 0) {
+                if let result = model.selectedResult, let state = model.state, let vault = model.vault {
+                    results.frame(width: 340)
+                    VHairline()
+                    SearchResultDetail(state: state, vault: vault, result: result,
+                                       query: UnifiedSearchQuery(raw: model.query).text, onHitChange: { model.previewHitID = $0?.id }) { result, hit, external in
+                        let query = model.query
+                        model.cancel()
+                        state.openSearchResult(result, hit: hit, query: query, externally: external)
+                    }
+                } else {
+                    results.frame(maxWidth: .infinity)
+                }
+            }
+            .opacity(model.searching && !model.items.isEmpty ? 0.55 : 1)
+            .animation(Theme.Motion.fast, value: model.searching)
+            .frame(maxHeight: .infinity)
+            if let notice = model.notice {
+                Hairline()
+                Text(notice).font(Theme.Font.small).foregroundStyle(Theme.Color.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(Theme.Space.s)
+            }
         }
-        .padding(.horizontal, Theme.Space.m)
-        .frame(height: PaletteController.fieldHeight)
+        .background(Theme.Color.bgRaised)
+        .clipShape(Squircle(radius: Theme.Radius.l))
     }
 
     private var results: some View {
@@ -53,20 +59,31 @@ struct PaletteView: View {
             ScrollView(.vertical) {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(model.items.enumerated()), id: \.element.id) { index, item in
-                        PaletteRow(item: item, highlighted: index == model.highlight) { model.run(item) }
-                            .id(item.id)
+                        if case .result(let result) = item, let vault = model.vault {
+                            UnifiedSearchRow(result: result, selected: index == model.highlight)
+                                .contentShape(Rectangle())
+                                .onTapGesture(count: 2) { model.run(item) }
+                                .onTapGesture { model.select(index) }
+                                .onDrag { FileHandoff.itemProvider(url: vault.url(for: result.file), relativePath: result.file.relativePath) }
+                                .contextMenu {
+                                    Button("Open") { model.run(item) }
+                                    Button("Open in Default App") { model.onRun?(item, true) }
+                                    Button("Copy File") { _ = FileHandoff.copy(urls: [vault.url(for: result.file)]) }
+                                }
+                                .id(item.id)
+                        } else {
+                            PaletteRow(item: item, highlighted: index == model.highlight) { model.run(item) }.id(item.id)
+                        }
                     }
-                }
-                .padding(.horizontal, Theme.Space.s)
-                .padding(.vertical, Theme.Space.xs)
+                }.padding(Theme.Space.xs)
             }
             .onChange(of: model.highlight) { _, row in
                 guard model.items.indices.contains(row) else { return }
                 proxy.scrollTo(model.items[row].id)
             }
             .onChange(of: model.version) { _, _ in
-                guard let first = model.items.first else { return }
-                proxy.scrollTo(first.id, anchor: .top)
+                guard model.items.indices.contains(model.highlight) else { return }
+                proxy.scrollTo(model.items[model.highlight].id)
             }
         }
     }
@@ -92,6 +109,7 @@ private struct PaletteRow: View {
         case .file(let ref): FileRowContent(ref: ref)
         case .command(let command): CommandRowContent(command: command)
         case .hit(let hit): HitRowContent(hit: hit)
+        case .result(let result): UnifiedSearchRow(result: result, selected: highlighted)
         }
     }
 }
@@ -156,7 +174,7 @@ private struct HitRowContent: View {
                 Text(hit.file.name)
                     .layoutPriority(1)
                 if let anchor = hit.anchor {
-                    Text(anchor.label)
+                    Text(anchor.displayLabel)
                         .font(Theme.Font.mono)
                         .foregroundStyle(Theme.Color.textTertiary)
                 }
@@ -246,8 +264,8 @@ private struct PaletteField: NSViewRepresentable {
     }
 
     func updateNSView(_ field: PaletteTextField, context: Context) {
-        if field.stringValue != model.query { field.stringValue = model.query }
-        field.setAccessibilityLabel(model.mode == .search ? "Search" : "Open Quickly")
+        if field.stringValue != model.query, (field.currentEditor() as? NSTextView)?.hasMarkedText() != true { field.stringValue = model.query }
+        field.setAccessibilityLabel("Search files, folders and contents")
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView field: PaletteTextField, context: Context) -> CGSize? {

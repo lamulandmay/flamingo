@@ -62,7 +62,7 @@ enum FuzzyMatch {
 }
 
 /// One row in the `[[` completion list.
-struct LinkCandidate: Identifiable, Hashable {
+struct LinkCandidate: Identifiable, Hashable, Sendable {
     let ref: FileRef
     /// What goes between the brackets: the basename when it is unique in the vault,
     /// otherwise the relative path, so `Wikilink.resolve` lands on the same file.
@@ -72,8 +72,8 @@ struct LinkCandidate: Identifiable, Hashable {
 }
 
 /// Ranks vault files against what was typed after `[[`.
-struct LinkMatcher {
-    private struct Entry {
+struct LinkMatcher: Sendable {
+    private struct Entry: Sendable {
         let candidate: LinkCandidate
         let name: [Character], nameOriginal: [Character], nameStem: Int?
         let path: [Character], pathOriginal: [Character], pathStem: Int?

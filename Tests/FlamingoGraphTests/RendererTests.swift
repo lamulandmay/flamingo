@@ -211,8 +211,11 @@ final class RendererTests: XCTestCase {
     @MainActor
     func testTrailShadowedByLinkIsDrawnOnce() {
         let t = topology(3, edges: [(0, 1, .link), (0, 1, .trail), (1, 2, .trail)])
-        let stats = render(frame(t, [CGPoint(x: -60, y: 0), CGPoint(x: 0, y: 0), CGPoint(x: 60, y: 0)]))
-        XCTAssertEqual(stats.drawnEdges, 2)
+        let positions = [CGPoint(x: -60, y: 0), CGPoint(x: 0, y: 0), CGPoint(x: 60, y: 0)]
+        XCTAssertEqual(render(frame(t, positions)).drawnEdges, 1, "a suggestion waits for its file to be selected or hovered")
+        var f = frame(t, positions)
+        f.selected = 2
+        XCTAssertEqual(render(f).drawnEdges, 2)
     }
 
     // MARK: - Labels in a real draw
@@ -260,20 +263,28 @@ final class RendererTests: XCTestCase {
     }
 
     @MainActor
-    func testLabelsOnlyWhenAsked() {
-        let t = topology(3, edges: [(0, 1, .link), (1, 2, .link)])
-        let positions = [CGPoint(x: -80, y: 0), CGPoint(x: 0, y: 0), CGPoint(x: 80, y: 0)]
-        XCTAssertEqual(render(frame(t, positions)).labels, 0)
-        var f = frame(t, positions)
-        f.selected = 2
-        XCTAssertEqual(render(f).labels, 1)
-        f = frame(t, positions)
+    func testNamesGoToTheMostConnectedThenFollowZoom() {
+        let small = topology(3, edges: [(0, 1, .link), (1, 2, .link)])
+        let p3 = [CGPoint(x: -80, y: 0), CGPoint(x: 0, y: 0), CGPoint(x: 80, y: 0)]
+        XCTAssertEqual(render(frame(small, p3)).labels, 3, "a handful of nodes are always named")
+        var f = frame(small, p3)
         f.hovered = 1
         f.hoverAmount = 1
         XCTAssertEqual(render(f).labels, 3, "hovered node and both neighbors")
-        f.hoverAmount = 0
-        XCTAssertEqual(render(f).labels, 0, "hover faded out")
-        XCTAssertEqual(render(frame(t, positions, labels: 1)).labels, 3)
+
+        // Node 0 links to every other; the rest have one link each.
+        let n = 30
+        let t = topology(n, edges: (1..<n).map { (0, $0, .link) }, names: (0..<n).map { "f\($0).md" })
+        let positions = (0..<n).map { CGPoint(x: CGFloat($0) * 200, y: 0) }
+        let size = CGSize(width: 2_000, height: 300)
+        let renderer = GraphRenderer()
+        let far = render(frame(t, positions, camera: GraphCamera(center: CGPoint(x: 2_900, y: 0), zoom: 0.3)),
+                         size: size, renderer: renderer)
+        XCTAssertEqual(far.visibleNodes, n)
+        XCTAssertEqual(far.labels, 12, "zoomed out, only the most connected are named")
+        XCTAssertEqual(renderer.placedNode.first, 0, "the hub first")
+        let near = render(frame(t, positions, camera: GraphCamera(center: CGPoint(x: 1_000, y: 0), zoom: 1.3)), size: size)
+        XCTAssertEqual(near.labels, near.visibleNodes, "zoomed in, everything on screen is named")
     }
 
     // MARK: - Robustness

@@ -17,7 +17,7 @@ import FlamingoCore
 /// `id` is optional when hand-writing a file. Decoding also accepts the synthesized forms
 /// (`{"relativePath":…}`, `{"kind":…,"value":…}`, numeric dates).
 public struct TrailEvent: Codable, Sendable, Equatable, Identifiable {
-    public enum Kind: String, Codable, Sendable { case opened, commented, searched, linked }
+    public enum Kind: String, Codable, Sendable { case opened, commented, searched, linked, saved }
     public var id: UUID
     public var at: Date
     public var kind: Kind
@@ -115,6 +115,13 @@ enum TrailDate {
     }
 }
 
+/// A file and the last location visited there, used when resuming a session.
+public struct TrailLocation: Sendable, Equatable {
+    public var file: FileRef
+    public var anchor: FileAnchor?
+    public init(file: FileRef, anchor: FileAnchor? = nil) { self.file = file; self.anchor = anchor }
+}
+
 /// A chain of events that belong together in time. Plan 07 defines the clustering.
 public struct TrailSession: Identifiable, Sendable, Equatable {
     public var id: UUID
@@ -124,18 +131,31 @@ public struct TrailSession: Identifiable, Sendable, Equatable {
     public var files: [FileRef]
     /// The name the user gave this chain, from `.flamingo/trail-names.json`.
     public var title: String?
+    /// A user correction: this session remains in Trail but contributes no inferred edges.
+    public var excludesInferredConnections = false
+    /// Raw IDs retain boundary/exclusion identity even when rapid opens or searches collapse.
+    var sourceEventIDs: [UUID] = []
+    var hasGroupingCorrection = false
     public init(id: UUID = UUID(), start: Date, end: Date, events: [TrailEvent], files: [FileRef]) {
         self.id = id; self.start = start; self.end = end; self.events = events; self.files = files
+        self.sourceEventIDs = events.map(\.id)
     }
 
     /// The files to push onto the shell's history for Resume, oldest first. Each file sits at
     /// its last visit, so the final element is where the user left off: open it, and ⌘[
     /// walks back through the rest.
-    public var filesToReopen: [FileRef] {
+    public var filesToReopen: [FileRef] { locationsToReopen.map(\.file) }
+
+    public var locationsToReopen: [TrailLocation] {
         var seen = Set<FileRef>()
-        var out: [FileRef] = []
-        for e in events.reversed() where e.kind != .searched {
-            if let f = e.file, seen.insert(f).inserted { out.append(f) }
+        var anchors: [FileRef: FileAnchor] = [:]
+        // A later save or unanchored visit should not erase the last known page/slide.
+        for event in events { if let file = event.file, let anchor = event.anchor { anchors[file] = anchor } }
+        var out: [TrailLocation] = []
+        for event in events.reversed() where event.kind != .searched {
+            if let file = event.file, seen.insert(file).inserted {
+                out.append(TrailLocation(file: file, anchor: anchors[file]))
+            }
         }
         return out.reversed()
     }
@@ -189,6 +209,7 @@ public final class TrailStore: @unchecked Sendable {
 
     public var fileURL: URL { backend.fileURL }
     public var namesURL: URL { vault.stateDir.appendingPathComponent("trail-names.json") }
+    public var correctionsURL: URL { vault.stateDir.appendingPathComponent("trail-corrections.json") }
 
     /// How long an event recorded through this store may sit in memory before it is appended.
     public var flushDelay: TimeInterval = 0.5
@@ -213,6 +234,18 @@ public final class TrailStore: @unchecked Sendable {
     public func record(_ event: TrailEvent) {
         guard TrailStore.isEnabled, let e = TrailStore.sanitized(event) else { return }
         backend.record(e, flushDelay: flushDelay)
+    }
+
+    /// Records a content save detected by the editor or vault watcher, with no document text.
+    public func recordSaved(_ file: FileRef, anchor: FileAnchor? = nil) {
+        record(TrailEvent(kind: .saved, file: file, anchor: anchor))
+    }
+
+    /// The latest append error. Buffered events are retained and retried on the next flush.
+    public var persistenceError: String? { backend.persistenceError }
+    public var namesError: String? {
+        do { _ = try readNames(); return nil }
+        catch { return "Session names could not be read: " + error.localizedDescription }
     }
 
     public func recordOpened(_ file: FileRef, anchor: FileAnchor? = nil) {
@@ -248,17 +281,17 @@ public final class TrailStore: @unchecked Sendable {
                 || parts.contains("..") || parts.first == ".flamingo" { return nil }
         }
         switch e.kind {
-        case .opened, .commented, .linked: if e.file == nil { return nil }
+        case .opened, .saved, .commented, .linked: if e.file == nil { return nil }
         case .searched: break
         }
-        if e.kind == .opened { e.text = nil }
+        if e.kind == .opened || e.kind == .saved { e.text = nil }
         if let t = e.text {
             let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { return nil }
             // Comments keep their own whitespace; queries and link targets don't need it.
             let kept = e.kind == .commented ? t : trimmed
             e.text = kept.count > 4000 ? String(kept.prefix(4000)) : kept
-        } else if e.kind != .opened {
+        } else if e.kind != .opened && e.kind != .saved {
             return nil
         }
         return e
@@ -269,7 +302,7 @@ public final class TrailStore: @unchecked Sendable {
         guard e.kind == last.kind, e.file == last.file, e.text == last.text else { return false }
         let dt = abs(e.at.timeIntervalSince(last.at))
         switch e.kind {
-        case .opened: return e.anchor == last.anchor && dt < 2
+        case .opened, .saved: return e.anchor == last.anchor && dt < 2
         case .commented: return e.anchor == last.anchor && dt < 10
         case .searched, .linked: return dt < 2
         }
@@ -318,20 +351,114 @@ public final class TrailStore: @unchecked Sendable {
     }
 
     /// Clustered sessions, oldest first, with their names applied.
-    public func sessions() throws -> [TrailSession] {
+    public func sessions(ignoringCorrections: Bool = false) throws -> [TrailSession] {
         let names = self.names()
-        var out = TrailClustering.sessions(from: try events(), tuning: tuning)
+        let corrections = ignoringCorrections ? TrailCorrections() : try readCorrections()
+        var out = TrailClustering.sessions(from: try events(), tuning: tuning, corrections: corrections)
         for i in out.indices { out[i].title = names[out[i].id.uuidString] }
         return out
+    }
+
+    // MARK: Session corrections
+
+    private func readCorrections() throws -> TrailCorrections {
+        guard FileManager.default.fileExists(atPath: correctionsURL.path) else { return TrailCorrections() }
+        return try JSONDecoder().decode(TrailCorrections.self, from: Data(contentsOf: correctionsURL))
+    }
+
+    @discardableResult
+    private func updateCorrections(_ change: (inout TrailCorrections) throws -> Void) throws -> TrailCorrectionChange {
+        let result = try backend.io.sync {
+            var corrections = try readCorrections()
+            let before = corrections
+            try change(&corrections)
+            try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            try encoder.encode(corrections).write(to: correctionsURL, options: .atomic)
+            return TrailCorrectionChange(before: before, after: corrections)
+        }
+        backend.notifyChange()
+        return result
+    }
+
+    func restoreCorrections(_ replacement: TrailCorrections, expecting expected: TrailCorrections) throws {
+        try updateCorrections { current in
+            guard current == expected else { throw TrailCorrectionError.metadataChanged }
+            current = replacement
+        }
+    }
+
+    private func currentSession(_ session: TrailSession) throws -> TrailSession {
+        guard let current = try sessions().first(where: { $0.id == session.id }) else { throw TrailCorrectionError.sessionChanged }
+        return current
+    }
+
+    /// Include/exclude a session's co-activity from Graph, retaining every event and title.
+    public func setExcludedFromGraph(_ excluded: Bool, for session: TrailSession) throws {
+        _ = try applyCorrection(.excluded(excluded), to: session)
+    }
+
+    func applyCorrection(_ action: TrailCorrectionAction, to session: TrailSession) throws -> TrailCorrectionChange {
+        let current = try currentSession(session)
+        switch action {
+        case .excluded(let excluded):
+            return try updateCorrections { corrections in
+                if excluded { corrections.excludedSessionIDs.insert(current.id.uuidString) }
+                else { corrections.excludedSessionIDs.subtract(current.sourceEventIDs.map(\.uuidString)) }
+            }
+        case .splitBefore(let eventID):
+            guard current.sourceEventIDs.contains(eventID), current.sourceEventIDs.first != eventID else { throw TrailCorrectionError.invalidSplit }
+            return try updateCorrections { corrections in
+                corrections.boundaries[eventID.uuidString] = .split
+                if current.excludesInferredConnections {
+                    corrections.excludedSessionIDs.insert(current.id.uuidString)
+                    corrections.excludedSessionIDs.insert(eventID.uuidString)
+                }
+            }
+        case .mergePrevious:
+            let all = try sessions()
+            guard let index = all.firstIndex(where: { $0.id == session.id }) else { throw TrailCorrectionError.sessionChanged }
+            guard index > 0 else { throw TrailCorrectionError.noPreviousSession }
+            let previous = all[index - 1]
+            return try updateCorrections { corrections in
+                corrections.boundaries[current.id.uuidString] = .merge
+                if current.excludesInferredConnections || previous.excludesInferredConnections {
+                    corrections.excludedSessionIDs.insert(previous.id.uuidString)
+                }
+            }
+        case .automaticGrouping:
+            return try updateCorrections { corrections in
+                for id in current.sourceEventIDs { corrections.boundaries[id.uuidString] = nil }
+            }
+        }
+    }
+
+    /// Start a new session at an existing event (typically the first visit to a file stop).
+    public func splitSession(_ session: TrailSession, before eventID: UUID) throws {
+        _ = try applyCorrection(.splitBefore(eventID), to: session)
+    }
+
+    /// Merge the requested session with its immediate chronological predecessor, including
+    /// one separated by an automatic idle gap. The earlier session's ID/title remain primary.
+    public func mergeSessionWithPrevious(_ session: TrailSession) throws {
+        _ = try applyCorrection(.mergePrevious, to: session)
+    }
+
+    /// Remove manual boundaries beginning at or inside this session. Event history, session
+    /// names, and inference exclusions are preserved, so users can undo a merge or a split.
+    public func restoreAutomaticGrouping(for session: TrailSession) throws {
+        _ = try applyCorrection(.automaticGrouping, to: session)
     }
 
     /// Edges to merge into the graph: files touched within the same session.
     public func edges() throws -> [Graph.Edge] {
         var exists: [String: Bool] = [:]
-        let fm = FileManager.default
+        // One stat per distinct file, by path string: building a URL for each of thousands
+        // of trail files cost more than the clustering.
+        let root = vault.root.path.hasSuffix("/") ? vault.root.path : vault.root.path + "/"
         return TrailClustering.edges(from: try sessions(), now: Date(), tuning: tuning).filter { e in
             for p in [e.source, e.target] {
-                if exists[p] == nil { exists[p] = fm.fileExists(atPath: vault.url(for: FileRef(relativePath: p)).path) }
+                if exists[p] == nil { var st = stat(); exists[p] = stat(root + p, &st) == 0 }
                 if exists[p] == false { return false }
             }
             return true
@@ -340,24 +467,54 @@ public final class TrailStore: @unchecked Sendable {
 
     // MARK: Names
 
+    /// Reconciles existing events by event ID, preserving session IDs, names, anchors and the
+    /// append-only log. A newly created file at the old path will not inherit the old history.
+    public func reconcile(oldPath: String, newPath: String) throws {
+        guard Self.sanitized(TrailEvent(kind: .opened, file: FileRef(relativePath: oldPath))) != nil,
+              Self.sanitized(TrailEvent(kind: .opened, file: FileRef(relativePath: newPath))) != nil else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        try backend.reconcile(oldPath: oldPath, newPath: newPath)
+    }
+
     /// Session titles keyed by session id.
-    public func names() -> [String: String] {
-        guard let data = try? Data(contentsOf: namesURL),
-              let map = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
-        return map
+    public func names() -> [String: String] { (try? readNames()) ?? [:] }
+
+    private func readNames() throws -> [String: String] {
+        guard FileManager.default.fileExists(atPath: namesURL.path) else { return [:] }
+        return try JSONDecoder().decode([String: String].self, from: Data(contentsOf: namesURL))
     }
 
     public func title(for session: TrailSession) -> String? { names()[session.id.uuidString] }
 
     /// Names a session, turning it into a thought chain. `nil` or blank removes the name.
     public func setTitle(_ title: String?, for session: TrailSession) throws {
-        try backend.io.sync {
-            var map = names()
+        _ = try renameSession(session, to: title)
+    }
+
+    func renameSession(_ session: TrailSession, to title: String?) throws -> TrailTitleChange {
+        let result = try backend.io.sync {
+            var map = try readNames()
+            let before = map[session.id.uuidString]
             let t = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             map[session.id.uuidString] = t.isEmpty ? nil : t
             try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
             let enc = JSONEncoder()
             enc.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
+            try enc.encode(map).write(to: namesURL, options: .atomic)
+            return TrailTitleChange(sessionID: session.id, before: before, after: map[session.id.uuidString])
+        }
+        backend.notifyChange()
+        return result
+    }
+
+    func restoreTitle(_ title: String?, for sessionID: UUID, expecting expected: String?) throws {
+        try backend.io.sync {
+            var map = try readNames()
+            guard map[sessionID.uuidString] == expected else { throw TrailCorrectionError.metadataChanged }
+            map[sessionID.uuidString] = title
+            try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
+            let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
             try enc.encode(map).write(to: namesURL, options: .atomic)
         }
         backend.notifyChange()
@@ -374,6 +531,36 @@ final class TrailBackend: @unchecked Sendable {
     private let lock = NSLock()
     private var pending: [TrailEvent] = []
     private var lastRecorded: TrailEvent?
+    private var lastWriteError: String?
+    var persistenceError: String? {
+        lock.lock(); defer { lock.unlock() }; return lastWriteError
+    }
+    private var pathsURL: URL { vault.stateDir.appendingPathComponent("trail-paths.json") }
+
+    private func pathOverrides() throws -> [String: String] {
+        guard FileManager.default.fileExists(atPath: pathsURL.path) else { return [:] }
+        return try JSONDecoder().decode([String: String].self, from: Data(contentsOf: pathsURL))
+    }
+
+    func reconcile(oldPath: String, newPath: String) throws {
+        try io.sync {
+            let disk = try readDisk()
+            lock.lock(); let buffer = pending; lock.unlock()
+            var overrides = try pathOverrides()
+            for event in disk + buffer {
+                guard let original = event.file?.relativePath else { continue }
+                let path = overrides[event.id.uuidString] ?? original
+                if path == oldPath { overrides[event.id.uuidString] = newPath }
+                else if path.hasPrefix(oldPath + "/") {
+                    overrides[event.id.uuidString] = newPath + path.dropFirst(oldPath.count)
+                }
+            }
+            try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            try encoder.encode(overrides).write(to: pathsURL, options: .atomic)
+        }
+        notifyChange()
+    }
     private var recentIDs: [UUID] = []
     private var recentIDSet = Set<UUID>()
     /// When the scheduled flush will run, if one is scheduled.
@@ -465,8 +652,14 @@ final class TrailBackend: @unchecked Sendable {
     func events() throws -> [TrailEvent] {
         try io.sync {
             let onDisk = try readDisk()
-            lock.lock(); defer { lock.unlock() }
-            return onDisk + pending.filter { !cachedIDs.contains($0.id) && !tailIDs.contains($0.id) }
+            let overrides = try pathOverrides()
+            lock.lock()
+            var all = onDisk + pending.filter { !cachedIDs.contains($0.id) && !tailIDs.contains($0.id) }
+            lock.unlock()
+            for i in all.indices {
+                if let path = overrides[all[i].id.uuidString] { all[i].file = FileRef(relativePath: path) }
+            }
+            return all
         }
     }
 
@@ -497,11 +690,15 @@ final class TrailBackend: @unchecked Sendable {
         do {
             try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
             try TrailStore.append(data, to: fileURL)
+            lock.lock(); let hadError = lastWriteError != nil; lastWriteError = nil; lock.unlock()
+            if hadError { notifyChange() }
         } catch {
             // Keep the events; the next record or flush retries.
             lock.lock()
             pending.insert(contentsOf: batch, at: 0)
+            lastWriteError = error.localizedDescription
             lock.unlock()
+            notifyChange()
         }
     }
 

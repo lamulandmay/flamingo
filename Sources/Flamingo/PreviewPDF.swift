@@ -7,11 +7,18 @@ import FlamingoDesign
 /// `AnchorNavigator` while on screen, so ⌘↑/⌘↓ turn pages and a chip for page 4 lands
 /// on page 4. Plan 01 owns.
 struct PDFPreview: NSViewRepresentable {
-    let state: AppState
+    let pane: DocumentPane
     let file: FileRef
     let url: URL
     let modified: Date?
     let jump: JumpRequest?
+
+    init(pane: DocumentPane, file: FileRef, url: URL, modified: Date?, jump: JumpRequest?) {
+        self.pane = pane; self.file = file; self.url = url; self.modified = modified; self.jump = jump
+    }
+    init(state: AppState, file: FileRef, url: URL, modified: Date?, jump: JumpRequest?) {
+        self.init(pane: state.activePane, file: file, url: url, modified: modified, jump: jump)
+    }
 
     func makeCoordinator() -> PDFPreviewCoordinator { PDFPreviewCoordinator() }
 
@@ -21,7 +28,7 @@ struct PDFPreview: NSViewRepresentable {
         view.displayMode = .singlePageContinuous
         view.displaysPageBreaks = true
         view.backgroundColor = Theme.NS.bg
-        context.coordinator.attach(view, state: state)
+        context.coordinator.attach(view, pane: pane)
         return view
     }
 
@@ -45,9 +52,9 @@ final class ThemedPDFView: PDFView {
 @MainActor
 final class PDFPreviewCoordinator: NSObject, AnchorNavigator {
     /// Last page per file, 1-based, for the lifetime of the process.
-    private static var lastPages: [URL: Int] = [:]
+    private var lastPages: [URL: Int] = [:]
 
-    private weak var state: AppState?
+    private weak var pane: DocumentPane?
     private weak var pdfView: PDFView?
     private var file: FileRef?
     private var url: URL?
@@ -58,16 +65,17 @@ final class PDFPreviewCoordinator: NSObject, AnchorNavigator {
 
     var anchorKind: FileAnchor.Kind { .page }
 
-    func attach(_ view: PDFView, state: AppState) {
-        self.state = state
+    func attach(_ view: PDFView, pane: DocumentPane) {
+        self.pane = pane
         pdfView = view
+        pane.requestFocus = { [weak view] in if let view { view.window?.makeFirstResponder(view) } }
         NotificationCenter.default.addObserver(self, selector: #selector(pageChanged(_:)),
                                                name: .PDFViewPageChanged, object: view)
     }
 
     func detach() {
         NotificationCenter.default.removeObserver(self)
-        if let state, state.navigator === self { state.navigator = nil }
+        if let pane, pane.navigator === self { pane.navigator = nil }
         pdfView?.document = nil
         pdfView = nil
     }
@@ -75,23 +83,25 @@ final class PDFPreviewCoordinator: NSObject, AnchorNavigator {
     /// From `updateNSView`: swaps the document when the file (or its contents) changed,
     /// restores the remembered page, and applies a pending jump request exactly once.
     func show(_ file: FileRef, url: URL, modified: Date?, jump: JumpRequest?) {
-        guard let state, let pdfView else { return }
+        guard let pane, let pdfView else { return }
         inViewUpdate = true
         defer { inViewUpdate = false }
-        if state.navigator !== self { state.navigator = self }
+        if pane.navigator !== self { pane.navigator = self }
 
+        let firstPresentation = self.url == nil
         let pending = jump.flatMap { $0.file == file && $0.id != lastAppliedJumpID ? $0 : nil }
         if url != self.url || modified != self.modified {
             self.file = file
             self.url = url
             self.modified = modified
-            let remembered = Self.lastPages[url]
+            let remembered = lastPages[url]
             pdfView.document = modified == nil ? nil : PDFDocument(url: url)
             var moved = false
             if let pending {
                 lastAppliedJumpID = pending.id
-                moved = go(to: pending.anchor)
+                moved = go(to: firstPresentation ? (pane.anchor ?? pending.anchor) : pending.anchor)
             }
+            if !moved, firstPresentation, let anchor = pane.anchor { moved = go(to: anchor) }
             if !moved, let remembered { go(toPage: remembered) }
             scheduleSync()
         } else if let pending {
@@ -111,10 +121,10 @@ final class PDFPreviewCoordinator: NSObject, AnchorNavigator {
 
     func jump(to anchor: FileAnchor) {
         // A stale navigator (selection just changed, view not yet swapped) must not move.
-        guard let state, state.selected == file else { return }
+        guard let pane, pane.file == file else { return }
         // `AppState.jumpToAnchor` publishes the same request; mark it applied so
         // `updateNSView` does not apply it a second time.
-        if let request = state.jumpRequest, request.file == file, request.anchor == anchor {
+        if let request = pane.jumpRequest, request.file == file, request.anchor == anchor {
             lastAppliedJumpID = request.id
         }
         go(to: anchor)
@@ -143,14 +153,14 @@ final class PDFPreviewCoordinator: NSObject, AnchorNavigator {
     /// the view: publishing from inside an update is not allowed.
     private func syncAnchor() {
         if inViewUpdate { scheduleSync(); return }
-        guard let state, let pdfView, let file, state.selected == file, state.navigator === self else { return }
+        guard let pane, let pdfView, let file, pane.file == file, pane.navigator === self else { return }
         var anchor: FileAnchor?
         if let doc = pdfView.document, doc.pageCount > 0, let page = pdfView.currentPage {
             let n = doc.index(for: page) + 1
             anchor = .page(n)
-            if let url { Self.lastPages[url] = n }
+            if let url { lastPages[url] = n }
         }
-        if state.anchor != anchor { state.anchor = anchor }
+        if pane.anchor != anchor { pane.anchor = anchor }
     }
 
     private func scheduleSync() {

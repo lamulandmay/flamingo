@@ -124,20 +124,32 @@ final class Retriever {
         var anchor: FileAnchor?
         var title: String?
         var text: String
+        var focus: String? = nil
     }
 
     let source: PassageSource
     var sectionLimit = 20
+    var searchLimit = 120
+    var maxSectionsPerFile = 3
     var maxSectionChars = 1800
     var maxCommentChars = 1200
 
-    private(set) var nextID = 1
+    private(set) var nextID: Int
     private var seen = Set<String>()
+    /// Section texts already handed out, by `SourcePrior.duplicateKey`.
+    private var packedTexts = Set<String>()
     private var sectionCache: [FileRef: [SourceSection]] = [:]
     private var commentCache: [FileRef: [Comment]] = [:]
     private lazy var allFiles: [FileRef] = source.files()
 
-    init(source: PassageSource) { self.source = source }
+    init(source: PassageSource, firstID: Int = 1) { self.source = source; self.nextID = firstID }
+
+    /// Passages another retriever already gave this question, so they aren't repeated.
+    func skip(_ passages: [Passage]) {
+        for p in passages {
+            if let id = p.commentID { seen.insert("c:\(id.uuidString)") } else { packedTexts.insert(SourcePrior.duplicateKey(p.text)) }
+        }
+    }
 
     /// Searches the index for `question`'s reformulations and packs, within `budgetTokens`:
     /// comments that match, then sections by rank (with the files those comments link to), then
@@ -153,7 +165,7 @@ final class Retriever {
         var failures = 0
         for q in queries {
             do {
-                sectionRank.add(try source.searchSections(q.text, limit: 50), weight: q.weight) { Self.key($0.file, $0.anchor) }
+                sectionRank.add(try source.searchSections(q.text, limit: searchLimit), weight: q.weight) { Self.key($0.file, $0.anchor) }
                 commentRank.add(try source.searchComments(q.text, limit: 50), weight: q.weight) { "c:\($0.comment.id.uuidString)" }
             } catch {
                 failure = error
@@ -162,8 +174,20 @@ final class Retriever {
         }
         if failures == queries.count, let failure { throw failure }
 
-        let topHits = Array(sectionRank.ranked.map(\.item)
-            .filter { !seen.contains(Self.key($0.file, $0.anchor)) }
+        // Weighted toward the user's own documents and away from duplicates, generated text
+        // and any one file taking every slot.
+        var perFile: [FileRef: Int] = [:]
+        var texts = Set<String>()
+        let topHits = Array(sectionRank.ranked
+            .map { ($0.item, $0.score * SourcePrior.weight($0.item.file.relativePath) * SourcePrior.quality(Self.plain($0.item.snippet))) }
+            .sorted { $0.1 > $1.1 }
+            .map(\.0)
+            .filter { hit in
+                guard perFile[hit.file, default: 0] < maxSectionsPerFile,
+                      texts.insert(SourcePrior.duplicateKey(Self.plain(hit.snippet))).inserted else { return false }
+                perFile[hit.file, default: 0] += 1
+                return true
+            }
             .prefix(sectionLimit))
         let hitFiles = Set(topHits.map(\.file))
         let hitPlaces = Set(topHits.map { Self.key($0.file, $0.anchor) })
@@ -212,21 +236,24 @@ final class Retriever {
             let cost = Self.tokens(p)
             guard used + cost <= budget else { return }
             out.append(Passage(id: nextID, kind: p.kind, file: p.file, anchor: p.anchor, title: p.title,
-                               text: p.text, timestamp: p.timestamp))
+                               text: p.text, timestamp: p.timestamp, provenance: p.provenance, commentID: p.commentID))
             used += cost; nextID += 1; seen.insert(key)
         }
         func comment(_ file: FileRef, _ c: Comment) -> Passage {
             Passage(id: 0, kind: .comment, file: file, anchor: c.anchor,
-                    text: Self.excerpt(c.text, terms: terms, max: maxCommentChars), timestamp: c.timestamp)
+                    text: Self.excerpt(c.text, terms: terms, max: maxCommentChars), timestamp: c.timestamp,
+                    provenance: c.provenance, commentID: c.id)
         }
         for hit in direct.prefix(40) {
             add(comment(hit.file, hit.comment), key: "c:\(hit.comment.id.uuidString)", within: commentBudget)
         }
         for s in sections {
-            let text = Self.excerpt(s.text, terms: terms, max: maxSectionChars)
-            guard !text.isEmpty else { continue }
+            let text = Self.excerpt(s.text, terms: terms, max: maxSectionChars, focus: s.focus)
+            guard !text.isEmpty, !packedTexts.contains(SourcePrior.duplicateKey(text)) else { continue }
+            let before = out.count
             add(Passage(id: 0, kind: .section, file: s.file, anchor: s.anchor, title: s.title, text: text),
-                key: Self.key(s.file, s.anchor), within: budgetTokens)
+                key: Self.key(s.file, s.anchor) + "|" + text, within: budgetTokens)
+            if out.count > before { packedTexts.insert(SourcePrior.duplicateKey(text)) }
         }
         for (file, c) in context.prefix(20) {
             add(comment(file, c), key: "c:\(c.id.uuidString)", within: budgetTokens)
@@ -315,10 +342,13 @@ final class Retriever {
                 ?? (a.kind == .cell ? sections.first {
                     $0.anchor.kind == .sheet && a.value.hasPrefix($0.anchor.value + "!")
                 } : nil)
-            return s.map { Candidate(file: hit.file, anchor: $0.anchor, title: $0.title, text: $0.text) }
+                ?? (a.kind == .line ? sections.filter {
+                    $0.anchor.kind == .line && (Int($0.anchor.value) ?? Int.max) <= (Int(a.value) ?? 0)
+                }.max { (Int($0.anchor.value) ?? 0) < (Int($1.anchor.value) ?? 0) } : nil)
+            return s.map { Candidate(file: hit.file, anchor: a, title: $0.title, text: $0.text, focus: Self.plain(hit.snippet)) }
         }
         if let text = try? source.text(of: hit.file), !text.isEmpty {
-            return Candidate(file: hit.file, anchor: nil, title: nil, text: text)
+            return Candidate(file: hit.file, anchor: nil, title: nil, text: text, focus: Self.plain(hit.snippet))
         }
         return nil
     }
@@ -326,7 +356,12 @@ final class Retriever {
     /// More than the file's own name: an image nobody has OCR'd yet matches on its name alone.
     static func hasContent(_ c: Candidate) -> Bool {
         let text = c.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !text.isEmpty && text != c.file.name && text != (c.file.name as NSString).deletingPathExtension
+        let folder = (c.file.relativePath as NSString).deletingLastPathComponent
+        let stem = (c.file.name as NSString).deletingPathExtension
+        // A file known only by name ("name · folder"), or a 3D node that is only its own name.
+        if text == c.file.name || text == stem || text == c.file.name + " · " + folder || text == stem + " · " + folder { return false }
+        if let title = c.title, text == title { return false }
+        return text.count >= 12 || c.anchor == nil
     }
 
     static func key(_ file: FileRef, _ anchor: FileAnchor?) -> String {
@@ -367,7 +402,7 @@ final class Retriever {
     }
 
     /// Up to `max` characters, centered a little before the first term so the match has context.
-    static func excerpt(_ text: String, terms: [String], max: Int) -> String {
+    static func excerpt(_ text: String, terms: [String], max: Int, focus: String? = nil) -> String {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard t.count > max else { return t }
         var first: String.Index?
@@ -375,6 +410,7 @@ final class Retriever {
             if let r = t.range(of: QueryPlan.stem(term), options: [.caseInsensitive, .diacriticInsensitive]),
                first.map({ r.lowerBound < $0 }) ?? true { first = r.lowerBound }
         }
+        if let focus, focus.count > 10, let range = t.range(of: focus) { first = range.lowerBound }
         let center = first.map { t.distance(from: t.startIndex, to: $0) } ?? 0
         let start = Swift.max(0, Swift.min(center - max / 3, t.count - max))
         let lo = t.index(t.startIndex, offsetBy: start)

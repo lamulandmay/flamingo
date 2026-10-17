@@ -32,27 +32,101 @@ public struct ImageExtractor: Extractor {
         let meta = Self.metadata(props)
         var lines = meta.lines
         if max(width, height) >= Self.minLongSide, min(width, height) >= Self.minShortSide {
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceThumbnailMaxPixelSize: min(Self.maxOCRSide, max(width, height)),
-            ]
-            guard let image = CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary) else {
-                throw ExtractError.malformed(url.path)
+            do {
+                lines += try Self.withOCRSlot {
+                    let options: [CFString: Any] = [
+                        kCGImageSourceCreateThumbnailFromImageAlways: true,
+                        kCGImageSourceCreateThumbnailWithTransform: true,
+                        kCGImageSourceShouldCacheImmediately: true,
+                        kCGImageSourceThumbnailMaxPixelSize: min(Self.maxOCRSide, max(width, height)),
+                    ]
+                    guard let image = CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary) else {
+                        throw ExtractError.malformed(url.path)
+                    }
+                    return try Self.recognizeText(in: image)
+                }
+            } catch let stalled as OCRStalled {
+                // Keep the metadata; a failed read is retried later with backoff.
+                var out = Extracted(text: lines.joined(separator: "\n"), title: meta.title)
+                out.coverage = ExtractionCoverage(.failed, reason: stalled.reason)
+                return out
             }
-            lines += try Self.recognizeText(in: image)
         }
         return Extracted(text: lines.joined(separator: "\n"), title: meta.title)
     }
 
-    /// Accurate Vision OCR, lines in reading order.
-    static func recognizeText(in image: CGImage) throws -> [String] {
+    /// At most four images decoded and in Vision at once. With eight extraction threads all
+    /// on images, each held a decoded bitmap (up to 64 MB at 4096 px) while Vision worked;
+    /// four slots read 300 photos as fast as eight did (20 s) with a 20% smaller peak
+    /// footprint, and on a mixed batch the other threads get on with documents meanwhile.
+    /// Two slots halved photo throughput. Wrap decoding and `recognizeText` together; never nest.
+    static let ocrSlots = DispatchSemaphore(value: 4)
+
+    static func withOCRSlot<T>(_ body: () throws -> T) rethrows -> T {
+        ocrSlots.wait()
+        defer { ocrSlots.signal() }
+        return try body()
+    }
+
+    /// Vision didn't answer in time. Its request may still be stuck inside Vision.
+    struct OCRStalled: Error { var reason: String }
+
+    /// The longest one request may hold an extraction thread. The first request of a fresh
+    /// executable compiles Vision's models (~25 s), so this is generous.
+    static let ocrWatchdog: TimeInterval = 90
+
+    /// Set while an abandoned request is still inside Vision. A home-folder index once sat
+    /// for 87 minutes with every extraction thread parked in Vision's capacity queue behind
+    /// a request that never returned; while one is stuck, others fail at once instead.
+    static let ocrStuck = Locked(false)
+
+    /// Accurate Vision OCR, lines in reading order. Runs on its own thread so a request that
+    /// never returns costs that thread, not the index: after `ocrWatchdog` (or `timeout`, if
+    /// sooner, plus a grace period for cancellation) the caller gets `OCRStalled`.
+    static func recognizeText(in image: CGImage, timeout: TimeInterval? = nil) throws -> [String] {
+        if ocrStuck.withLock({ $0 }) { throw OCRStalled(reason: "Text recognition is stuck; will retry.") }
+        final class Call: @unchecked Sendable {
+            var result: Result<[String], Error>?
+            var abandoned = false
+        }
+        let call = Locked(Call())
+        let finished = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            let result = Result { try recognize(image, timeout: timeout) }
+            call.withLock { c in
+                c.result = result
+                if c.abandoned { ocrStuck.withLock { $0 = false } }
+            }
+            finished.signal()
+        }
+        thread.qualityOfService = Thread.current.qualityOfService
+        thread.start()
+        let limit = min(timeout.map { $0 + 10 } ?? ocrWatchdog, ocrWatchdog)
+        if finished.wait(timeout: .now() + limit) == .timedOut {
+            let late = call.withLock { c -> Result<[String], Error>? in
+                if c.result == nil { c.abandoned = true; ocrStuck.withLock { $0 = true } }
+                return c.result
+            }
+            guard let late else { throw OCRStalled(reason: "Text recognition took over \(Int(limit)) s; will retry.") }
+            return try late.get()
+        }
+        return try call.withLock { $0.result! }.get()
+    }
+
+    private static func recognize(_ image: CGImage, timeout: TimeInterval?) throws -> [String] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
         request.automaticallyDetectsLanguage = true
+        let cancelled = Locked(false)
+        let cancellation = timeout.map { interval -> DispatchWorkItem in
+            let item = DispatchWorkItem { cancelled.withLock { $0 = true }; request.cancel() }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + interval, execute: item)
+            return item
+        }
+        defer { cancellation?.cancel() }
         try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        guard !cancelled.withLock({ $0 }) else { throw ExtractError.unreadable("OCR request exceeded its time budget.") }
         let lines = (request.results ?? []).compactMap { o in o.topCandidates(1).first.map { (o.boundingBox, $0.string) } }
         return readingOrder(lines)
     }

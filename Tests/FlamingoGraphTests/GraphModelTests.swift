@@ -71,11 +71,27 @@ final class GraphNavigationTests: XCTestCase {
 final class RadialLayoutTests: XCTestCase {
     func testNeighborhoodDepth() {
         let one = RadialLayout.neighborhood(of: "decks/a.pptx", in: small, depth: 1)
-        XCTAssertEqual(one.nodes.map(\.id), ["decks/a.pptx", "notes/d.md", "sheets/b.xlsx"])
+        // Strongest first: the link before the trail.
+        XCTAssertEqual(one.nodes.map(\.id), ["decks/a.pptx", "sheets/b.xlsx", "notes/d.md"])
         XCTAssertEqual(one.edges.count, 2)
         let two = RadialLayout.neighborhood(of: "decks/a.pptx", in: small, depth: 2)
         XCTAssertEqual(Set(two.nodes.map(\.id)), ["decks/a.pptx", "sheets/b.xlsx", "notes/d.md", "docs/c.docx"])
         XCTAssertEqual(RadialLayout.neighborhood(of: "missing", in: small, depth: 2), Graph())
+    }
+
+    func testNeighborsAreCappedStrongestFirst() {
+        var nodes = [node("hub.md")], edges: [Graph.Edge] = []
+        for i in 0..<20 {
+            nodes.append(node("m\(i).md"))
+            edges.append(.init(source: "m\(i).md", target: "hub.md", kind: .mention, weight: Double(i)))
+        }
+        nodes.append(node("linked.md"))
+        edges.append(.init(source: "hub.md", target: "linked.md", kind: .link))
+        let ids = RadialLayout.neighborhood(of: "hub.md", in: Graph(nodes: nodes, edges: edges), depth: 1).nodes.map(\.id)
+        XCTAssertEqual(ids.count, 1 + RadialLayout.neighborCap)
+        XCTAssertEqual(ids[1], "linked.md", "a link outranks any suggestion")
+        XCTAssertEqual(ids[2], "m19.md")
+        XCTAssertFalse(ids.contains("m0.md"))
     }
 
     func testRingsAndSpacing() {

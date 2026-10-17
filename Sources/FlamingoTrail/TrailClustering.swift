@@ -7,20 +7,27 @@ enum TrailClustering {
     // MARK: Sessions
 
     /// Sessions, oldest first. `events` need not be sorted.
-    static func sessions(from events: [TrailEvent], tuning: TrailTuning) -> [TrailSession] {
+    static func sessions(from events: [TrailEvent], tuning: TrailTuning, corrections: TrailCorrections = TrailCorrections()) -> [TrailSession] {
         let sorted = events.enumerated().sorted { a, b in
             a.element.at != b.element.at ? a.element.at < b.element.at : a.offset < b.offset
         }.map(\.element)
 
         var clusters: [[TrailEvent]] = []
         for e in sorted {
-            if let last = clusters.last?.last, e.at.timeIntervalSince(last.at) <= tuning.sessionGap {
+            let boundary = corrections.boundaries[e.id.uuidString]
+            if let last = clusters.last?.last,
+               boundary != .split && (boundary == .merge || e.at.timeIntervalSince(last.at) <= tuning.sessionGap) {
                 clusters[clusters.count - 1].append(e)
             } else {
                 clusters.append([e])
             }
         }
-        return clusters.map { session(from: $0, tuning: tuning) }
+        return clusters.map { events in
+            var session = session(from: events, tuning: tuning)
+            session.excludesInferredConnections = events.contains { corrections.excludedSessionIDs.contains($0.id.uuidString) }
+            session.hasGroupingCorrection = events.contains { corrections.boundaries[$0.id.uuidString] != nil }
+            return session
+        }
     }
 
     /// One cluster → one session. The id is the first raw event's id, so it stays the same as
@@ -32,8 +39,10 @@ enum TrailClustering {
         for e in kept where e.kind != .searched {
             if let f = e.file, seen.insert(f).inserted { files.append(f) }
         }
-        return TrailSession(id: raw[0].id, start: raw[0].at, end: raw[raw.count - 1].at,
-                            events: kept, files: files)
+        var session = TrailSession(id: raw[0].id, start: raw[0].at, end: raw[raw.count - 1].at,
+                                   events: kept, files: files)
+        session.sourceEventIDs = raw.map(\.id)
+        return session
     }
 
     /// Drops `opened` events for files the user only passed through: arrowing down a list
@@ -98,7 +107,7 @@ enum TrailClustering {
         }
 
         var weight: [Pair: Double] = [:]
-        for s in sessions {
+        for s in sessions where !s.excludesInferredConnections {
             let files = s.files
             guard files.count > 1 else { continue }
             var pairs = Set<Pair>()

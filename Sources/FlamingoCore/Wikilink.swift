@@ -144,17 +144,84 @@ public enum Wikilink {
 
     // MARK: - Resolution
 
-    /// Resolves a link target to a file. `vault` is accepted for API compatibility and is not
-    /// consulted; matching is purely over `candidates`. See `Resolver` for the rules. Builds a
-    /// `Resolver` per call; use one `Resolver` directly when resolving many links.
+    /// Resolves a link target to a file, including confirmed historical paths in the vault.
+    /// Builds a `Resolver` per call; use one resolver with a single alias snapshot for batches.
     public static func resolve(_ target: String, in vault: Vault, candidates: [FileRef]) -> FileRef? {
-        Resolver(candidates: candidates).resolve(target)
+        resolveOnce(target, from: nil, aliases: (try? PathAliases(vault: vault).all()) ?? [:], candidates: candidates)
     }
 
     /// Like `resolve(_:in:candidates:)`, but when several candidates tie, prefers the one in the
-    /// same folder as `source`. `vault` is accepted for API compatibility and is not consulted.
+    /// same folder as `source`.
     public static func resolve(_ target: String, from source: FileRef, in vault: Vault, candidates: [FileRef]) -> FileRef? {
-        Resolver(candidates: candidates).resolve(target, from: source)
+        resolveOnce(target, from: source, aliases: (try? PathAliases(vault: vault).all()) ?? [:], candidates: candidates)
+    }
+
+    /// One link against a whole vault, as the shell does on every click: instead of indexing
+    /// every candidate (8 NFC-normalised, lowercased keys each: 126 ms for 35k files), keep only
+    /// the candidates whose name could match the target, plus any under a renamed folder that
+    /// aliases might map the target onto, and resolve among those. Every tier key of a matching
+    /// candidate ends in the target's last component, so the result is the same as a `Resolver`
+    /// over all candidates.
+    static func resolveOnce(_ target: String, from source: FileRef?, aliases: [String: String], candidates: [FileRef]) -> FileRef? {
+        guard let query = normalizedQuery(target) else { return nil }
+        let wanted = Array(lastComponent(of: query.lowercased()).utf8)
+        let wantedIsASCII = wanted.allSatisfy { $0 < 0x80 }
+        let aliasTargets = Set(((try? PathAliases.validated(aliases)) ?? [:]).values)
+        var possible: [FileRef] = []
+        for ref in candidates where nameMayMatch(ref.relativePath, wanted: wanted, wantedIsASCII: wantedIsASCII)
+            || (!aliasTargets.isEmpty && isUnder(aliasTargets, ref.relativePath)) {
+            possible.append(ref)
+        }
+        let resolver = Resolver(candidates: possible, aliases: aliases)
+        return source.map { resolver.resolve(target, from: $0) } ?? resolver.resolve(target)
+    }
+
+    /// Conservative: true whenever the candidate's lowercased NFC basename, or that basename
+    /// without its extension, could equal `wanted`. Plain ASCII names are checked byte-wise;
+    /// anything else takes the exact (slow) path.
+    private static func nameMayMatch(_ path: String, wanted: [UInt8], wantedIsASCII: Bool) -> Bool {
+        let utf8 = path.utf8
+        var start = utf8.endIndex
+        var ascii = true
+        while start > utf8.startIndex {
+            let b = utf8[utf8.index(before: start)]
+            if b == UInt8(ascii: "/") { break }
+            if b >= 0x80 || b == UInt8(ascii: "\\") { ascii = false }
+            start = utf8.index(before: start)
+        }
+        guard ascii, start < utf8.endIndex else {
+            let name = lastComponent(of: normalizedPath(path))
+            return Array(name.lowercased().utf8) == wanted || Array(droppingExtension(name).lowercased().utf8) == wanted
+        }
+        // Lowercasing never turns ASCII into non-ASCII, so an ASCII name can't match otherwise.
+        guard wantedIsASCII else { return false }
+        let name = utf8[start...]
+        func same<C: Collection>(_ bytes: C) -> Bool where C.Element == UInt8 {
+            guard bytes.count == wanted.count else { return false }
+            var i = 0
+            for b in bytes {
+                let lower = b >= 65 && b <= 90 ? b + 32 : b
+                if lower != wanted[i] { return false }
+                i += 1
+            }
+            return true
+        }
+        if same(name) { return true }
+        // Without its extension: up to the last dot, which must not be the first character.
+        guard let dot = name.lastIndex(of: UInt8(ascii: ".")), dot != name.startIndex else { return false }
+        return same(name[..<dot])
+    }
+
+    /// Whether `path` (or its NFC form) is one of `prefixes` or inside one.
+    private static func isUnder(_ prefixes: Set<String>, _ path: String) -> Bool {
+        let plain = path.utf8.allSatisfy { $0 < 0x80 && $0 != UInt8(ascii: "\\") }
+        var prefix = Substring(plain ? path : normalizedPath(path))
+        while !prefix.isEmpty {
+            if prefixes.contains(String(prefix)) { return true }
+            guard let slash = prefix.lastIndex(of: "/") else { return false }
+            prefix = prefix[..<slash]
+        }
+        return false
     }
 
     /// A precomputed index over a candidate list, for resolving many links fast.
@@ -177,10 +244,13 @@ public enum Wikilink {
         /// One table per tier, in priority order. Tiers 0–3 are keyed by exact normalized
         /// strings, tiers 4–7 by their lowercased forms.
         private let tiers: [[String: [FileRef]]]
+        /// Historical spellings use the same tiers, after real paths in each tier. Reusing an
+        /// old exact filename always selects the current file instead of redirecting it.
+        private let aliasTiers: [[String: [FileRef]]]
         private static let tierCount = 8
 
         /// Builds the index. Cost is linear in the number of candidates.
-        public init(candidates: [FileRef]) {
+        public init(candidates: [FileRef], aliases: [String: String] = [:]) {
             var tables = Array(repeating: [String: [FileRef]](), count: Resolver.tierCount)
             for ref in candidates {
                 for (tier, key) in Wikilink.candidateKeys(for: ref.relativePath).enumerated() {
@@ -188,6 +258,7 @@ public enum Wikilink {
                 }
             }
             tiers = tables
+            aliasTiers = Self.aliasTables(candidates: candidates, aliases: (try? PathAliases.validated(aliases)) ?? [:])
         }
 
         /// Resolves `target` (bare, or full `[[target#anchor|alias]]` text) to a candidate, or `nil`.
@@ -208,8 +279,52 @@ public enum Wikilink {
                 if let matches = table[key], !matches.isEmpty {
                     return Wikilink.best(of: matches, near: source)
                 }
+                if let matches = aliasTiers[tier][key], !matches.isEmpty {
+                    // On a case-insensitive vault a newly created `old.md` also occupies
+                    // the old `OLD.md` name. Its exact path wins over a historical redirect.
+                    if let current = tiers[4][folded], !current.isEmpty {
+                        return Wikilink.best(of: current, near: source)
+                    }
+                    return Wikilink.best(of: matches, near: source)
+                }
             }
             return nil
+        }
+
+        /// Reverse only matching path prefixes, avoiding an aliases × whole-vault scan.
+        /// A specific child rename can override an older folder rename. Forward resolution
+        /// validates each proposed spelling so that the broader alias cannot steal that link.
+        private static func aliasTables(candidates: [FileRef], aliases: [String: String]) -> [[String: [FileRef]]] {
+            var tables = Array(repeating: [String: [FileRef]](), count: tierCount)
+            guard !aliases.isEmpty else { return tables }
+            var reversed: [String: [String]] = [:]
+            for (old, new) in aliases { reversed[new, default: []].append(old) }
+            for ref in candidates {
+                let actual = Wikilink.normalizedPath(ref.relativePath)
+                var seen: Set<String> = [actual]
+                var queue: [(path: String, used: Set<String>)] = [(actual, [])]
+                var cursor = 0
+                while cursor < queue.count {
+                    let item = queue[cursor]
+                    cursor += 1
+                    var prefix = item.path
+                    while !prefix.isEmpty {
+                        for old in reversed[prefix] ?? [] where !item.used.contains(old) {
+                            let historical = old + item.path.dropFirst(prefix.count)
+                            guard seen.insert(historical).inserted,
+                                  PathAliases.resolvedPath(historical, aliases: aliases) == actual else { continue }
+                            for (tier, key) in Wikilink.candidateKeys(for: historical).enumerated() {
+                                tables[tier][key, default: []].append(ref)
+                            }
+                            var used = item.used; used.insert(old)
+                            queue.append((historical, used))
+                        }
+                        guard let slash = prefix.lastIndex(of: "/") else { break }
+                        prefix = String(prefix[..<slash])
+                    }
+                }
+            }
+            return tables
         }
     }
 

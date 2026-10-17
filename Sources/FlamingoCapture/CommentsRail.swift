@@ -7,7 +7,8 @@ import FlamingoDesign
 /// comment asks the shell to jump there. Plan 03 owns.
 ///
 /// Click selects, ↑↓ move, Return or double-click edits in place, ⌫ deletes.
-/// A delete shows a five-second undo line at the bottom when `onRestore` is set.
+/// A standalone rail shows a five-second undo line after deleting when `onRestore` is set.
+/// The app can use its shared undo history instead with `usesSharedUndo()`.
 public struct CommentsRail: View {
     public var comments: [Comment]
     public var onJump: (FileAnchor) -> Void
@@ -15,6 +16,36 @@ public struct CommentsRail: View {
     public var onDelete: (Comment) -> Void
     var openLink: ((String) -> Void)?
     var restore: ((Comment) -> Void)?
+    var saveEdit: ((Comment) async throws -> Void)?
+    var saveDelete: ((Comment) async throws -> Void)?
+    var saveRestore: ((Comment) async throws -> Void)?
+    var focusedComment: UUID?
+    var recoveryFile: FileRef?
+    var recoveryVault: Vault?
+    var sharedUndo = false
+
+    public func onSaveEdit(_ handler: @escaping (Comment) async throws -> Void) -> CommentsRail {
+        var rail = self; rail.saveEdit = handler; return rail
+    }
+    public func onSaveDelete(_ handler: @escaping (Comment) async throws -> Void) -> CommentsRail {
+        var rail = self; rail.saveDelete = handler; return rail
+    }
+    public func onSaveRestore(_ handler: @escaping (Comment) async throws -> Void) -> CommentsRail {
+        var rail = self; rail.saveRestore = handler; return rail
+    }
+    public func focusComment(_ id: UUID?) -> CommentsRail {
+        var rail = self; rail.focusedComment = id; return rail
+    }
+    public func recoveryContext(file: FileRef?, vault: Vault?) -> CommentsRail {
+        var rail = self; rail.recoveryFile = file; rail.recoveryVault = vault; return rail
+    }
+
+    /// The shell registers successful comment mutations in its shared undo history.
+    /// This disables the rail's separate delete entry, timer and toast, while keeping
+    /// native text editing undo and the existing persistence callbacks intact.
+    public func usesSharedUndo(_ enabled: Bool = true) -> CommentsRail {
+        var rail = self; rail.sharedUndo = enabled; return rail
+    }
 
     public init(comments: [Comment], onJump: @escaping (FileAnchor) -> Void,
                 onEdit: @escaping (Comment) -> Void = { _ in }, onDelete: @escaping (Comment) -> Void = { _ in }) {
@@ -40,6 +71,9 @@ public struct CommentsRail: View {
     /// Edited here but possibly not yet updated in `comments`.
     @State private var pendingText: [UUID: String] = [:]
     @State private var deletion: RailDeletion?
+    @State private var mutationError: String?
+    @State private var failedEdit: Comment?
+    @State private var savingIDs: Set<UUID> = []
     @FocusState private var railFocused: Bool
     @FocusState private var editorFocused: Bool
     @Environment(\.undoManager) private var undoManager
@@ -61,14 +95,37 @@ public struct CommentsRail: View {
     public var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(rows) { c in row(c).id(c.id) }
                 }
                 .padding(Theme.Space.s)
                 Color.clear.frame(height: 0).id(Self.end)
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) { undoLine }
-            .onAppear { DispatchQueue.main.async { proxy.scrollTo(Self.end, anchor: .bottom) } }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                    if let mutationError {
+                        Text(mutationError).font(Theme.Font.small).foregroundStyle(Theme.Color.textSecondary).textSelection(.enabled)
+                        if let failedEdit {
+                            HStack {
+                                Button("Retry") { persistEdit(failedEdit) }
+                                Button("Copy unsaved edit") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(failedEdit.text, forType: .string)
+                                }
+                                Button("Discard edit") { discardRecovery() }
+                            }
+                        }
+                    }
+                    undoLine
+                }.padding(mutationError == nil ? 0 : Theme.Space.s)
+            }
+            .onAppear { DispatchQueue.main.async {
+                if let focusedComment { selection = focusedComment; proxy.scrollTo(focusedComment, anchor: .center) }
+                else { proxy.scrollTo(Self.end, anchor: .bottom) }
+            } }
+            .onChange(of: focusedComment) { _, id in
+                if let id { selection = id; proxy.scrollTo(id, anchor: .center) }
+            }
             .onChange(of: comments.map(\.id)) { old, new in commentsChanged(old: old, new: new, proxy: proxy) }
             .onChange(of: selection) { _, s in
                 if let s { withAnimation(Theme.Motion.fast) { proxy.scrollTo(s) } }
@@ -83,10 +140,12 @@ public struct CommentsRail: View {
         .onKeyPress(.return) { editSelected() }
         .onKeyPress(.escape) { escape() }
         .onChange(of: comments) { pendingText = [:] }
+        .onChange(of: sharedUndo) { _, enabled in if enabled { endDeletion() } }
         .onChange(of: editorFocused) { _, focused in if !focused, editing != nil { commitEdit() } }
         // Switching files replaces the rail; an edit in progress is saved, not dropped.
         .onDisappear { if editing != nil { commitEdit() } }
         .task(id: deletion?.id) { await expireDeletion() }
+        .task(id: recoveryFile) { await recoverEdit() }
         .environment(\.openURL, OpenURLAction { url in
             guard let target = RailText.linkTarget(from: url) else { return .systemAction }
             openLink?(target)
@@ -98,16 +157,17 @@ public struct CommentsRail: View {
 
     private func row(_ c: Comment) -> some View {
         let isEditing = editing == c.id
-        let mask: GestureMask = isEditing ? .subviews : .all
         return RailRow(comment: c, selected: selection == c.id, active: railFocused || editorFocused,
-                       editing: isEditing, draft: $draft, editorFocus: $editorFocused,
-                       onJump: { a in select(c); onJump(a) }, onSubmit: commitEdit, onCancel: cancelEdit)
-            .gesture(TapGesture(count: 2).onEnded { beginEdit(c) }, including: mask)
-            .simultaneousGesture(TapGesture().onEnded { select(c) }, including: mask)
+                       editing: isEditing, draft: Binding(get: { draft }, set: {
+                           draft = $0; backupEditingDraft($0)
+                       }), editorFocus: $editorFocused,
+                       onJump: { a in select(c); onJump(a) }, onSubmit: commitEdit, onCancel: cancelEdit,
+                       onSelect: { select(c) }, onEdit: { beginEdit(c) }, onLink: { openLink?($0) })
             .contextMenu {
                 Button("Edit") { beginEdit(c) }
                 Button("Delete") { delete(c) }
             }
+            .disabled(savingIDs.contains(c.id))
     }
 
     private func select(_ c: Comment) {
@@ -122,6 +182,11 @@ public struct CommentsRail: View {
         if let e = editing, !newSet.contains(e) { editing = nil }
         // Anything but the delete itself landing means the undo may target the wrong file.
         if let d = deletion, newSet.subtracting(hidden) != d.expected { endDeletion() }
+        if let focusedComment, newSet.contains(focusedComment), !oldSet.contains(focusedComment) {
+            selection = focusedComment
+            DispatchQueue.main.async { proxy.scrollTo(focusedComment, anchor: .center) }
+            return
+        }
         let added = newSet.subtracting(oldSet)
         if oldSet.isDisjoint(with: newSet) {
             proxy.scrollTo(Self.end, anchor: .bottom)
@@ -191,27 +256,133 @@ public struct CommentsRail: View {
         guard text != current.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
         var updated = original
         updated.text = text
+        persistEdit(updated)
+    }
+
+    private func backupEditingDraft(_ text: String) {
+        guard let id = editing, let file = recoveryFile, let vault = recoveryVault,
+              var updated = comments.first(where: { $0.id == id }) else { return }
+        let key = CommentEditDraftStore.recoveryKey(for: updated, file: file, in: vault)
+        if text == updated.text {
+            ThoughtDraftCheckpoint.enqueue(key: key, operation: {
+                try CommentEditDraftStore.remove(commentID: id, for: file, in: vault)
+            })
+        } else {
+            updated.text = text
+            CommentEditDraftStore.checkpoint(updated, for: file, in: vault) { failure in
+                guard let failure else { return }
+                Task { @MainActor in mutationError = "Draft recovery unavailable: " + failure }
+            }
+        }
+    }
+
+    private func persistEdit(_ updated: Comment) {
+        let id = updated.id, text = updated.text
+        guard !savingIDs.contains(id) else { return }
         pendingText[id] = text
-        onEdit(updated)
-        // If the shell's save failed, `comments` never changes; stop showing text that isn't on disk.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if pendingText[id] == text { pendingText[id] = nil } }
+        mutationError = nil
+        if let saveEdit {
+            savingIDs.insert(id)
+            Task { @MainActor in
+                var recoveryError: String?
+                var recoveryRevision: UInt64?
+                if let file = recoveryFile, let vault = recoveryVault {
+                    recoveryRevision = CommentEditDraftStore.checkpoint(updated, for: file, in: vault)
+                    recoveryError = await ThoughtDraftCheckpoint.flushAsync(key: CommentEditDraftStore.recoveryKey(for: updated, file: file, in: vault))
+                }
+                do {
+                    try await saveEdit(updated)
+                    failedEdit = nil
+                    if let file = recoveryFile, let vault = recoveryVault {
+                        ThoughtDraftCheckpoint.enqueue(key: CommentEditDraftStore.recoveryKey(for: updated, file: file, in: vault),
+                                                       required: false, ifCurrent: recoveryRevision, operation: {
+                            try CommentEditDraftStore.removeIfMatching(updated, for: file, in: vault)
+                        })
+                    }
+                } catch {
+                    pendingText[id] = nil
+                    failedEdit = updated
+                    mutationError = "Edit not saved: " + error.localizedDescription + (recoveryError.map { " · Draft recovery unavailable: " + $0 } ?? "")
+                    draft = text
+                }
+                savingIDs.remove(id)
+            }
+        } else {
+            onEdit(updated)
+            // Compatibility for callbacks that cannot acknowledge persistence.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { if pendingText[id] == text { pendingText[id] = nil } }
+        }
     }
 
     private func cancelEdit() {
+        if let id = editing, let file = recoveryFile, let vault = recoveryVault,
+           let comment = comments.first(where: { $0.id == id }) {
+            let key = CommentEditDraftStore.recoveryKey(for: comment, file: file, in: vault)
+            ThoughtDraftCheckpoint.enqueue(key: key, operation: { try CommentEditDraftStore.remove(commentID: id, for: file, in: vault) })
+            if let failure = ThoughtDraftCheckpoint.flush(key: key) {
+                mutationError = "Edit was not discarded: " + failure
+                return
+            }
+        }
         editing = nil
         railFocused = true
+    }
+
+    private func recoverEdit() async {
+        guard let file = recoveryFile, let vault = recoveryVault else { return }
+        do {
+            guard let saved = try await Task.detached(operation: { try CommentEditDraftStore.draft(for: file, in: vault) }).value else { return }
+            guard !Task.isCancelled else { return }
+            if comments.contains(where: { $0.text == saved.text && $0.timestamp == saved.timestamp && $0.anchor == saved.anchor }) {
+                try? await Task.detached { try CommentEditDraftStore.removeIfMatching(saved, for: file, in: vault) }.value
+            } else {
+                failedEdit = saved
+                mutationError = "Recovered an unsaved edit. Retry saving or copy it before discarding."
+            }
+        } catch { mutationError = "Edit recovery unavailable: " + error.localizedDescription }
+    }
+
+    private func discardRecovery() {
+        guard let file = recoveryFile, let vault = recoveryVault, let failedEdit else { failedEdit = nil; mutationError = nil; return }
+        let key = CommentEditDraftStore.recoveryKey(for: failedEdit, file: file, in: vault)
+        ThoughtDraftCheckpoint.enqueue(key: key, operation: {
+            try CommentEditDraftStore.removeIfMatching(failedEdit, for: file, in: vault)
+        })
+        Task {
+            if let failure = await ThoughtDraftCheckpoint.flushAsync(key: key) {
+                mutationError = "Could not discard recovered edit: " + failure
+            } else { self.failedEdit = nil; mutationError = nil }
+        }
     }
 
     // MARK: Delete and undo
 
     private func delete(_ c: Comment) {
+        guard !savingIDs.contains(c.id) else { return }
+        if let saveDelete {
+            savingIDs.insert(c.id)
+            mutationError = nil
+            Task { @MainActor in
+                do {
+                    try await saveDelete(c)
+                    completeDelete(c)
+                } catch { mutationError = "Comment not deleted: " + error.localizedDescription }
+                savingIDs.remove(c.id)
+            }
+        } else {
+            onDelete(c)
+            completeDelete(c)
+        }
+    }
+
+    private func completeDelete(_ c: Comment) {
         // Nothing stays selected, so a second ⌫ can't take a neighbor past the one-level undo.
         if selection == c.id { selection = nil }
         if editing == c.id { editing = nil }
         hidden.insert(c.id)
         endDeletion()
-        onDelete(c)
-        guard restore != nil else { return }
+        guard !sharedUndo else { return }
+        guard restore != nil || saveRestore != nil else { return }
         let d = RailDeletion(comment: c, expected: Set(comments.map(\.id)).subtracting(hidden))
         if let undoManager {
             undoManager.registerUndo(withTarget: d.token) { _ in
@@ -224,9 +395,25 @@ public struct CommentsRail: View {
 
     private func undoDeletion(fromUndoManager: Bool = false) {
         guard let d = deletion else { return }
+        if let saveRestore {
+            guard !savingIDs.contains(d.comment.id) else { return }
+            savingIDs.insert(d.comment.id)
+            Task { @MainActor in
+                do {
+                    try await saveRestore(d.comment)
+                    completeUndo(d, fromUndoManager: fromUndoManager)
+                } catch { mutationError = "Restore failed: " + error.localizedDescription }
+                savingIDs.remove(d.comment.id)
+            }
+            return
+        }
+        restore?(d.comment)
+        completeUndo(d, fromUndoManager: fromUndoManager)
+    }
+
+    private func completeUndo(_ d: RailDeletion, fromUndoManager: Bool) {
         if !fromUndoManager { undoManager?.removeAllActions(withTarget: d.token) }
         hidden.remove(d.comment.id)
-        restore?(d.comment)
         selection = d.comment.id
         railFocused = true
         withAnimation(Theme.Motion.fast) { deletion = nil }
@@ -241,7 +428,7 @@ public struct CommentsRail: View {
     private func expireDeletion() async {
         guard let id = deletion?.id else { return }
         try? await Task.sleep(for: .seconds(5))
-        if !Task.isCancelled, deletion?.id == id { endDeletion() }
+        if !Task.isCancelled, deletion?.id == id, let d = deletion, !savingIDs.contains(d.comment.id) { endDeletion() }
     }
 
     @ViewBuilder private var undoLine: some View {
@@ -283,6 +470,9 @@ private struct RailRow: View {
     let onJump: (FileAnchor) -> Void
     let onSubmit: () -> Void
     let onCancel: () -> Void
+    let onSelect: () -> Void
+    let onEdit: () -> Void
+    let onLink: (String) -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -291,7 +481,26 @@ private struct RailRow: View {
                 Text(RailText.timestamp(comment.timestamp))
                     .font(Theme.Font.monoSmall)
                     .foregroundStyle(Theme.Color.textTertiary)
+                    .onTapGesture(count: 2, perform: onEdit)
+                    .simultaneousGesture(TapGesture().onEnded { onSelect() })
                 if let a = comment.anchor { Chip(RailText.anchorLabel(a)) { onJump(a) } }
+                Spacer(minLength: 0)
+                // Where it came from, only when it wasn't typed here: an AI sparkle, or the app.
+                if let provenance = comment.provenance, provenance.origin == .ai {
+                    Image(systemName: "sparkle").font(.system(size: 9)).foregroundStyle(Theme.Color.textTertiary)
+                        .help("AI · " + (provenance.model ?? "generated"))
+                        .accessibilityLabel("AI generated")
+                } else if let app = comment.provenance?.appName {
+                    Text(app).font(Theme.Font.small).foregroundStyle(Theme.Color.textTertiary).lineLimit(1)
+                }
+                if let raw = comment.provenance?.sourceURL, let url = URL(string: raw) {
+                    Link(destination: url) { Image(systemName: "arrow.up.forward.square").font(.system(size: 10)) }
+                        .foregroundStyle(Theme.Color.textTertiary)
+                        .help(comment.provenance?.windowTitle ?? url.host ?? raw)
+                }
+                IconButton("pencil", help: "Edit Thought", action: onEdit)
+                    .opacity(hovering || selected ? 1 : 0)
+                    .frame(height: 16)
             }
             if editing {
                 TextField("", text: $draft, axis: .vertical)
@@ -302,26 +511,25 @@ private struct RailRow: View {
                     .onSubmit(onSubmit)
                     .onExitCommand(perform: onCancel)
                     .padding(Theme.Space.xs)
-                    .background(Theme.Color.bgRaised, in: RoundedRectangle(cornerRadius: Theme.Radius.s))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s)
-                        .strokeBorder(Theme.Color.accent, lineWidth: Theme.Size.hairline))
+                    // The editor sits `s − xs` inside the row: its corners are the row's, offset.
+                    .background(Theme.Color.bgRaised, in: Self.editorShape)
+                    .overlay(Self.editorShape.strokeBorder(Theme.Color.accent, lineWidth: Theme.Size.hairline))
                     .padding(-Theme.Space.xs)
             } else {
-                Text(RailText.attributed(comment.text))
-                    .font(Theme.Font.body)
-                    .foregroundStyle(Theme.Color.text)
-                    .tint(Theme.Color.accent)
-                    .fixedSize(horizontal: false, vertical: true)
+                RailRichText(text: comment.text, onLink: onLink)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(Theme.Space.s)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(background, in: RoundedRectangle(cornerRadius: Theme.Radius.s))
+        .background(background, in: Squircle(radius: Self.radius))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
     }
+
+    private static let radius = Theme.Radius.m
+    private static let editorShape = ConcentricSquircle(parentRadius: radius, padding: Theme.Space.s - Theme.Space.xs)
 
     private var background: Color {
         if selected { return active ? Theme.Color.selection : Theme.Color.fill }

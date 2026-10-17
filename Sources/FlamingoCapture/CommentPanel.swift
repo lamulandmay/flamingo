@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import FlamingoCore
 import FlamingoDesign
 
@@ -19,6 +20,13 @@ public struct CommentPanel: View {
     var label: String?
     /// Reports the panel's natural height so a hosting window can grow with the text.
     var onHeightChange: ((CGFloat) -> Void)?
+    var initialText = ""
+    var saving = false
+    /// Shows "Saving…"; the controller sets it only when a save is slow.
+    var showsSaving = false
+    var error: String?
+    var onTextChange: ((String) -> Void)?
+    var onDiscard: (() -> Void)?
 
     @StateObject private var model = ThoughtEditorModel()
 
@@ -38,14 +46,52 @@ public struct CommentPanel: View {
         return parts.joined(separator: " · ")
     }
 
+    /// Glyphs of the files the thought links so far, as the link spells them.
+    private var linkedExts: [String] {
+        var seen = Set<String>(), out: [String] = []
+        for raw in Wikilink.parse(model.text) where out.count < 3 {
+            let name = (Wikilink.components(of: raw).target as NSString).lastPathComponent
+            if seen.insert(name.lowercased()).inserted { out.append((name as NSString).pathExtension) }
+        }
+        return out
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ThoughtTextView(model: model, onSubmit: submit, onCancel: onCancel)
+            ThoughtTextView(model: model, editable: !saving, onSubmit: submit, onCancel: onCancel)
                 .frame(height: model.textHeight)
                 .padding(.top, Theme.Space.m)
                 .padding(.horizontal, Theme.Space.l)
 
-            Text(footer)
+            if saving && showsSaving { Text("Saving…").font(Theme.Font.small).foregroundStyle(Theme.Color.textSecondary).padding(.horizontal, Theme.Space.l) }
+            if let error {
+                VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                    Text(error).font(Theme.Font.small).foregroundStyle(Theme.Color.textSecondary).textSelection(.enabled)
+                    HStack {
+                        Button("Retry", action: submit).disabled(saving)
+                        Button("Copy thought") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(model.text, forType: .string)
+                        }
+                    }.font(Theme.Font.small)
+                }.padding(Theme.Space.l)
+            }
+
+            HStack(spacing: Theme.Space.xs) {
+                FileGlyph(ext: label == nil ? target.ext : "md", size: 13)
+                Text(footer).lineLimit(1).truncationMode(.middle)
+                if !linkedExts.isEmpty {
+                    HStack(spacing: Theme.Space.xs) {
+                        ForEach(Array(linkedExts.enumerated()), id: \.offset) { _, ext in FileGlyph(ext: ext, size: 13) }
+                    }
+                    .padding(.leading, Theme.Space.xs)
+                    .transition(.opacity)
+                }
+                Spacer(minLength: Theme.Space.s)
+                if let onDiscard, !model.text.isEmpty {
+                    Button("Discard draft", action: onDiscard).buttonStyle(.plain).disabled(saving)
+                }
+            }
                 .font(Theme.Font.mono)
                 .foregroundStyle(Theme.Color.textTertiary)
                 .lineLimit(1)
@@ -67,12 +113,17 @@ public struct CommentPanel: View {
         })
         .onPreferenceChange(PanelHeightKey.self) { h in onHeightChange?(h) }
         .frame(maxHeight: .infinity, alignment: .top)
-        .onAppear { model.setCandidates(candidates, recent: recent) }
+        .onAppear {
+            model.onTextChange = onTextChange
+            model.text = initialText
+            model.setCandidates(candidates, recent: recent)
+        }
         .onChange(of: candidates) { _, new in model.setCandidates(new, recent: recent) }
         .onChange(of: recent) { _, new in model.setCandidates(candidates, recent: new) }
     }
 
     private func submit() {
+        guard !saving else { return }
         let text = model.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return onCancel() }
         onSubmit(Comment(anchor: anchor, text: text))
@@ -116,7 +167,7 @@ struct LinkCompletionList: View {
                 .padding(.horizontal, Theme.Space.s)
                 .frame(height: Theme.Size.row)
                 .background(
-                    RoundedRectangle(cornerRadius: Theme.Radius.s)
+                    Squircle(radius: Theme.Radius.s)
                         .fill(i == model.selection ? Theme.Color.selection : Color.clear)
                 )
                 .contentShape(Rectangle())

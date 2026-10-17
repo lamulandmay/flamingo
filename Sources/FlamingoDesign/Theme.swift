@@ -31,6 +31,9 @@ public enum Theme {
         public static let hover = SwiftUI.Color(nsColor: Theme.NS.hover)
         /// Text and glyphs drawn on a solid `accent` fill.
         public static let onAccent = SwiftUI.Color(nsColor: Theme.NS.onAccent)
+        /// The tint a saved thought lands with, by strength (0 spark, 1 solid, 2 woven): blush,
+        /// coral, flamingo. One hue, more of it, the way a flamingo gets pinker from what it eats.
+        public static func thought(_ level: Int) -> SwiftUI.Color { SwiftUI.Color(nsColor: Theme.NS.thought(level)) }
 
         /// Muted family hue for a file extension: graph nodes and glyph tints.
         /// Unknown extensions get `textSecondary`.
@@ -134,6 +137,16 @@ public enum Theme {
             light: NSColor(white: 0, alpha: 0.035), dark: NSColor(white: 1, alpha: 0.045))
         public static let onAccent = NSColor.flamingo("onAccent",
             light: NSColor(hex: 0xFFFFFF), dark: NSColor(hex: 0x1C1C1E))
+        public static let thoughtSpark = NSColor.flamingo("thoughtSpark",
+            light: NSColor(hex: 0xDE8697), dark: NSColor(hex: 0xF3B9C1),
+            lightHC: NSColor(hex: 0xC56F80), darkHC: NSColor(hex: 0xFFD0D6))
+        public static let thoughtWoven = NSColor.flamingo("thoughtWoven",
+            light: NSColor(hex: 0xB3173F), dark: NSColor(hex: 0xFF4A6B),
+            lightHC: NSColor(hex: 0x940E30), darkHC: NSColor(hex: 0xFF6E88))
+        /// `Theme.Color.thought(_:)` for AppKit. Solid is the accent itself.
+        public static func thought(_ level: Int) -> NSColor {
+            level <= 0 ? thoughtSpark : level == 1 ? accent : thoughtWoven
+        }
 
         /// Family tint for AppKit glyphs; accent when selected, `textSecondary` for unknown extensions.
         public static func family(ext: String, selected: Bool = false) -> NSColor {
@@ -185,19 +198,19 @@ public enum FileFamily: String, CaseIterable, Sendable {
         var t: [String: FileFamily] = [:]
         func put(_ f: FileFamily, _ exts: String) { for e in exts.split(separator: " ") { t[String(e)] = f } }
         put(.deck, "pptx ppt pptm pps ppsx potx key odp")
-        put(.document, "docx doc docm dotx pages rtf rtfd odt epub wpd")
+        put(.document, "docx doc docm dotx pages rtf rtfd odt epub wpd indd")
         put(.sheet, "xlsx xls xlsm xltx numbers csv tsv ods")
         put(.pdf, "pdf")
         put(.image, "png jpg jpeg heic heif gif tif tiff bmp webp avif svg ico icns psd ai eps sketch fig raw dng cr2 cr3 nef arw")
-        put(.media, "mp4 mov m4v avi mkv webm mpg mpeg mp3 m4a wav aif aiff flac aac ogg oga opus caf mid midi")
-        put(.model, "usdz usd usda usdc reality realitycomposerpro scn obj stl fbx glb gltf dae ply 3mf blend abc")
-        put(.code, "swift py js mjs cjs ts tsx jsx json jsonl yaml yml toml plist xml html htm css scss sass less c h cc cpp hpp m mm rs go rb java kt kts scala cs php lua r jl sh zsh bash fish sql ipynb gradle cmake makefile dockerfile vue svelte")
-        put(.note, "md markdown mdown mkd txt text org rst tex log adoc")
+        put(.media, "mp4 mov m4v avi mkv webm mpg mpeg mp3 m4a wav aif aiff flac aac ogg oga opus caf mid midi prproj band logicx sesx")
+        put(.model, "usdz usd usda usdc reality realitycomposerpro scn obj stl fbx glb gltf dae ply 3mf blend abc shapr step stp iges igs")
+        put(.code, "swift py js mjs cjs ts tsx jsx json jsonl yaml yml toml plist xml html htm css scss sass less c h cc cpp hpp m mm rs go rb java kt kts scala cs php lua r jl sh zsh bash fish sql ipynb ino gradle cmake makefile dockerfile vue svelte")
+        put(.note, "md markdown mdown mkd txt text org rst tex log adoc xmind")
         return t
     }()
 
     /// Audio extensions inside `.media`, drawn with a waveform instead of film.
-    public static let audio: Set<String> = ["mp3", "m4a", "wav", "aif", "aiff", "flac", "aac", "ogg", "oga", "opus", "caf", "mid", "midi"]
+    public static let audio: Set<String> = ["mp3", "m4a", "wav", "aif", "aiff", "flac", "aac", "ogg", "oga", "opus", "caf", "mid", "midi", "band", "logicx", "sesx"]
 
     // Hue in degrees, saturation. Brightness is set per appearance so every family
     // reads at the same weight: 0.80 in dark, 0.64 in light. No yellow: at light-mode

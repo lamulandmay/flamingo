@@ -13,13 +13,19 @@ enum ThoughtStyle {
 /// State shared by the text view and the `[[` completion list.
 @MainActor
 final class ThoughtEditorModel: ObservableObject {
-    @Published var text = ""
+    @Published var text = "" { didSet { onTextChange?(text) } }
+    var onTextChange: ((String) -> Void)?
     @Published var textHeight: CGFloat = ceil(NSLayoutManager().defaultLineHeight(for: ThoughtStyle.font))
     @Published private(set) var results: [LinkCandidate] = []
     @Published private(set) var selection = 0
+    /// Whether the text view has the keyboard, for a focus ring drawn around it.
+    @Published var isFocused = false
 
     private(set) var query: LinkQuery?
     private var matcher = LinkMatcher.empty
+    private var prepareTask: Task<Void, Never>?
+    private var matchTask: Task<Void, Never>?
+    private var revision = 0
     /// Esc hides the list for the link being typed; a new `[[` brings it back.
     private var dismissedStart: Int?
     weak var textView: NSTextView?
@@ -27,8 +33,15 @@ final class ThoughtEditorModel: ObservableObject {
     var isCompleting: Bool { query != nil && !results.isEmpty }
 
     func setCandidates(_ candidates: [FileRef], recent: [FileRef]) {
-        matcher = LinkMatcher(candidates: candidates, recent: recent)
-        refreshCompletion()
+        prepareTask?.cancel()
+        revision += 1
+        let version = revision
+        prepareTask = Task { [weak self] in
+            let prepared = await Task.detached(priority: .userInitiated) { LinkMatcher(candidates: candidates, recent: recent) }.value
+            guard !Task.isCancelled, let self, self.revision == version else { return }
+            self.matcher = prepared
+            self.refreshCompletion()
+        }
     }
 
     func refreshCompletion() {
@@ -40,9 +53,14 @@ final class ThoughtEditorModel: ObservableObject {
         }
         let changed = q != query
         query = q
-        let next = matcher.matches(q.text)
-        if next != results { results = next }
-        if changed || selection >= results.count { selection = 0 }
+        matchTask?.cancel()
+        let matcher = matcher
+        matchTask = Task { [weak self] in
+            let next = await Task.detached(priority: .userInitiated) { matcher.matches(q.text) }.value
+            guard !Task.isCancelled, let self, self.query == q else { return }
+            if next != self.results { self.results = next }
+            if changed || self.selection >= self.results.count { self.selection = 0 }
+        }
     }
 
     func move(_ delta: Int) {
@@ -74,6 +92,7 @@ final class ThoughtEditorModel: ObservableObject {
     }
 
     private func clear() {
+        matchTask?.cancel()
         query = nil
         if !results.isEmpty { results = [] }
         selection = 0
@@ -84,6 +103,10 @@ final class ThoughtEditorModel: ObservableObject {
 /// breaks the line, Esc cancels. `[[` opens completion; arrows and Enter drive it.
 struct ThoughtTextView: NSViewRepresentable {
     @ObservedObject var model: ThoughtEditorModel
+    var editable = true
+    /// Takes the keyboard as soon as it's on screen. A panel wants that; a field that sits
+    /// beside a document (the inspector's) must not steal focus from it.
+    var autofocus = true
     var onSubmit: () -> Void
     var onCancel: () -> Void
 
@@ -99,6 +122,9 @@ struct ThoughtTextView: NSViewRepresentable {
         layout.addTextContainer(container)
 
         let tv = ThoughtNSTextView(frame: .zero, textContainer: container)
+        tv.autofocus = autofocus
+        let model = self.model
+        tv.onFocus = { [weak model] in if model?.isFocused != $0 { model?.isFocused = $0 } }
         tv.isRichText = false
         tv.importsGraphics = false
         tv.allowsUndo = true
@@ -135,6 +161,7 @@ struct ThoughtTextView: NSViewRepresentable {
 
     func updateNSView(_ scroll: ThoughtScrollView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.textView?.isEditable = editable
         guard let tv = context.coordinator.textView, tv.string != model.text, !tv.hasMarkedText() else { return }
         tv.string = model.text
         context.coordinator.textChanged()
@@ -221,11 +248,26 @@ struct ThoughtTextView: NSViewRepresentable {
 }
 
 final class ThoughtNSTextView: NSTextView {
+    var autofocus = true
+    var onFocus: ((Bool) -> Void)?
+
     override var acceptsFirstResponder: Bool { true }
+
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { onFocus?(true) }
+        return became
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onFocus?(false) }
+        return resigned
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard let window else { return }
+        guard autofocus, let window else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.window === window else { return }
             window.makeFirstResponder(self)

@@ -13,6 +13,27 @@ public final class LlamaServer: @unchecked Sendable {
     /// The alias the server answers to, and the line Ask shows while it loads.
     public static let modelName = "qwen3.8-27b"
 
+    /// Custom model folders get a distinct server alias, so a leftover process for a
+    /// previous folder cannot answer under the newly selected model's identity.
+    public var modelAlias: String {
+        guard UserDefaults.standard.string(forKey: "FlamingoLlamaModelDir") != nil else { return Self.modelName }
+        guard let model = try? files().0 else { return Self.alias(for: modelDirectory.path) }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: model.path)
+        let stamp = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return Self.alias(for: model.path + "|\(stamp)|\(attrs?[.size] ?? 0)")
+    }
+
+    public var displayName: String {
+        guard UserDefaults.standard.string(forKey: "FlamingoLlamaModelDir") != nil else { return Self.modelName }
+        return (try? files().0.lastPathComponent) ?? modelDirectory.lastPathComponent
+    }
+
+    static func alias(for identity: String) -> String {
+        var hash: UInt64 = 14695981039346656037
+        for byte in identity.utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
+        return "flamingo-" + String(hash, radix: 16)
+    }
+
     /// Where the GGUF and its vision projector live. `FlamingoLlamaModelDir` overrides.
     public var modelDirectory: URL {
         if let dir = UserDefaults.standard.string(forKey: "FlamingoLlamaModelDir") {
@@ -29,6 +50,8 @@ public final class LlamaServer: @unchecked Sendable {
     private var process: Process?
     private var baseURL: URL?
     private var starting: Task<URL, Error>?
+    private var startingID: UUID?
+    private var generation = 0
     private var observing = false
     var session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
@@ -39,25 +62,35 @@ public final class LlamaServer: @unchecked Sendable {
     /// The `/v1` base URL of a healthy server, starting one if needed. `onLoading` runs once
     /// if the model has to load first (about 36 s).
     public func endpoint(onLoading: @escaping @Sendable () -> Void = {}) async throws -> URL {
+        let alias = modelAlias
         if let url = lock.withLock({ baseURL }) {
-            if await health(url.deletingLastPathComponent()) == .ok { return url }
+            if await health(url.deletingLastPathComponent()) == .ok,
+               await servesModel(url.deletingLastPathComponent(), alias: alias) == true { return url }
             lock.withLock { if baseURL == url { baseURL = nil } }
         }
-        let task: Task<URL, Error> = lock.withLock {
-            if let starting { return starting }
-            let t = Task { try await self.locate(onLoading: onLoading) }
+        let (task, id, epoch): (Task<URL, Error>, UUID, Int) = lock.withLock {
+            if let starting, let startingID { return (starting, startingID, generation) }
+            let id = UUID()
+            let t = Task { try await self.locate(alias: alias, onLoading: onLoading) }
             starting = t
-            return t
+            startingID = id
+            return (t, id, generation)
         }
-        defer { lock.withLock { starting = nil } }
+        defer { lock.withLock { if startingID == id { starting = nil; startingID = nil } } }
         let url = try await task.value
-        lock.withLock { baseURL = url }
+        try Task.checkCancellation()
+        let accepted = lock.withLock { () -> Bool in
+            guard generation == epoch else { return false }
+            baseURL = url; return true
+        }
+        guard accepted else { throw CancellationError() }
         return url
     }
 
     /// Stops the server if Flamingo started it.
     public func stop() {
         let p = lock.withLock { () -> Process? in
+            starting?.cancel(); starting = nil; startingID = nil; generation += 1
             defer { process = nil; baseURL = nil }
             return process
         }
@@ -71,22 +104,23 @@ public final class LlamaServer: @unchecked Sendable {
 
     enum Health: Equatable { case ok, loading, free, other }
 
-    private func locate(onLoading: @escaping @Sendable () -> Void) async throws -> URL {
+    private func locate(alias: String, onLoading: @escaping @Sendable () -> Void) async throws -> URL {
         var announced = false
         for port in Self.ports {
+            try Task.checkCancellation()
             let root = URL(string: "http://127.0.0.1:\(port)")!
             var state = await health(root)
             if state == .loading {
-                guard await servesModel(root) != false else { continue }
+                guard await servesModel(root, alias: alias) == true else { continue }
                 if !announced { announced = true; onLoading() }
                 state = try await waitUntilHealthy(root, process: nil)
             }
             switch state {
             case .ok:
-                if await servesModel(root) == true { return root.appendingPathComponent("v1") }
+                if await servesModel(root, alias: alias) == true { return root.appendingPathComponent("v1") }
             case .free:
                 if !announced { announced = true; onLoading() }
-                return try await launch(port: port, root: root)
+                return try await launch(port: port, root: root, alias: alias)
             case .loading, .other:
                 break
             }
@@ -94,7 +128,7 @@ public final class LlamaServer: @unchecked Sendable {
         throw AskError.unavailable("No free port for llama-server")
     }
 
-    private func launch(port: Int, root: URL) async throws -> URL {
+    private func launch(port: Int, root: URL, alias: String) async throws -> URL {
         guard let binary = Self.binaries.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             throw AskError.unavailable("llama-server isn't installed")
         }
@@ -102,16 +136,26 @@ public final class LlamaServer: @unchecked Sendable {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
         var args = ["-m", model.path, "-c", "\(Self.contextSize)", "--host", "127.0.0.1", "--port", "\(port)",
-                    "--jinja", "--alias", Self.modelName, "--no-webui"]
+                    "--jinja", "--alias", alias, "--no-webui"]
         if let projector { args += ["--mmproj", projector.path] }
         p.arguments = args
         p.standardInput = FileHandle.nullDevice
         p.standardOutput = FileHandle.nullDevice
         p.standardError = Self.logHandle() ?? FileHandle.nullDevice
+        try Task.checkCancellation()
         try p.run()
-        lock.withLock { process = p }
+        let accepted = lock.withLock { () -> Bool in
+            guard !Task.isCancelled else { return false }
+            process = p; return true
+        }
+        guard accepted else { p.terminate(); throw CancellationError() }
         observeTermination()
-        _ = try await waitUntilHealthy(root, process: p)
+        do { _ = try await waitUntilHealthy(root, process: p) }
+        catch {
+            if p.isRunning { p.terminate() }
+            lock.withLock { if process === p { process = nil } }
+            throw error
+        }
         return root.appendingPathComponent("v1")
     }
 
@@ -157,13 +201,13 @@ public final class LlamaServer: @unchecked Sendable {
     }
 
     /// Whether `/v1/models` lists the 27B. Nil when the server won't say (still loading).
-    private func servesModel(_ root: URL) async -> Bool? {
+    private func servesModel(_ root: URL, alias: String) async -> Bool? {
         guard let (data, response) = try? await session.data(from: root.appendingPathComponent("v1/models")) else { return false }
         let status = (response as? HTTPURLResponse)?.statusCode
         if status == 503 { return nil }
         guard status == 200, let json = try? JSON.decode(data) else { return false }
         let ids = (json["data"]?.array ?? []).compactMap { $0["id"]?.string?.lowercased() }
-        return ids.contains { $0.contains(Self.modelName) }
+        return ids.contains(alias.lowercased())
     }
 
     private func observeTermination() {

@@ -21,12 +21,44 @@ public final class VaultWatcher: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return sidecarHandler }
         set { lock.lock(); sidecarHandler = newValue; lock.unlock() }
     }
+    /// After `start(since:)`: called once, on the private queue, when `onChange` has been
+    /// handed every change recorded before the stream started. Never called by `start()`.
+    public var onHistoryDone: (() -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return historyHandler }
+        set { lock.lock(); historyHandler = newValue; lock.unlock() }
+    }
+    /// Read inside `onChange`: the FSEvents id that batch reaches. Every event up to it is in
+    /// this batch or an earlier one, so once the batch is applied, a later `start(since:)`
+    /// may resume from it. Nil while history replays, since replayed events come in path
+    /// order rather than id order.
+    public var deliveredThrough: UInt64? { lock.lock(); defer { lock.unlock() }; return through }
+
+    /// Stands in for every note in `onChange` and `onSidecarChange` when FSEvents lost events
+    /// under `.flamingo/notes`: re-read the notes, not the whole vault.
+    public static let allNotes = FileRef(relativePath: ".flamingo/notes")
+
+    /// The newest event FSEvents has recorded on any volume.
+    public static var currentEventID: UInt64 { FSEventsGetCurrentEventId() }
+
+    /// Identifies the FSEvents history of the volume holding `url`. Event ids from a
+    /// different history (a reformatted volume, a reset log) mean nothing here.
+    public static func historyID(for url: URL) -> String? {
+        var st = stat()
+        guard stat(url.path, &st) == 0, let uuid = FSEventsCopyUUIDForDevice(st.st_dev) else { return nil }
+        return CFUUIDCreateString(nil, uuid) as String
+    }
 
     private let queue = DispatchQueue(label: "com.flamingo.vaultwatcher")
     private let queueKey = DispatchSpecificKey<Void>()
     private let lock = NSLock()
     private var changeHandler: (([FileRef]) -> Void)?
     private var sidecarHandler: (([FileRef]) -> Void)?
+    private var historyHandler: (() -> Void)?
+    private var through: UInt64?
+    /// Newest event id seen, and whether replayed history is still arriving (private queue).
+    private var newestEvent: UInt64 = 0
+    private var replaying = false
+    private var historyFinished = false
     private var rules: PathRules
     private var stream: FSEventStreamRef?
     private var pending = Set<String>()
@@ -48,7 +80,9 @@ public final class VaultWatcher: @unchecked Sendable {
 
     public var isRunning: Bool { lock.lock(); defer { lock.unlock() }; return stream != nil }
 
-    public func start() {
+    /// Watches from now on, or replays every change since the event id `since` first (then
+    /// keeps watching). A replay ends with `onHistoryDone`.
+    public func start(since: UInt64? = nil) {
         lock.lock(); defer { lock.unlock() }
         guard stream == nil else { return }
         let box = Box(self)
@@ -57,17 +91,24 @@ public final class VaultWatcher: @unchecked Sendable {
             retain: { info in _ = Unmanaged<Box>.fromOpaque(info!).retain(); return info },
             release: { info in Unmanaged<Box>.fromOpaque(info!).release() },
             copyDescription: nil)
-        let cb: FSEventStreamCallback = { _, info, count, paths, flags, _ in
+        let cb: FSEventStreamCallback = { _, info, count, paths, flags, ids in
             guard let info else { return }
             let box = Unmanaged<Box>.fromOpaque(info).takeUnretainedValue()
             let list = unsafeBitCast(paths, to: CFArray.self) as? [String] ?? []
             let fl = Array(UnsafeBufferPointer(start: flags, count: count))
-            box.watcher?.handle(Array(list.prefix(count)), fl)
+            box.watcher?.handle(Array(list.prefix(count)), fl, Array(UnsafeBufferPointer(start: ids, count: count)))
         }
         let opts = FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer
             | kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagWatchRoot)
         guard let s = FSEventStreamCreate(nil, cb, &ctx, [vault.root.path] as CFArray,
-                                          FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.5, opts) else { return }
+                                          since ?? FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.5, opts) else { return }
+        // Set before the stream can call back on `queue`; `through` stays nil until history is done.
+        let replay = since != nil
+        through = nil
+        queue.async { [weak self] in
+            self?.replaying = replay; self?.historyFinished = false
+            self?.newestEvent = replay ? since! : FSEventsGetCurrentEventId()
+        }
         FSEventStreamSetDispatchQueue(s, queue)
         if FSEventStreamStart(s) { stream = s } else { FSEventStreamInvalidate(s); FSEventStreamRelease(s) }
     }
@@ -99,11 +140,16 @@ public final class VaultWatcher: @unchecked Sendable {
         init(_ w: VaultWatcher) { watcher = w }
     }
 
-    private func handle(_ paths: [String], _ flags: [FSEventStreamEventFlags]) {
+    private func handle(_ paths: [String], _ flags: [FSEventStreamEventFlags], _ ids: [FSEventStreamEventId] = []) {
         let roots = Self.rootPaths(vault.root)
-        if paths.contains(where: { $0.hasSuffix("/" + IgnoreRules.fileName) }) { rules = PathRules(vault: vault) }
+        if paths.contains(where: { $0.hasSuffix("/" + IgnoreRules.fileName) || $0.hasSuffix("/.flamingo/ignore") }) { rules = PathRules(vault: vault) }
         var added = false
-        for (p, f) in zip(paths, flags) {
+        for (i, (p, f)) in zip(paths, flags).enumerated() {
+            if i < ids.count { newestEvent = max(newestEvent, ids[i]) }
+            if f & FSEventStreamEventFlags(kFSEventStreamEventFlagHistoryDone) != 0 {
+                replaying = false; historyFinished = true; added = true
+                continue
+            }
             guard let c = classifyAbsolute(p, f, roots: roots) else { continue }
             pending.insert(c.ref.relativePath)
             if c.sidecar { pendingSidecar.insert(c.ref.relativePath) }
@@ -122,22 +168,26 @@ public final class VaultWatcher: @unchecked Sendable {
     }
 
     private func classifyAbsolute(_ path: String, _ flags: FSEventStreamEventFlags, roots: Set<String>) -> Classified? {
-        if flags & FSEventStreamEventFlags(kFSEventStreamEventFlagRootChanged) != 0 {
+        // Ids wrapped: nothing before this point can be told apart any more.
+        if flags & FSEventStreamEventFlags(kFSEventStreamEventFlagRootChanged | kFSEventStreamEventFlagEventIdsWrapped) != 0 {
             return Classified(ref: FileRef(relativePath: ""), sidecar: false)
         }
-        var rel: String?
-        for r in roots {
-            if path == r || path == r + "/" { rel = ""; break }
-            if path.hasPrefix(r + "/") { rel = String(path.dropFirst(r.count + 1)); break }
-        }
-        guard var rel else { return nil }
-        while rel.hasSuffix("/") { rel.removeLast() }
+        guard let rel = Self.relativePath(path, roots: roots) else { return nil }
         return Self.classify(relativePath: rel, flags: flags, isPackage: { [vault, weak self] sub in
             if let hit = self?.packageCache[sub] { return hit }
             let isPkg = (try? vault.root.appendingPathComponent(sub).resourceValues(forKeys: [.isPackageKey]))?.isPackage ?? false
             self?.packageCache[sub] = isPkg
             return isPkg
         }, rules: rules)
+    }
+
+    static func relativePath(_ path: String, roots: Set<String>) -> String? {
+        for root in roots.sorted(by: { $0.count > $1.count }) {
+            if path == root || path == root + "/" { return "" }
+            let prefix = root.hasSuffix("/") ? root : root + "/"
+            if path.hasPrefix(prefix) { return String(path.dropFirst(prefix.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+        }
+        return nil
     }
 
     private func schedule() {
@@ -154,6 +204,7 @@ public final class VaultWatcher: @unchecked Sendable {
         timer?.cancel(); timer = nil
         firstPending = nil
         pending.removeAll(); pendingSidecar.removeAll()
+        historyFinished = false
     }
 
     private func deliver() {
@@ -161,15 +212,21 @@ public final class VaultWatcher: @unchecked Sendable {
         timer?.cancel(); timer = nil
         firstPending = nil
         packageCache.removeAll()
-        guard !pending.isEmpty else { return }
+        let finished = historyFinished
+        historyFinished = false
+        guard !pending.isEmpty || finished else { return }
         let all = pending.sorted().map { FileRef(relativePath: $0) }
         let side = pendingSidecar.sorted().map { FileRef(relativePath: $0) }
         pending.removeAll(); pendingSidecar.removeAll()
         lock.lock()
-        let (change, sidecar) = (changeHandler, sidecarHandler)
+        let (change, sidecar, history) = (changeHandler, sidecarHandler, historyHandler)
+        through = replaying ? nil : newestEvent
         lock.unlock()
-        change?(all)
-        if !side.isEmpty { sidecar?(side) }
+        if !all.isEmpty {
+            change?(all)
+            if !side.isEmpty { sidecar?(side) }
+        }
+        if finished { history?() }
     }
 
     // MARK: - Pure classification
@@ -194,16 +251,18 @@ public final class VaultWatcher: @unchecked Sendable {
         let everything = Classified(ref: FileRef(relativePath: ""), sidecar: false)
         if has(kFSEventStreamEventFlagRootChanged) { return everything }
 
+        if comps == [".flamingo", "ignore"] { return metadataOnly(flags) ? nil : everything }
         if comps.first == ".flamingo" {
-            if lost { return comps.count == 1 || comps[1] == "notes" ? everything : nil }   // sidecar edits may be lost
+            // Sidecar edits may be lost: re-read the notes. Never the whole vault, which on a
+            // home folder is an hour of work for a few lost writes to our own state folder.
+            if lost { return comps.count == 1 || comps[1] == "notes" ? Classified(ref: allNotes, sidecar: true) : nil }
             guard comps.count >= 3, comps[1] == "notes", !has(kFSEventStreamEventFlagItemIsDir),
-                  !comps.dropFirst(2).contains(where: { $0.hasPrefix(".") }),
                   comps.last!.hasSuffix(".md"), !metadataOnly(flags) else { return nil }
             let target = comps.dropFirst(2).joined(separator: "/").dropLast(3)
             return target.isEmpty ? nil : Classified(ref: FileRef(relativePath: String(target)), sidecar: true)
         }
         if comps == [IgnoreRules.fileName] { return metadataOnly(flags) ? nil : everything }   // new rules: rescan
-        if comps.contains(where: { $0.hasPrefix(".") || VaultScanner.ignoredNames.contains($0) }) { return nil }
+        if comps.contains(where: { VaultScanner.isIgnoredName($0) }) { return nil }
         if let first = comps.first, VaultScanner.rootOnlyIgnoredNames.contains(first) { return nil }
         if lost { return Classified(ref: FileRef(relativePath: comps.joined(separator: "/")), sidecar: false) }
         if metadataOnly(flags) { return nil }

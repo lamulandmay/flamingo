@@ -7,6 +7,8 @@ struct ZipArchive {
     static let unzip = "/usr/bin/unzip"
     /// Members larger than this, uncompressed, are skipped. Guards against zip bombs.
     static let maxMemberSize = 128 << 20
+    static let maxTotalBytes = 64 << 20
+    static let maxMembers = 4096
 
     let url: URL
     /// Member names in archive order, directories excluded.
@@ -27,6 +29,15 @@ struct ZipArchive {
             if sizes[name] == nil { names.append(name) }
             sizes[name] = size
         }
+        let textSizes = sizes.filter { name, _ in
+            let ext = (name as NSString).pathExtension.lowercased()
+            return ext == "xml" || ext == "rels" || ext == "json"
+        }
+        guard textSizes.count <= Self.maxMembers,
+              textSizes.values.allSatisfy({ $0 <= Self.maxMemberSize }),
+              textSizes.values.reduce(Int64(0), { $0 + Int64($1) }) <= Int64(Self.maxTotalBytes) else {
+            throw ExtractError.malformed("Archive text exceeds the extraction budget: " + url.lastPathComponent)
+        }
         self.names = names
         self.sizes = sizes
     }
@@ -43,6 +54,7 @@ struct ZipArchive {
         guard !picked.isEmpty else { return [:] }
         // unzip -p writes members back to back in archive order; the listing's sizes split them.
         let expected = picked.reduce(0) { $0 + sizes[$1]! }
+        guard expected <= Self.maxTotalBytes, picked.count <= Self.maxMembers else { return [:] }
         if let out = Subprocess.run(Self.unzip, ["-p", url.path] + picked.map(Self.literal), timeout: 60, maxOutput: expected + 1),
            out.status == 0, out.stdout.count == expected {
             var result: [String: Data] = [:]

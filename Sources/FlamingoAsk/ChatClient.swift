@@ -37,7 +37,10 @@ struct ChatClient: Sendable {
                     text += t
                     onText(t)
                 }
-                if let reason = choice["finish_reason"]?.string, !reason.isEmpty { done = true }
+                if let reason = choice["finish_reason"]?.string, !reason.isEmpty {
+                    guard reason == "stop" else { throw AskError.stream("Answer interrupted (\(reason)). Retry or narrow the question.") }
+                    done = true
+                }
             }
             for try await byte in bytes {
                 if byte == 0x0A {
@@ -50,7 +53,7 @@ struct ChatClient: Sendable {
             }
             if !line.isEmpty, let event = parser.feed(String(decoding: line, as: UTF8.self)) { try handle(event) }
             if let event = parser.flush() { try handle(event) }
-            guard done || !text.isEmpty else { throw AskError.unavailable(Self.name(endpoint)) }
+            guard done else { throw AskError.stream("Answer interrupted before completion. Retry to finish it.") }
             return text
         } catch let error as URLError {
             if error.code == .cancelled { throw CancellationError() }

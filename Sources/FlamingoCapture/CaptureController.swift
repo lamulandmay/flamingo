@@ -13,6 +13,10 @@ public final class CaptureController {
     public static let shared = CaptureController()
     /// Called when a comment is submitted. The shell sets this.
     public var onComment: ((FileRef, Comment) -> Void)?
+    /// Preferred shell callback: returns only after the sidecar write is committed.
+    public var onSaveComment: ((FileRef, Comment) async throws -> Void)?
+    /// Reuses the shell's current catalog instead of rescanning the vault for capture.
+    public var availableFiles: ((Vault) -> [FileRef])?
     /// The shell keeps this current so the panel knows what to attach to.
     public var currentTarget: (() -> (FileRef, FileAnchor?)?)?
     /// Open vaults, the current one first. Global capture only lands in these; `[[`
@@ -44,6 +48,13 @@ public final class CaptureController {
     private var globalApplied: Bool?
     private var candidateCache: [Vault: (files: [FileRef], recent: [FileRef])] = [:]
     private var scanning: Set<Vault> = []
+    private var saving = false
+    /// "Saving…" shows only when a save is slow enough to notice.
+    private var savingShown = false
+    private var saveError: String?
+    private var draftText = ""
+    private var draftCommitted = false
+    private var hasDraftSnapshot = false
 
     private init() {
         host.window.onCancel = { [weak self] in self?.cancel() }
@@ -137,10 +148,11 @@ public final class CaptureController {
               front.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return show() }
         FrontmostContext.requestAccessibilityIfNeeded()
         let vaults = knownVaults()
-        let ctx = FrontmostContext.current(in: vaults)
+        let candidates = Dictionary(uniqueKeysWithValues: vaults.map { ($0, availableFiles?($0) ?? candidateCache[$0]?.files ?? []) })
+        let ctx = FrontmostContext.current(in: vaults, candidates: candidates)
         if ctx?.isFlamingo == true { return show() }
 
-        let target: Target
+        var target: Target
         if let v = ctx?.vault, let f = ctx?.file {
             target = Target(vault: v, file: f, anchor: ctx?.anchor)
         } else if let v = vaults.first {
@@ -148,6 +160,8 @@ public final class CaptureController {
         } else {
             NSSound.beep(); return
         }
+        target.provenance = CommentProvenance(origin: .human, appBundleID: ctx?.appBundleID,
+            appName: ctx?.appName, windowTitle: ctx?.windowTitle, sourceURL: ctx?.sourceURL?.absoluteString ?? ctx?.documentURL?.absoluteString)
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
         let over = ctx?.windowFrame ?? screen?.visibleFrame ?? .zero
@@ -163,11 +177,31 @@ public final class CaptureController {
         if host.window.isKeyWindow { cancel() } else { host.refocus() }
     }
 
-    /// Dismisses the panel without saving.
+    /// Dismisses the panel after preserving its draft for recovery.
     public func cancel() {
+        guard !saving else { return }
+        guard preserveDraft() else { return }
         let p = presentation
         presentation = nil
         host.dismiss { [weak self] in self?.restoreFocus(p) }
+    }
+
+    /// Synchronous window/termination checkpoint; serialization runs on the recovery queue.
+    @discardableResult
+    public func preserveDraft() -> Bool {
+        guard let target = presentation?.target, !draftCommitted else { return true }
+        guard hasDraftSnapshot || !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return true }
+        guard let vault = target.vault else {
+            guard !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return true }
+            saveError = "Choose a workspace before closing, or copy this thought. No draft location is available."
+            host.update(panel(for: target)); return false
+        }
+        draftChanged(draftText)
+        if let failure = ThoughtDraftCheckpoint.flush(key: CaptureDraftStore.recoveryKey(for: target.file, in: vault)) {
+            saveError = "Draft recovery unavailable: " + failure
+            host.update(panel(for: target)); return false
+        }
+        return true
     }
 
     // MARK: Internals
@@ -177,6 +211,7 @@ public final class CaptureController {
         var file: FileRef
         var anchor: FileAnchor?
         var label: String?
+        var provenance: CommentProvenance?
 
         static let inboxFolder = "_inbox"
 
@@ -205,6 +240,14 @@ public final class CaptureController {
     }
 
     func present(_ target: Target, over frame: NSRect, level: NSWindow.Level, returnTo app: NSRunningApplication?) {
+        var target = target
+        let restored = target.vault.flatMap { CaptureDraftStore.drafts(in: $0).last { $0.file == target.file } }
+        if let restored { target.anchor = restored.anchor; target.provenance = restored.provenance }
+        draftText = restored?.text ?? ""
+        hasDraftSnapshot = restored != nil
+        saveError = nil
+        saving = false
+        draftCommitted = false
         presentation = Presentation(target: target, previousKeyWindow: NSApp.keyWindow, returnTo: app)
         host.present(panel(for: target), over: frame, level: level)
         if let vault = target.vault { loadCandidates(for: vault) }
@@ -217,32 +260,115 @@ public final class CaptureController {
                                  onSubmit: { [weak self] c in self?.submit(c) },
                                  onCancel: { [weak self] in self?.cancel() })
         panel.label = target.label
+        panel.initialText = draftText
+        panel.saving = saving
+        panel.showsSaving = savingShown
+        panel.error = saveError
+        panel.onTextChange = { [weak self] text in self?.draftChanged(text) }
+        panel.onDiscard = { [weak self] in self?.discardDraft() }
         return panel
     }
 
+    /// Opens the most recently edited unsaved thought in the active vault.
+    public func recoverDraft() {
+        guard !host.isVisible, let vault = knownVaults().first,
+              let draft = CaptureDraftStore.drafts(in: vault).max(by: { $0.updatedAt < $1.updatedAt }) else { return }
+        present(Target(vault: vault, file: draft.file, anchor: draft.anchor, provenance: draft.provenance),
+                over: (NSApp.keyWindow ?? NSApp.mainWindow)?.frame ?? NSScreen.main?.visibleFrame ?? .zero,
+                level: .floating, returnTo: nil)
+    }
+
+    private func draftChanged(_ text: String) {
+        draftText = text
+        guard hasDraftSnapshot || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        hasDraftSnapshot = true
+        guard let target = presentation?.target, let vault = target.vault else { return }
+        let draft = CaptureDraft(file: target.file, anchor: target.anchor, text: text, provenance: target.provenance)
+        CaptureDraftStore.checkpoint(draft, in: vault) { [weak self] failure in
+            guard let failure else { return }
+            Task { @MainActor in
+                guard let self, self.presentation?.target.file == target.file else { return }
+                self.saveError = "Draft recovery unavailable: " + failure
+                self.host.update(self.panel(for: target))
+            }
+        }
+    }
+
+    private func discardDraft() {
+        guard let p = presentation, let vault = p.target.vault, !saving else { return }
+        saving = true; saveError = nil
+        host.update(panel(for: p.target))
+        let key = CaptureDraftStore.recoveryKey(for: p.target.file, in: vault)
+        ThoughtDraftCheckpoint.enqueue(key: key, operation: { try CaptureDraftStore.remove(p.target.file, in: vault) })
+        Task {
+            if let failure = await ThoughtDraftCheckpoint.flushAsync(key: key) {
+                saving = false; saveError = "Draft was not discarded: " + failure
+                host.update(panel(for: p.target))
+            } else {
+                saving = false; draftText = ""; hasDraftSnapshot = false; presentation = nil
+                host.dismiss { self.restoreFocus(p) }
+            }
+        }
+    }
+
     private func submit(_ comment: Comment) {
-        guard let p = presentation else { return }
-        presentation = nil
-        save(comment, to: p.target)
-        host.dismiss { [weak self] in self?.restoreFocus(p) }
+        guard let p = presentation, !saving else { return }
+        saving = true
+        savingShown = false
+        saveError = nil
+        var comment = comment
+        comment.provenance = p.target.provenance
+        host.update(panel(for: p.target))
+        draftChanged(comment.text)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self, self.saving, self.presentation?.target == p.target else { return }
+            self.savingShown = true
+            self.host.update(self.panel(for: p.target))
+        }
+        Task {
+            if let vault = p.target.vault {
+                _ = await ThoughtDraftCheckpoint.flushAsync(key: CaptureDraftStore.recoveryKey(for: p.target.file, in: vault))
+            }
+            do {
+                try await save(comment, to: p.target)
+                draftCommitted = true
+                if let vault = p.target.vault {
+                    let key = CaptureDraftStore.recoveryKey(for: p.target.file, in: vault)
+                    ThoughtDraftCheckpoint.enqueue(key: key, required: false, operation: {
+                        try CaptureDraftStore.remove(p.target.file, in: vault)
+                    })
+                    _ = await ThoughtDraftCheckpoint.flushAsync(key: key)
+                }
+                saving = false
+                savingShown = false
+                presentation = nil
+                host.dismiss { self.restoreFocus(p) }
+            } catch {
+                saving = false
+                savingShown = false
+                saveError = "Not saved: " + error.localizedDescription
+                draftChanged(comment.text)
+                host.update(panel(for: p.target))
+            }
+        }
     }
 
     /// The shell's `onComment` handles the current vault (it refreshes the rail and records
     /// the trail). Thoughts for another open vault, or before the shell is wired, go
     /// straight through that vault's `SidecarStore` and `TrailStore`.
-    private func save(_ comment: Comment, to target: Target) {
+    private func save(_ comment: Comment, to target: Target) async throws {
         let current = knownVaults().first
-        if let onComment, target.vault == nil || target.vault == current {
-            onComment(target.file, comment)
+        if let onSaveComment, target.vault == nil || target.vault == current {
+            try await onSaveComment(target.file, comment)
             return
         }
-        guard let vault = target.vault else { return }
-        do {
+        // Legacy callbacks cannot acknowledge writes. Commit here when no acknowledged
+        // callback is installed; the watcher refreshes the shell from the actual write.
+        guard let vault = target.vault else { throw CocoaError(.fileNoSuchFile) }
+        try await Task.detached {
             try SidecarStore(vault: vault).append(comment, to: target.file)
             TrailStore(vault: vault).recordComment(comment, on: target.file)
-        } catch {
-            NSSound.beep()
-        }
+        }.value
     }
 
     /// A non-activating panel hands key focus back to the frontmost app on its own; this is
@@ -264,8 +390,9 @@ public final class CaptureController {
     private func loadCandidates(for vault: Vault) {
         guard !scanning.contains(vault) else { return }
         scanning.insert(vault)
+        let supplied = availableFiles?(vault)
         Task.detached(priority: .userInitiated) {
-            let files = VaultScanner.files(in: vault)
+            let files = supplied ?? VaultScanner.files(in: vault)
             let since = Date().addingTimeInterval(-14 * 86_400)
             let events = (try? TrailStore(vault: vault).events(since: since)) ?? []
             var seen = Set<FileRef>(), recent: [FileRef] = []

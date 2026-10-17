@@ -6,8 +6,8 @@ import FlamingoCore
 /// A heading is a body paragraph whose style is `heading 1`–`heading 3` (by name or outline level,
 /// through `basedOn`) or whose own outline level is 0–2. Each section is anchored `.node` at its
 /// heading text; text before the first heading is anchored at the document title, else its first
-/// words. Tracked changes read as accepted. Footnotes and endnotes follow the sections in `text`
-/// but belong to none.
+/// words. Tracked changes read as accepted. Footnotes and endnotes are their own addressable
+/// sections, so citations and search can reach text that occurs only in a note.
 public struct DOCXExtractor: Extractor {
     public static let extensions: Set<String> = ["docx", "docm", "dotx", "dotm"]
     public init() {}
@@ -27,19 +27,25 @@ public struct DOCXExtractor: Extractor {
         let styles = Styles(parts[layout.styles])
         let body = WordParser(styles: styles)
         guard let document = parts[layout.main], body.parse(document) else { throw ExtractError.malformed(url.path) }
+        var notesComplete = true
         let notes = [layout.footnotes, layout.endnotes].compactMap { parts[$0] }.flatMap { data -> [String] in
             let p = WordParser(styles: styles)
             _ = p.parse(data)
+            notesComplete = notesComplete && p.complete
             return p.notes
         }
 
         let coreTitle = parts[layout.core].flatMap(XML.parse)?.first("title")
             .map { Self.oneLine($0.allText) }.flatMap { $0.isEmpty ? nil : $0 }
-        let sections = Self.sections(body.blocks, intro: coreTitle)
+        var sections = Self.sections(body.blocks, intro: coreTitle)
         let title = coreTitle ?? body.blocks.first(where: \.isTitle).map { Self.oneLine($0.text) }
             ?? sections.first { $0.title != nil }?.title
+        for (i, note) in notes.enumerated() {
+            sections.append(Section(anchor: FileAnchor(kind: .node, value: "Note \(i + 1)"),
+                                    title: "Note \(i + 1)", text: note))
+        }
         var out = Extracted(sections: sections, title: title)
-        if !notes.isEmpty { out.text += (out.text.isEmpty ? "" : "\n\n") + notes.joined(separator: "\n") }
+        if !body.complete || !notesComplete { out.coverage = ExtractionCoverage(.partial, reason: "Document XML is truncated or malformed; recovered text may omit content.") }
         return out
     }
 
@@ -141,6 +147,7 @@ private final class WordParser: NSObject, XMLParserDelegate {
     private(set) var blocks: [Block] = []
     /// Footnote and endnote texts in order, separators left out.
     private(set) var notes: [String] = []
+    private(set) var complete = false
 
     private struct Paragraph { var text = ""; var style: String?; var outline: Int?; var floating: [Block] = [] }
     private struct Table {
@@ -171,6 +178,7 @@ private final class WordParser: NSObject, XMLParserDelegate {
         parser.shouldResolveExternalEntities = false
         parser.delegate = self
         let ok = parser.parse()
+        complete = ok
         blocks = containers[0]
         return ok || !blocks.isEmpty
     }

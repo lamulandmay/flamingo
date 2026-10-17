@@ -14,6 +14,16 @@ public struct FileAnchor: Hashable, Codable, Sendable {
     /// The human form without parentheses, `slide 7`, for chips and labels.
     public var label: String { "\(kind.rawValue) \(value)" }
 
+    /// What a person reads: `slide 7`, `page 12`, `0:39`, and for a heading (`node`) or a
+    /// region just its name, `Arc Pricing`. `label` stays the parseable form.
+    public var displayLabel: String {
+        switch kind {
+        case .node, .region: return value
+        case .time: return value
+        default: return label
+        }
+    }
+
     /// Parses `"slide 7"`, `"Cell Q3!B12"`, `"time 1:23"`. Kind is case-insensitive;
     /// the value is the rest of the string, trimmed, must be non-empty and on one line.
     public init?(parsing text: String) {
@@ -44,16 +54,36 @@ public struct FileAnchor: Hashable, Codable, Sendable {
 /// reads and processes. Consequently the id of a `Comment` you pass to `append` is not
 /// the id you will read back; use `comments(for:)` after writing. Editing a comment
 /// (`update`) changes its id.
+public struct CommentProvenance: Hashable, Codable, Sendable {
+    public enum Origin: String, Codable, Sendable { case human, ai }
+    public var origin: Origin
+    public var model: String?
+    public var appBundleID: String?
+    public var appName: String?
+    public var windowTitle: String?
+    public var sourceURL: String?
+    public var reason: String?
+
+    public init(origin: Origin = .human, model: String? = nil, appBundleID: String? = nil,
+                appName: String? = nil, windowTitle: String? = nil, sourceURL: String? = nil, reason: String? = nil) {
+        self.origin = origin; self.model = model; self.appBundleID = appBundleID
+        self.appName = appName; self.windowTitle = windowTitle; self.sourceURL = sourceURL; self.reason = reason
+    }
+}
+
 public struct Comment: Identifiable, Hashable, Codable, Sendable {
     public let id: UUID
     public var timestamp: Date
     public var anchor: FileAnchor?
     public var text: String
+    /// Missing on legacy thoughts, which are treated as human authored.
+    public var provenance: CommentProvenance?
     /// Basenames or relative paths referenced by `[[...]]` in `text`. Derived; kept for convenience.
     public var links: [String] { Wikilink.parse(text) }
 
-    public init(id: UUID = UUID(), timestamp: Date = Date(), anchor: FileAnchor? = nil, text: String) {
-        self.id = id; self.timestamp = timestamp; self.anchor = anchor; self.text = text
+    public init(id: UUID = UUID(), timestamp: Date = Date(), anchor: FileAnchor? = nil, text: String,
+                provenance: CommentProvenance? = nil) {
+        self.id = id; self.timestamp = timestamp; self.anchor = anchor; self.text = text; self.provenance = provenance
     }
 
     /// The first line of `text`, for list rows.

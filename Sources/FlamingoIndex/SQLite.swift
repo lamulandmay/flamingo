@@ -2,10 +2,11 @@ import Foundation
 import SQLite3
 
 /// A SQLite failure, with the engine's own message.
-public struct IndexError: Error, CustomStringConvertible, Sendable {
+public struct IndexError: Error, LocalizedError, CustomStringConvertible, Sendable {
     public let code: Int32
     public let message: String
     public var description: String { "sqlite \(code): \(message)" }
+    public var errorDescription: String? { description }
     /// The file isn't a usable database (as opposed to busy, locked, or a disk error).
     var isCorrupt: Bool { code & 0xff == SQLITE_CORRUPT || code & 0xff == SQLITE_NOTADB }
     var isBusy: Bool { code & 0xff == SQLITE_BUSY || code & 0xff == SQLITE_LOCKED }
@@ -46,9 +47,9 @@ final class Database {
     let handle: OpaquePointer
     private var cache: [String: Statement] = [:]
 
-    init(path: String) throws {
+    init(path: String, readOnly: Bool = false) throws {
         var h: OpaquePointer?
-        let rc = sqlite3_open_v2(path, &h, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX, nil)
+        let rc = sqlite3_open_v2(path, &h, (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) | SQLITE_OPEN_NOMUTEX, nil)
         guard rc == SQLITE_OK, let h else {
             let message = h.map { String(cString: sqlite3_errmsg($0)) } ?? "cannot open \(path)"
             sqlite3_close_v2(h)
@@ -82,6 +83,9 @@ final class Database {
             if !s.busy { s.reset(); return s }
             return try compile(sql, persistent: false)
         }
+        // Scoped queries vary by folder. Keep cached statement memory bounded as users
+        // navigate a large vault; in-flight statements remain retained by their caller.
+        if cache.count >= 128 { cache = cache.filter { $0.value.busy } }
         let s = try compile(sql, persistent: true)
         cache[sql] = s
         return s

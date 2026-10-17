@@ -499,7 +499,7 @@ final class TrailStoreTests: TrailStoreTestCase {
         XCTAssertEqual(try makeStore().sessions().first?.title, "Hand made")
     }
 
-    func testCorruptNamesFileIsIgnored() throws {
+    func testCorruptNamesDoNotHideSessionsOrGetOverwritten() throws {
         let store = makeStore()
         opens(["a.md"]).forEach(store.record)
         try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
@@ -507,7 +507,8 @@ final class TrailStoreTests: TrailStoreTestCase {
         XCTAssertEqual(store.names(), [:])
         XCTAssertNil(try store.sessions().first?.title)
         let session = try XCTUnwrap(try store.sessions().first)
-        try store.setTitle("Recovered", for: session)
-        XCTAssertEqual(try store.sessions().first?.title, "Recovered")
+        XCTAssertNotNil(store.namesError)
+        XCTAssertThrowsError(try store.setTitle("Recovered", for: session))
+        XCTAssertEqual(try String(contentsOf: store.namesURL, encoding: .utf8), "{not json")
     }
 }

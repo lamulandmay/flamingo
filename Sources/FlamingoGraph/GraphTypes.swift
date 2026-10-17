@@ -20,6 +20,21 @@ struct GraphTopology: Sendable {
         var b: Int
         var kind: Graph.Edge.Kind
         var weight: Double
+
+        /// Which kind a pair connected several ways is drawn as.
+        static func precedence(_ kind: Graph.Edge.Kind) -> Int {
+            switch kind {
+            case .manual: 6
+            case .link: 5
+            case .mention: 4
+            case .related: 3
+            case .trail: 2
+            case .folder: 1
+            }
+        }
+
+        /// 0 explicit (solid), 1 inferred (dashed), 2 folder containment (faint solid).
+        var strokeClass: Int { kind.isExplicit ? 0 : (kind == .folder ? 2 : 1) }
     }
 
     /// Fresh per instance. Caches keyed by node index (label sizes, adjacency masks) must be
@@ -31,8 +46,9 @@ struct GraphTopology: Sendable {
     let exts: [String]
     let commentCounts: [Int]
     let index: [String: Int]
-    /// Deduplicated per (pair, kind); self loops and edges to unknown nodes dropped.
-    /// A pair may appear twice, once as `link` and once as `trail`.
+    /// One edge per pair of nodes; self loops and edges to unknown nodes dropped. When a pair
+    /// is connected several ways, `kind` is the strongest (`Edge.precedence`): a link someone
+    /// wrote outranks a mention Flamingo found, so the pair draws solid.
     let edges: [Edge]
     /// Sorted, unique adjacency regardless of edge kind.
     let neighbors: [[Int]]
@@ -43,6 +59,8 @@ struct GraphTopology: Sendable {
     private(set) var missing: [Bool]
     /// Folder nodes (ids ending in `/`), drawn as hollow rings.
     let isFolder: [Bool]
+    /// Folder detail thresholds, computed once per topology, never during a gesture.
+    let detailRevealZoom: [CGFloat]
 
     var count: Int { ids.count }
     func degree(_ i: Int) -> Int { neighbors[i].count }
@@ -65,19 +83,26 @@ struct GraphTopology: Sendable {
             counts.append(max(0, node.commentCount))
         }
 
-        struct Key: Hashable { var a: Int, b: Int, kind: Graph.Edge.Kind }
-        var weights: [Key: Double] = [:]
+        struct Key: Hashable { var a: Int, b: Int }
+        var merged: [Key: Edge] = [:]
         var order: [Key] = []
         for e in graph.edges {
             guard let s = index[e.source], let t = index[e.target], s != t else { continue }
-            let key = Key(a: min(s, t), b: max(s, t), kind: e.kind)
-            if let w = weights[key] { weights[key] = w + e.weight } else { weights[key] = e.weight; order.append(key) }
+            let key = Key(a: min(s, t), b: max(s, t))
+            if var existing = merged[key] {
+                if Edge.precedence(e.kind) > Edge.precedence(existing.kind) { existing.kind = e.kind }
+                existing.weight += e.weight
+                merged[key] = existing
+            } else {
+                merged[key] = Edge(a: key.a, b: key.b, kind: e.kind, weight: e.weight)
+                order.append(key)
+            }
         }
         var adjacency = [Set<Int>](repeating: [], count: ids.count)
         var edges: [Edge] = []
         edges.reserveCapacity(order.count)
         for key in order {
-            edges.append(Edge(a: key.a, b: key.b, kind: key.kind, weight: weights[key] ?? 1))
+            if let edge = merged[key] { edges.append(edge) }
             adjacency[key.a].insert(key.b)
             adjacency[key.b].insert(key.a)
         }
@@ -91,6 +116,7 @@ struct GraphTopology: Sendable {
         self.neighbors = adjacency.map { $0.sorted() }
         let folders = ids.map { $0.hasSuffix("/") }
         self.isFolder = folders
+        self.detailRevealZoom = GraphDetail.revealZooms(ids: ids)
         self.radius = (0..<ids.count).map { folders[$0] ? 4.5 + log(1 + Double(adjacency[$0].count)) : 3 + log(1 + Double(counts[$0] + adjacency[$0].count)) }
         self.missing = [Bool](repeating: false, count: ids.count)
     }
@@ -199,6 +225,40 @@ struct GraphFrame {
     var dragging: Int?
     /// A click just landed on this node: a ring expands and fades over `pulseSeconds`.
     var pulse: (node: Int, progress: Double)?
+    var multiSelected: Set<Int> = []
+    /// Semantic zoom visibility. Empty means fully visible (local graphs and callers that
+    /// supply their own frames). Edges and labels inherit their nodes' visibility.
+    var detailOpacity: [Double] = []
+    /// An ⌥-drag from `from` toward a screen point, possibly over a node it would connect to.
+    var link: (from: Int, to: CGPoint, over: Int?)?
+    /// One quiet line drawn at the canvas's bottom left: the date a replay has reached.
+    var caption: String?
+    /// The vault graph: suggested edges only around the selected or hovered node, and the
+    /// selection's neighborhood lit while the rest recedes. A local graph draws everything.
+    var calm = true
+    /// At most this many zoom-driven names (selected and hovered always show).
+    var labelLimit: Int?
+    /// Name nodes in this order instead of by connectedness.
+    var labelOrder: [Int]?
+    /// A connection being shown off, `t` seconds in. See `CelebrationTime`.
+    var celebration: Celebration?
+    struct Celebration { var from: Int; var to: [Int]; var level: Int; var t: Double }
+}
+
+/// A celebration's beats, in seconds from when both ends are on the canvas: the camera
+/// settles, the line leaves with the first note, arrives with the rest, holds, then fades
+/// into the ordinary edge.
+enum CelebrationTime {
+    static let zoom: TimeInterval = 0.45
+    static let depart: TimeInterval = 0.3
+    static let travel: TimeInterval = 0.4
+    static let hold: TimeInterval = 1.2
+    static let fade: TimeInterval = 0.6
+    static let ripple: TimeInterval = 0.5
+    static var arrive: TimeInterval { depart + travel }
+    /// When the line starts fading; a lone file (no link) rings and fades sooner.
+    static func fadeStart(alone: Bool) -> TimeInterval { alone ? depart + ripple + 0.3 : arrive + hold }
+    static func end(alone: Bool) -> TimeInterval { fadeStart(alone: alone) + fade }
 }
 
 // MARK: - Input
@@ -225,6 +285,7 @@ protocol GraphInteractionTarget: AnyObject {
     func hover(_ node: Int?)
     /// A completed single click on a node: open it.
     func click(_ node: Int)
+    func click(_ node: Int, additive: Bool)
     /// Double-click: open the file, or scope into the folder.
     func activate(_ node: Int)
     func beginNodeDrag(_ node: Int)
@@ -241,8 +302,39 @@ protocol GraphInteractionTarget: AnyObject {
     func moveSelection(_ direction: GraphDirection)
     /// Return or Enter.
     func openSelection()
-    /// Printable characters typed while the canvas has focus; they go to the filter.
+    /// Space on the canvas. Clears both the current node and any connection selection.
+    func clearSelection()
+    /// Printable characters other than Space typed while the canvas has focus go to the filter.
     func type(_ text: String)
     /// Esc on the canvas.
     func escape()
+
+    /// ⌥-drag from a node: a line follows the pointer; releasing on another file connects
+    /// the two by hand. `p` is a screen point.
+    func beginLink(from node: Int, to p: CGPoint)
+    func updateLink(to p: CGPoint, over node: Int?)
+    func endLink(from node: Int, onto target: Int?)
+    /// The context menu for a right-click at a screen point.
+    func contextMenu(at p: CGPoint) -> NSMenu?
+}
+
+extension GraphInteractionTarget {
+    func click(_ node: Int, additive: Bool) { click(node) }
+    func beginLink(from node: Int, to p: CGPoint) {}
+    func updateLink(to p: CGPoint, over node: Int?) {}
+    func endLink(from node: Int, onto target: Int?) {}
+    func contextMenu(at p: CGPoint) -> NSMenu? { nil }
+}
+
+/// An `NSMenuItem` that runs a closure.
+final class GraphMenuItem: NSMenuItem {
+    private let run: () -> Void
+    init(_ title: String, enabled: Bool = true, _ run: @escaping () -> Void) {
+        self.run = run
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+        isEnabled = enabled
+    }
+    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc private func fire() { run() }
 }

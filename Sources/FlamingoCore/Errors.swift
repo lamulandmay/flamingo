@@ -12,6 +12,8 @@ public enum SidecarError: Error, Equatable, Sendable, LocalizedError {
     case notASidecar(String)
     /// The sidecar exists but is not valid UTF-8, so it cannot be edited without corrupting it.
     case notUTF8(path: String)
+    /// A rename could not prove that the source note and destination still share identity.
+    case identityMismatch(path: String)
 
     public var errorDescription: String? {
         switch self {
@@ -20,6 +22,7 @@ public enum SidecarError: Error, Equatable, Sendable, LocalizedError {
         case .writeFailed(let path, let code): return "Could not write \(path): \(String(cString: strerror(code)))."
         case .notASidecar(let path): return "\(path) is not a sidecar note."
         case .notUTF8(let path): return "\(path) is not UTF-8 text."
+        case .identityMismatch(let path): return "The identity of \(path) changed or is unknown. Its thoughts were preserved."
         }
     }
 }

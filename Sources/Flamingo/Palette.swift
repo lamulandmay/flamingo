@@ -5,8 +5,8 @@ import FlamingoCore
 import FlamingoDesign
 import FlamingoIndex
 
-/// ⌘K / ⌘F: one floating panel over the main window with one text field. Command mode
-/// fuzzy-matches file names and commands; search mode runs the index's full-text search.
+/// ⌘K / ⌘F share one search across names, folders, contents and thoughts.
+/// Prefix with > to run application commands.
 /// Plan 01 owns.
 @MainActor
 final class PaletteController: NSObject, NSWindowDelegate {
@@ -26,6 +26,8 @@ final class PaletteController: NSObject, NSWindowDelegate {
     private var panel: PalettePanel?
     private weak var state: AppState?
     private weak var host: NSWindow?
+    private var presentedFromAnyApp = false
+    private var presentationScreen: NSScreen?
     private var commands: [PaletteCommand] = []
     private var table: Fuzzy.FileTable?
     private var tableFiles: [FileRef] = []
@@ -34,14 +36,18 @@ final class PaletteController: NSObject, NSWindowDelegate {
     private var tableTask: Task<Void, Never>?
     private var rankTask: Task<Void, Never>?
     private var statusSubscription: AnyCancellable?
+    private var catalogSubscription: AnyCancellable?
+    private var wasIndexing = false
     /// Above this many files, building the table and ranking it run off the main thread.
     static let asyncTableThreshold = 20_000
     private var searchTask: Task<Void, Never>?
+    private var semanticTask: Task<Void, Never>?
     private var mouseMonitor: Any?
     private var observers: [NSObjectProtocol] = []
     /// Bumped on every show and hide so a stale fade-out never orders out a re-shown panel.
     private var generation = 0
     private var focusAttempts = 0
+    private var requestedResult: UnifiedSearchResult?
 
     private override init() {
         super.init()
@@ -56,8 +62,20 @@ final class PaletteController: NSObject, NSWindowDelegate {
     /// ⌘K / ⌘F. While visible, the same mode toggles the panel away; the other mode switches
     /// in place and keeps what was typed.
     func show(mode: PaletteMode, state: AppState) {
+        present(mode: mode, state: state, fromAnyApp: false)
+    }
+
+    /// Takes keyboard focus without activating Flamingo or covering the destination
+    /// app with the main window. The native nonactivating panel returns focus on Esc.
+    func showFromAnyApp(state: AppState) {
+        present(mode: .search, state: state, fromAnyApp: true)
+    }
+
+    private func present(mode: PaletteMode, state: AppState, fromAnyApp: Bool) {
+        if isVisible, presentedFromAnyApp != fromAnyApp { hide() }
+        presentedFromAnyApp = fromAnyApp
         if isVisible {
-            if model.mode == mode { hide(); return }
+            if model.mode == mode { panel?.makeKeyAndOrderFront(nil); focusField(); return }
             self.state = state
             commands = state.commands.filter(\.enabled)
             model.mode = mode
@@ -65,14 +83,28 @@ final class PaletteController: NSObject, NSWindowDelegate {
             return
         }
         self.state = state
-        host = state.hostWindow ?? NSApp.mainWindow
+        model.state = state
+        model.vault = state.vault
+        host = fromAnyApp ? nil : (state.hostWindow ?? NSApp.mainWindow)
+        presentationScreen = fromAnyApp ? (NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main) : nil
         commands = state.commands.filter(\.enabled)
-        refreshTable(state: state)
         statusSubscription = state.indexing.$status.sink { [weak self] status in
-            self?.model.status = Self.statusLine(status)
-            self?.layout()
+            guard let self else { return }
+            let completed = self.wasIndexing && status == nil
+            self.wasIndexing = status != nil
+            self.model.status = Self.statusLine(status)
+            self.layout()
+            if completed, self.isVisible { self.refreshItems() }
+        }
+        catalogSubscription = state.$files.dropFirst().debounce(for: .milliseconds(800), scheduler: RunLoop.main).sink { [weak self] _ in
+            guard let self, self.isVisible, self.model.items.isEmpty, !self.model.searching else { return }
+            self.refreshItems()
         }
         let panel = self.panel ?? makePanel()
+        panel.hidesOnDeactivate = !fromAnyApp
+        panel.collectionBehavior = fromAnyApp
+            ? [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+            : [.fullScreenAuxiliary, .transient, .ignoresCycle]
         generation += 1
         isVisible = true
         model.mode = mode
@@ -83,6 +115,8 @@ final class PaletteController: NSObject, NSWindowDelegate {
         if let host, panel.parent !== host {
             panel.parent?.removeChildWindow(panel)
             host.addChildWindow(panel, ordered: .above)
+        } else if host == nil {
+            panel.parent?.removeChildWindow(panel)
         }
         panel.makeKeyAndOrderFront(nil)
         panel.invalidateShadow()
@@ -96,6 +130,17 @@ final class PaletteController: NSObject, NSWindowDelegate {
         }
     }
 
+    func showResult(_ result: UnifiedSearchResult, query: String, state: AppState) {
+        requestedResult = result
+        showQuery(query, state: state)
+    }
+
+    func showQuery(_ query: String, state: AppState) {
+        model.query = query
+        show(mode: .search, state: state)
+        refreshItems()
+    }
+
     func hide() {
         guard isVisible, let panel else { return }
         isVisible = false
@@ -103,8 +148,10 @@ final class PaletteController: NSObject, NSWindowDelegate {
         let gen = generation
         searchTask?.cancel()
         searchTask = nil
+        semanticTask?.cancel()
         rankTask?.cancel()
         statusSubscription = nil
+        catalogSubscription = nil
         removeMonitors()
         // Hand key status back only if we still hold it; another panel may have taken it.
         if panel.isKeyWindow, let host, host.isVisible { host.makeKey() }
@@ -122,8 +169,9 @@ final class PaletteController: NSObject, NSWindowDelegate {
         } else {
             orderOut(panel)
         }
-        // In Ask mode the question field claims focus itself.
-        if host?.isKeyWindow == true, state?.mode != .ask { state?.focusSidebar?() }
+        // In Ask mode the question field claims focus itself; so do the folder columns when
+        // the palette just showed a folder.
+        if host?.isKeyWindow == true, state?.mode != .ask, state?.browser.focusPending != true { state?.focusSidebar?() }
     }
 
     private func orderOut(_ panel: PalettePanel) {
@@ -166,16 +214,12 @@ final class PaletteController: NSObject, NSWindowDelegate {
     private func layout() {
         guard isVisible, let panel else { return }
         let area = hostArea()
-        var height = Self.fieldHeight
-        let items = model.items
-        if !items.isEmpty {
-            height += Theme.Size.hairline + Theme.Space.xs * 2 + items.reduce(0) { $0 + $1.rowHeight }
-        }
-        if model.status != nil { height += Theme.Size.hairline + PaletteController.statusHeight }
-        height = min(height, (area.height * 0.6).rounded(.down))
-        let top = area.maxY - (area.height * 0.18).rounded()
-        let frame = NSRect(x: (area.midX - Theme.Size.panel / 2).rounded(), y: (top - height).rounded(),
-                           width: Theme.Size.panel, height: height)
+        let height = min(540, max(280, area.height - 120))
+        let width = min(860, max(560, area.width - 80))
+        // Spotlight's place: the top edge a little below the title bar, not dead centre.
+        let top = area.maxY - min(area.height * 0.14, max(40, area.height - height - 20))
+        let frame = NSRect(x: (area.midX - width / 2).rounded(), y: (top - height).rounded(),
+                           width: width, height: height)
         guard panel.frame != frame else { return }
         panel.setFrame(frame, display: true)
         panel.invalidateShadow()
@@ -183,7 +227,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
 
     private func hostArea() -> NSRect {
         if let host { return host.contentRect(forFrameRect: host.frame) }
-        return NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 760)
+        return (presentationScreen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 760)
     }
 
     // MARK: Dismissal
@@ -245,106 +289,82 @@ final class PaletteController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// `Indexing  12,345 files  410/s`, or nil when no reindex runs.
+    /// `Checking every file for changes  412,000 of 876,700  3,100/s  about 2m left  38 changed`,
+    /// or nil when no indexing pass runs.
     static func statusLine(_ status: VaultSession.IndexStatus?) -> String? {
         guard let status else { return nil }
-        if let f = status.fraction { return "Reindexing  \(Int(f * 100))%" }
-        guard status.files > 0 else { return "Indexing" }
-        let n = status.files.formatted(.number)
-        let rate = Int(status.perSecond.rounded()).formatted(.number)
-        return "Indexing  \(n) files  \(rate)/s"
+        return [status.headline, status.detail].compactMap { $0 }.joined(separator: "  ")
     }
 
     private func refreshItems() {
+        searchTask?.cancel(); semanticTask?.cancel()
         guard let state else { model.setItems([]); return }
-        switch model.mode {
-        case .commands:
-            searchTask?.cancel()
-            rankTask?.cancel()
-            let query = model.query
-            if let table, table.count >= Self.asyncTableThreshold, !Fuzzy.Query(query).isEmpty {
-                // Commands show at once; files join when the ranking lands.
-                let files = tableFiles
-                let q = Fuzzy.Query(query)
-                let limit = Self.matchLimit
-                rankTask = Task { [weak self] in
-                    let matches = await Task.detached(priority: .userInitiated) { table.rank(q, limit: limit) }.value
-                    guard !Task.isCancelled, let self, self.isVisible, self.model.query == query else { return }
-                    self.model.setItems(self.commandItems(for: query, state: state,
-                                                          files: matches.map { (files[$0.index], $0.score) }))
-                }
-                model.setItems(commandItems(for: query, state: state, files: []))
-            } else {
-                model.setItems(commandItems(for: query, state: state, files: nil))
-            }
-        case .search:
-            scheduleSearch(state: state)
-        }
-    }
-
-    /// Empty query: recent files, newest first, or the commands when nothing is recent yet
-    /// (a fresh launch offers Open Vault… and the recent vaults). Otherwise the best file and
-    /// command matches merged by score; ties go to the shorter name, then alphabetical.
-    /// `files`: ranked matches computed elsewhere; `nil` ranks the table here.
-    private func commandItems(for query: String, state: AppState, files: [(FileRef, Int)]?) -> [PaletteItem] {
-        let q = Fuzzy.Query(query)
-        if q.isEmpty {
-            var seen: Set<FileRef> = []
-            var recents: [PaletteItem] = []
-            for entry in state.history.entries.reversed() {
-                guard let file = entry.file else { continue }
-                if file == state.selected || !seen.insert(file).inserted { continue }
-                recents.append(.file(file))
-                if recents.count == Self.recentLimit { break }
-            }
-            return recents.isEmpty ? commands.map(PaletteItem.command) : recents
-        }
-        var scored: [(score: Int, name: String, item: PaletteItem)] = []
-        if let files {
-            for (ref, score) in files { scored.append((score, ref.name, .file(ref))) }
-        } else if let table {
-            for match in table.rank(q, limit: Self.matchLimit) {
-                let ref = tableFiles[match.index]
-                scored.append((match.score, ref.name, .file(ref)))
-            }
-        }
-        for command in commands {
-            if let s = Fuzzy.score(q, command.title) {
-                scored.append((s + Self.commandBoost, command.title, .command(command)))
-            }
-        }
-        scored.sort { a, b in
-            if a.score != b.score { return a.score > b.score }
-            if a.name.count != b.name.count { return a.name.count < b.name.count }
-            return a.name.localizedStandardCompare(b.name) == .orderedAscending
-        }
-        return scored.prefix(Self.matchLimit).map(\.item)
-    }
-
-    private func scheduleSearch(state: AppState) {
-        searchTask?.cancel()
         let query = model.query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { model.setItems([]); return }
+        model.notice = nil
+        model.filters = UnifiedSearchQuery(raw: query).summary
+        if query.hasPrefix(">") || state.vault == nil {
+            model.searching = false
+            let commandQuery = Fuzzy.Query(query.hasPrefix(">") ? String(query.dropFirst()) : query)
+            let ranked = commands.compactMap { command -> (Int, PaletteCommand)? in
+                if commandQuery.isEmpty { return (0, command) }
+                return Fuzzy.score(commandQuery, command.title).map { ($0, command) }
+            }.sorted { $0.0 > $1.0 }
+            model.setItems(ranked.map { .command($0.1) })
+            return
+        }
+        model.searching = true
+        // Keep the last results up, dimmed, until the new ones land: a list that blanks on
+        // every keystroke reads as flicker. Commands never linger into a search.
+        if model.items.contains(where: { if case .command = $0 { return true } else { return false } }) { model.setItems([]) }
         searchTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: Self.debounce)
-            guard !Task.isCancelled, let self else { return }
-            let hits = await state.search(query)
-            guard !Task.isCancelled, self.isVisible, self.model.mode == .search,
-                  self.model.query.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
-            self.model.setItems(hits.prefix(Self.hitLimit).map(PaletteItem.hit))
+            do {
+                try await Task.sleep(nanoseconds: Self.debounce)
+                let response = try await state.unifiedSearch(query)
+                guard !Task.isCancelled, let self, self.isVisible, self.model.query.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+                self.model.notice = response.notice
+                self.model.searching = false
+                var results = response.results
+                if let requested = self.requestedResult, !results.contains(where: { $0.id == requested.id }) { results.insert(requested, at: 0) }
+                self.model.setItems(results.map(PaletteItem.result))
+                if let requested = self.requestedResult, let index = results.firstIndex(where: { $0.id == requested.id }) { self.model.select(index) }
+                self.requestedResult = nil
+                // Meaning-based matches arrive later; the fast results remain usable and a
+                // keyboard/mouse selection is preserved if additional evidence arrives.
+                if !UnifiedSearchQuery(raw: query).text.isEmpty {
+                    self.semanticTask = Task { [weak self] in
+                        do {
+                            try await Task.sleep(nanoseconds: 550_000_000)
+                            let enhanced = try await state.unifiedSearch(query, includeSemantic: true)
+                            guard !Task.isCancelled, let self, self.isVisible, self.model.query.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+                            self.model.notice = enhanced.notice
+                            self.model.setItems(enhanced.results.map(PaletteItem.result), preservingSelection: true)
+                        } catch { /* Lexical results and their errors remain authoritative. */ }
+                    }
+                }
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                self.model.searching = false
+                self.model.notice = "Search unavailable: " + error.localizedDescription
+                self.model.setItems([])
+            }
         }
     }
 
     /// Enter, ⌘↩, or a click. The typed text is consumed; Esc keeps it for next time.
     private func run(_ item: PaletteItem, externally: Bool) {
         let query = model.query
+        let previewHitID = model.previewHitID
         model.query = ""
         hide()
         guard let state else { return }
         switch item {
+        case .result(let result):
+            state.openSearchResult(result, hit: result.hits.first { $0.id == previewHitID }, query: query, externally: externally)
         case .file(let ref):
             if externally { state.openExternally(ref) } else { state.jump(to: ref, anchor: nil) }
         case .command(let command):
+            NSApp.activate(ignoringOtherApps: true)
+            state.hostWindow?.makeKeyAndOrderFront(nil)
             command.run()
         case .hit(let hit):
             if externally {
@@ -352,6 +372,9 @@ final class PaletteController: NSObject, NSWindowDelegate {
             } else {
                 state.recordSearch(query)
                 state.jump(to: hit.file, anchor: hit.anchor)
+                state.sourceHighlight = query
+                state.selectedCommentID = hit.commentID
+                if hit.commentID != nil { state.railVisible = true }
             }
         }
     }
@@ -364,16 +387,19 @@ enum PaletteItem: Identifiable {
     case file(FileRef)
     case command(PaletteCommand)
     case hit(SearchHit)
+    case result(UnifiedSearchResult)
 
     var id: String {
         switch self {
         case .file(let ref): "file:" + ref.relativePath
         case .command(let command): "command:" + command.id
         case .hit(let hit): "hit:" + hit.id
+        case .result(let result): "result:" + result.id
         }
     }
 
     var rowHeight: CGFloat {
+        if case .result = self { return 68 }
         if case .hit = self { return 44 }
         return 28
     }
@@ -385,11 +411,28 @@ final class PaletteModel: ObservableObject {
     @Published var mode: PaletteMode = .commands
     @Published var query = ""
     @Published private(set) var items: [PaletteItem] = []
-    @Published private(set) var highlight = 0
+    @Published private(set) var highlight = 0 { didSet { if highlight != oldValue { previewHitID = nil } } }
+    var previewHitID: String?
     /// Bumped whenever `items` are replaced, so the list scrolls back to the top.
     @Published private(set) var version = 0
     /// One tertiary line at the foot of the panel while the vault indexes.
     @Published var status: String?
+    @Published var notice: String?
+    @Published var searching = false
+    @Published var filters: [String] = []
+    @Published var vault: Vault?
+    weak var state: AppState?
+
+    var selectedResult: UnifiedSearchResult? {
+        guard items.indices.contains(highlight), case .result(let result) = items[highlight] else { return nil }
+        return result
+    }
+    func select(_ index: Int) { if items.indices.contains(index) { highlight = index; highlightMoved = true } }
+    /// The highlight was moved by hand since the results last changed. Only then does a
+    /// late, better-ranked pass (meaning, after keywords) keep it; otherwise the new best
+    /// result is what Return opens.
+    private var highlightMoved = false
+    func showCommands() { query = ">"; queryDidChange?(); field?.window?.makeFirstResponder(field) }
 
     weak var field: NSTextField?
     var queryDidChange: (() -> Void)?
@@ -397,11 +440,14 @@ final class PaletteModel: ObservableObject {
     var onRun: ((PaletteItem, Bool) -> Void)?
     var onCancel: (() -> Void)?
 
-    func setItems(_ new: [PaletteItem]) {
+    func setItems(_ new: [PaletteItem], preservingSelection: Bool = false) {
+        if !preservingSelection { previewHitID = nil }
+        let selectedID = preservingSelection && highlightMoved && items.indices.contains(highlight) ? items[highlight].id : nil
+        if selectedID == nil { highlightMoved = false }
         var seen: Set<String> = []
         items = new.filter { seen.insert($0.id).inserted }
         Log.debug("palette: \(items.prefix(5).map(\.id))\(status.map { " | " + $0 } ?? "")")
-        highlight = 0
+        highlight = selectedID.flatMap { id in items.firstIndex { $0.id == id } } ?? 0
         version &+= 1
         onItems?()
     }
@@ -409,11 +455,13 @@ final class PaletteModel: ObservableObject {
     func moveHighlight(_ delta: Int) {
         guard !items.isEmpty else { return }
         highlight = min(max(highlight + delta, 0), items.count - 1)
+        highlightMoved = true
     }
 
     func jumpHighlight(toEnd: Bool) {
         guard !items.isEmpty else { return }
         highlight = toEnd ? items.count - 1 : 0
+        highlightMoved = true
     }
 
     func runHighlighted(externally: Bool) {

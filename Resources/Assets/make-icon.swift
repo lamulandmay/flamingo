@@ -2,7 +2,7 @@
 //
 //   source scripts/env.sh
 //   xcrun swiftc -parse-as-library Resources/Assets/make-icon.swift \
-//       Sources/FlamingoDesign/FlamingoMarkPath.swift -o /tmp/make-icon
+//       Sources/FlamingoDesign/FlamingoMarkPath.swift Sources/FlamingoDesign/Squircle.swift -o /tmp/make-icon
 //   /tmp/make-icon Resources/Assets
 //
 // Writes into the given directory:
@@ -79,12 +79,14 @@ struct MakeIcon {
     static let bird = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
     static let beakTip = CGColor(srgbRed: 0.20, green: 0.11, blue: 0.14, alpha: 1)    // #331C24
 
-    /// macOS icon grid: an 824pt continuous rounded rect centered on a 1024 canvas.
+    /// macOS icon grid: an 824pt continuous-curvature squircle centered on a 1024 canvas,
+    /// the same Bézier geometry the app uses for every rounded shape.
     static func appIcon(_ px: Int) -> CGImage {
         draw(px, px) { c in
             let k = CGFloat(px) / 1024
             let plate = CGRect(x: 100 * k, y: 100 * k, width: 824 * k, height: 824 * k)
-            let shape = RoundedRectangle(cornerRadius: 185.4 * k, style: .continuous).path(in: plate).cgPath
+            let radius = 185.4 * k
+            let shape = SquircleGeometry.path(in: plate, radius: radius)
 
             // Plate with its drop shadow.
             c.saveGState()
@@ -98,7 +100,10 @@ struct MakeIcon {
             let g = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!, colors: [top, bottom] as CFArray, locations: [0, 1])!
             c.drawLinearGradient(g, start: CGPoint(x: 0, y: plate.maxY), end: CGPoint(x: 0, y: plate.minY), options: [])
             // Faint inner edge so the plate holds on dark Docks.
-            c.addPath(shape); c.setStrokeColor(CGColor(gray: 1, alpha: 0.18)); c.setLineWidth(max(1, 4 * k)); c.strokePath()
+            // A concentric line just inside the edge: the plate's outline offset by half the stroke.
+            let edge = max(1, 4 * k)
+            c.addPath(SquircleGeometry.path(in: plate, radius: radius, offset: edge / 2))
+            c.setStrokeColor(CGColor(gray: 1, alpha: 0.18)); c.setLineWidth(edge); c.strokePath()
 
             // The bird, slightly above optical center, with a soft lift.
             let markRect = CGRect(x: plate.minX, y: plate.minY + 128 * k, width: plate.width, height: 600 * k)

@@ -9,25 +9,27 @@ public struct LocalGraphView: View {
     public var center: FileRef
     public var depth: Int
     public var onSelect: (FileRef) -> Void
+    /// The owner's counter for `graph`; when given, the graph itself isn't compared per render.
+    public var revision: Int?
 
     @StateObject private var model: GraphModel
 
-    public init(graph: Graph, center: FileRef, depth: Int = 1, onSelect: @escaping (FileRef) -> Void) {
-        self.graph = graph; self.center = center; self.depth = depth; self.onSelect = onSelect
+    public init(graph: Graph, center: FileRef, depth: Int = 1, revision: Int? = nil, onSelect: @escaping (FileRef) -> Void) {
+        self.graph = graph; self.center = center; self.depth = depth; self.revision = revision; self.onSelect = onSelect
         _model = StateObject(wrappedValue: LocalGraphView.makeModel(graph: graph, center: center, depth: depth))
     }
 
     public var body: some View {
         let _ = model.onSelect = onSelect
         GraphCanvas(model: model, redraw: model.redraw)
-            .overlay(GraphInputLayer(target: model))
-            .onChange(of: LocalKey(graph: graph, center: center, depth: depth)) { _, key in
-                let local = RadialLayout.local(graph: key.graph, center: key.center, depth: key.depth)
+            .overlay(GraphInputLayer(target: model, claimsFocus: false))
+            .onChange(of: LocalKey(graph: revision == nil ? graph : nil, revision: revision, center: center, depth: depth)) { _, key in
+                let local = RadialLayout.local(graph: graph, center: key.center, depth: key.depth)
                 model.setFixed(graph: local.graph, positions: local.positions, selected: local.center)
             }
     }
 
-    private struct LocalKey: Equatable { var graph: Graph; var center: FileRef; var depth: Int }
+    private struct LocalKey: Equatable { var graph: Graph?; var revision: Int?; var center: FileRef; var depth: Int }
 
     @MainActor
     private static func makeModel(graph: Graph, center: FileRef, depth: Int) -> GraphModel {
@@ -35,7 +37,9 @@ public struct LocalGraphView: View {
         let model = GraphModel(fixedGraph: local.graph, positions: local.positions)
         model.setFixed(graph: local.graph, positions: local.positions, selected: local.center)
         model.alwaysShowLabels = true
-        model.fitPadding = Theme.Space.xl
+        model.calm = false
+        model.labelLimit = RadialLayout.labeledNeighbors + 1
+        model.fitPadding = Theme.Space.xxl + Theme.Space.l
         model.fitMaxZoom = 2
         return model
     }
@@ -51,6 +55,11 @@ enum RadialLayout {
         var center: Int?
     }
 
+    /// Neighbors shown per ring, strongest connections first, and how many of those are named
+    /// without hovering.
+    static let neighborCap = 12
+    static let labeledNeighbors = 6
+
     /// World units between rings, and the least arc between two nodes on a ring.
     static let ringGap: CGFloat = 64
     static let minArc: CGFloat = 22
@@ -63,29 +72,35 @@ enum RadialLayout {
     }
 
     /// Nodes within `depth` hops of `id` (edges taken both ways) and the edges among them.
-    /// The center comes first, then nodes by hop count, then by path.
-    static func neighborhood(of id: String, in graph: Graph, depth: Int) -> Graph {
+    /// The file's own neighbors are capped at `cap`, the strongest connections first (a link
+    /// someone made outranks any suggestion, then weight). The center comes first, then
+    /// nodes by hop count, strongest first.
+    static func neighborhood(of id: String, in graph: Graph, depth: Int, cap: Int = neighborCap) -> Graph {
         guard let centerNode = graph.nodes.first(where: { $0.id == id }) else { return Graph() }
-        var adjacency: [String: [String]] = [:]
+        var adjacency: [String: [(id: String, strength: Double)]] = [:]
         for e in graph.edges where e.source != e.target {
-            adjacency[e.source, default: []].append(e.target)
-            adjacency[e.target, default: []].append(e.source)
+            let strength = Double(GraphTopology.Edge.precedence(e.kind)) * 1000 + e.weight
+            adjacency[e.source, default: []].append((e.target, strength))
+            adjacency[e.target, default: []].append((e.source, strength))
         }
         var hops: [String: Int] = [id: 0]
+        var rank: [String: Double] = [id: .infinity]
         var frontier = [id]
         for level in 1...max(depth, 1) {
-            var next: [String] = []
+            var best: [String: Double] = [:]
             for n in frontier {
-                for m in adjacency[n] ?? [] where hops[m] == nil {
-                    hops[m] = level
-                    next.append(m)
+                for m in adjacency[n] ?? [] where hops[m.id] == nil {
+                    best[m.id] = max(best[m.id] ?? 0, m.strength)
                 }
             }
-            frontier = next
+            let ranked = best.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            let kept = level == 1 ? Array(ranked.prefix(cap)) : ranked
+            for (m, strength) in kept { hops[m] = level; rank[m] = strength }
+            frontier = kept.map(\.key)
         }
         let nodes = graph.nodes
             .filter { $0.id != id && hops[$0.id] != nil }
-            .sorted { (hops[$0.id]!, $0.id) < (hops[$1.id]!, $1.id) }
+            .sorted { (hops[$0.id]!, -rank[$0.id]!, $0.id) < (hops[$1.id]!, -rank[$1.id]!, $1.id) }
         let edges = graph.edges.filter { hops[$0.source] != nil && hops[$0.target] != nil }
         return Graph(nodes: [centerNode] + nodes, edges: edges)
     }

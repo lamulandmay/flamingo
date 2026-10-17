@@ -7,9 +7,19 @@ import FlamingoGraph
 import FlamingoTrail
 import FlamingoAsk
 
-/// Sidebar | content | comments rail, under a transparent title bar. Plan 01 owns.
+/// Sidebar | content | inspector, under a transparent title bar. Both sidebars resize by
+/// their dividers. Plan 01 owns.
 struct RootView: View {
     @EnvironmentObject var state: AppState
+
+    var body: some View { RootLayout(layout: state.layout) }
+}
+
+/// Observes only the geometry, so a divider drag or a swipe redraws the frame and the
+/// columns' sizes, not every view that reads `AppState`.
+private struct RootLayout: View {
+    @EnvironmentObject var state: AppState
+    @ObservedObject var layout: PanelLayout
     @State private var dropTargeted = false
 
     var body: some View {
@@ -17,39 +27,69 @@ struct RootView: View {
             let titlebar = geo.safeAreaInsets.top > 0 ? geo.safeAreaInsets.top : 38
             HStack(spacing: 0) {
                 Sidebar(topInset: titlebar)
-                    .frame(width: state.sidebarWidth)
-                SidebarDivider()
+                    .frame(width: Sidebar.width(state))
+                if state.sidebarCollapsed {
+                    VHairline()
+                } else {
+                    ResizeHandle(width: $layout.leftWidth, range: PanelLayout.left, edge: .leading,
+                                 defaultWidth: Theme.Size.sidebar, onEnd: layout.persist)
+                }
                 VStack(spacing: 0) {
                     TopBar(height: titlebar)
                     Hairline()
-                    HStack(spacing: 0) {
-                        content
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .offset(x: state.swipeAmount * 24)
-                            .overlay(alignment: .leading) { SwipeChevron(amount: state.swipeAmount, back: true) }
-                            .overlay(alignment: .trailing) { SwipeChevron(amount: state.swipeAmount, back: false) }
-                            .overlay(alignment: .bottom) {
-                                if let toast = state.toast {
-                                    Toast(toast.text, action: toast.action, perform: toast.perform)
-                                        .frame(maxWidth: 360)
-                                        .padding(Theme.Space.l)
-                                        .id(toast.id)
-                                }
+                        .overlay(alignment: .top) { IndexingHairline(indexing: state.indexing) }
+                    WorkingFilesBar()
+                    content
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .offset(x: layout.swipeAmount * 24)
+                        .overlay(alignment: .leading) { SwipeChevron(amount: layout.swipeAmount, back: true) }
+                        .overlay(alignment: .trailing) { SwipeChevron(amount: layout.swipeAmount, back: false) }
+                        .overlay(alignment: .bottom) {
+                            if let toast = state.toast {
+                                Toast(toast.text, action: toast.action, perform: toast.perform)
+                                    .frame(maxWidth: 360)
+                                    .padding(Theme.Space.l)
+                                    .id(toast.id)
                             }
-                        if state.railShown {
-                            VHairline()
-                            Rail(file: state.selected)
-                                .frame(width: Theme.Size.rail)
-                                .transition(.move(edge: .trailing))
                         }
-                    }
-                    .clipped()
+                        .overlay {
+                            if let deck = state.wander { WanderPanel(deck: deck).transition(.opacity) }
+                        }
+                        .overlay {
+                            if state.connectGridShown { ConnectGrid().transition(.opacity) }
+                        }
+                        .clipped()
                 }
                 .background(Theme.Color.bg)
+                .frame(minWidth: 360)
+                if state.railShown {
+                    ResizeHandle(width: $layout.rightWidth, range: PanelLayout.right, edge: .trailing,
+                                 defaultWidth: 320, onEnd: layout.persist)
+                    Inspector(topInset: titlebar)
+                        .frame(width: layout.rightWidth)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
             }
             .ignoresSafeArea()
         }
         .tint(Theme.Color.accent)
+        .animation(Theme.Motion.normal, value: state.wander != nil)
+        .animation(Theme.Motion.normal, value: state.connectGridShown)
+        .sheet(isPresented: $state.isNewFilePresented) { NewFileSheet().environmentObject(state) }
+        .sheet(isPresented: $state.isHealthPresented) { IndexHealthSheet(indexing: state.indexing).environmentObject(state) }
+        .sheet(isPresented: $state.isInboxPresented) {
+            if let vault = state.vault {
+                VStack(spacing: 0) {
+                    HStack { Spacer(); IconButton("xmark", help: "Close") { state.isInboxPresented = false }.keyboardShortcut(.cancelAction) }
+                        .padding([.top, .trailing], Theme.Space.m)
+                    CaptureInboxView(vault: vault, files: state.files, onOpen: { file, anchor in
+                        state.isInboxPresented = false; state.jump(to: file, anchor: anchor)
+                    }, onAttach: { comment, source, target in
+                        try await state.attachInboxThought(comment, from: source, to: target)
+                    })
+                }.background(Theme.Color.bg)
+            }
+        }
         .overlay {
             Rectangle()
                 .strokeBorder(Theme.Color.accent, lineWidth: 1)
@@ -72,28 +112,52 @@ struct RootView: View {
             NoVault()
         } else {
             switch state.mode {
-            case .files:
+            case .files, .ask:
                 PreviewPane()
             case .graph:
-                GraphView(graph: state.graph, selected: state.selected, vault: state.vault, scope: state.selectedFolder) {
+                GraphView(graph: state.graph, selected: state.selected, vault: state.vault, scope: state.selectedFolder,
+                          onSelectionChange: { state.select($0, source: .graph) },
+                          onScopeChange: { state.selectFromSidebar(folder: $0, file: nil) },
+                          onConnectionsChanged: { state.connectionsTouched(identities: true) }) {
                     state.jump(to: $0, anchor: nil)
                 }
+                .actionHistory(state.actionHistory)
+                .graphRevision(state.graphRevision)
+                .replay(firstSeen: { [weak state] in await state?.session?.firstSeen() ?? [:] }, request: state.graphReplayRequest)
+                .celebrating(state.graphCelebration) { state.celebrationMissed($0) }
             case .trail:
                 if let store = state.trailStore {
-                    TrailView(store: store, onSelect: { state.jump(to: $0, anchor: $1) })
-                        .onResume { state.resume($0.filesToReopen) }
-                } else {
-                    Color.clear
-                }
-            case .ask:
-                if let engine = state.askEngine {
-                    AskView(engine: engine) { state.jump(to: $0, anchor: $1) }
+                    TrailView(store: store, onSelect: { state.jump(to: $0, anchor: $1) },
+                              onOpenLink: { state.openLink($0, from: $1) })
+                        .onResume { state.resumeLocations($0.locationsToReopen) }
+                        .actionHistory(state.actionHistory)
                 } else {
                     Color.clear
                 }
             }
         }
     }
+}
+
+/// A 2pt accent line under the title bar while the vault is being indexed, as long as the
+/// pass knows how far it has to go. Nothing else on screen says so; hovering it, the palette
+/// and Workspace Health say what the pass is doing, how far it got, and how long is left.
+private struct IndexingHairline: View {
+    @ObservedObject var indexing: IndexingModel
+
+    var body: some View {
+        ProgressHairline(value: progress)
+            .opacity(indexing.status == nil ? 0 : 1)
+            .animation(Theme.Motion.normal, value: indexing.status == nil)
+            // A band a few points tall, so the tooltip can be found; only while indexing.
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+            .help(indexing.status?.summary ?? "")
+            .allowsHitTesting(indexing.status != nil)
+            .padding(.vertical, -3)
+    }
+
+    private var progress: Double? { indexing.status?.fraction.map { min(1, max(0, $0)) } }
 }
 
 /// The strip under the transparent title bar: mode switcher, current file, rail toggle.
@@ -104,11 +168,29 @@ struct TopBar: View {
     var body: some View {
         ZStack {
             HStack(spacing: Theme.Space.m) {
+                if state.sidebarCollapsed {
+                    // The traffic lights spill past the ribbon; the panel's toggle sits after them.
+                    Color.clear.frame(width: Sidebar.trafficLights - Ribbon.width - Theme.Space.m - Theme.Space.xs)
+                    SidebarToggle()
+                }
                 SegmentedModes(selection: $state.mode)
                     .disabled(state.vault == nil)
                     .opacity(state.vault == nil ? Theme.Opacity.disabled : 1)
                 Spacer()
-                IconButton("sidebar.right", help: state.railShown ? "Hide Comments" : "Show Comments") {
+                if state.vault != nil, state.mode == .files, state.selected == nil, !state.splitVisible {
+                    FolderStyleToggle(browser: state.browser)
+                        .transition(.opacity)
+                }
+                AttentionButton(indexing: state.indexing)
+                IconButton("square.grid.3x3", help: "Connect Files", isOn: state.connectGridShown) {
+                    state.connectGridShown.toggle()
+                }
+                .disabled(state.vault == nil)
+                IconButton("rectangle.split.2x1", help: state.splitVisible ? "Close Split View" : "Split View", isOn: state.splitVisible) {
+                    state.toggleSplit()
+                }
+                .disabled(state.selected == nil && !state.splitVisible)
+                IconButton("sidebar.right", help: state.railShown ? "Hide Inspector" : "Show Inspector", isOn: state.railShown) {
                     state.toggleRail()
                 }
             }
@@ -135,7 +217,7 @@ struct CurrentFileTitle: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 if let a = state.anchor {
-                    Text(a.label)
+                    Text(a.displayLabel)
                         .font(Theme.Font.mono)
                         .foregroundStyle(Theme.Color.textTertiary)
                         .lineLimit(1)
@@ -143,77 +225,80 @@ struct CurrentFileTitle: View {
                 }
             }
             .animation(Theme.Motion.fast, value: state.anchor)
+        } else if state.vault != nil, state.mode == .files {
+            BrowsedFolderTitle(browser: state.browser)
         }
     }
 }
 
-/// Hairline between sidebar and content that can be dragged to resize the sidebar.
-struct SidebarDivider: View {
-    @EnvironmentObject var state: AppState
-    @State private var startWidth: CGFloat?
+/// With no file open, the folder the columns show, as Finder titles its window.
+private struct BrowsedFolderTitle: View {
+    @ObservedObject var browser: ColumnBrowserModel
 
     var body: some View {
-        VHairline()
-            .overlay {
-                Color.clear
-                    .frame(width: 9)
-                    .contentShape(Rectangle())
-                    .onHover { inside in
-                        if inside { NSCursor.resizeLeftRight.set() } else { NSCursor.arrow.set() }
-                    }
-                    .gesture(
-                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                            .onChanged { v in
-                                if startWidth == nil { startWidth = state.sidebarWidth }
-                                let w = (startWidth ?? Theme.Size.sidebar) + v.translation.width
-                                state.sidebarWidth = min(max(w.rounded(), 180), 420)
-                            }
-                            .onEnded { _ in startWidth = nil }
-                    )
-            }
+        if browser.style == .columns, let folder = browser.folder ?? browser.root {
+            Text(FileManager.default.displayName(atPath: folder.path))
+                .font(Theme.Font.body)
+                .foregroundStyle(Theme.Color.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(folder.path)
+        }
     }
 }
 
-/// The comments rail for one file, with the file's neighbourhood beneath it.
-/// `file` is fixed when the view is built, so an edit that commits while the selection is
-/// already moving still lands on the file it was made on.
-struct Rail: View {
-    @EnvironmentObject var state: AppState
-    let file: FileRef?
+/// Icons or columns, as in Finder's toolbar.
+private struct FolderStyleToggle: View {
+    @ObservedObject var browser: ColumnBrowserModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            CommentsRail(
-                comments: state.comments,
-                onJump: { state.jumpToAnchor($0) },
-                onEdit: { c in if let file { state.updateComment(c, in: file) } },
-                onDelete: { c in if let file { state.deleteComment(c, from: file) } }
-            )
-            .onOpenLink { state.openLink($0) }
-            .onRestore { c in state.restoreComment(c, to: file) }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if state.mode != .graph, let file, state.graph.nodes.contains(where: { $0.id == file.relativePath }) {
-                Hairline()
-                LocalGraphView(graph: state.graph, center: file, depth: 1) { state.jump(to: $0, anchor: nil) }
-                    .frame(height: 220)
-                    .clipped()
+        HStack(spacing: 2) {
+            ForEach(FolderStyle.allCases) { style in
+                IconButton(style.symbol, help: "View " + style.title, isOn: browser.style == style) { browser.style = style }
+                    .background(Squircle(radius: Theme.Radius.s)
+                        .fill(Theme.Color.hover)
+                        .opacity(browser.style == style ? 1 : 0))
             }
         }
-        .id(file)
-        .background(Theme.Color.bg)
+        .animation(Theme.Motion.fast, value: browser.style)
     }
 }
 
-/// Empty state: one noun phrase, and it is the way in.
+/// Appears only when something needs you: indexing failed, or rename tracking did.
+/// Opens Workspace Health.
+private struct AttentionButton: View {
+    @EnvironmentObject var state: AppState
+    @ObservedObject var indexing: IndexingModel
+
+    var body: some View {
+        if indexing.error != nil || state.continuityError != nil {
+            IconButton("exclamationmark.triangle", help: indexing.error ?? state.continuityError ?? "Workspace Health") {
+                state.isHealthPresented = true
+            }
+            .transition(.opacity)
+        }
+    }
+}
+
+/// Empty state: the mark, and the one way in.
 struct NoVault: View {
     @EnvironmentObject var state: AppState
 
     var body: some View {
-        Button { state.openVaultDialog() } label: {
-            EmptyState("No vault open")
+        VStack(spacing: Theme.Space.xl) {
+            FlamingoMark()
+                .fill(Theme.Color.accent)
+                .frame(width: 44, height: 68)
+                .accessibilityHidden(true)
+            Button("Open Folder…") { state.openVaultDialog() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .keyboardShortcut("o", modifiers: .command)
         }
-        .buttonStyle(.plain)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contextMenu {
+            Button("Open Home Folder") { state.open(FileManager.default.homeDirectoryForCurrentUser) }
+        }
     }
 }
 

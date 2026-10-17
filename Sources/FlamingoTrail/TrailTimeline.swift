@@ -35,6 +35,11 @@ struct TrailTimeline: View {
     var onResume: ((TrailSession) -> Void)?
     /// Nil when there is nowhere to save a name; renaming is then off.
     var onRename: ((TrailSession, String?) -> Void)?
+    var renameRevision: Int = 0
+    var isFiltered = false
+    var previousSessionNames: [UUID: String] = [:]
+    var correctionBusy = false
+    var onCorrection: ((TrailSession, TrailCorrectionAction) -> Void)?
 
     enum Focus: Hashable { case list, title }
 
@@ -72,12 +77,18 @@ struct TrailTimeline: View {
         let rows = rows(now: Date(), calendar: calendar)
         Group {
             if rows.isEmpty {
-                if showsPaused { EmptyState("Trail paused") } else { Color.clear }
+                if showsPaused { EmptyState("Trail paused — enable recording in Settings") }
+                else if isFiltered { EmptyState("No sessions match this search") }
+                else { EmptyState("Your work will appear here as you open, edit, search and comment on files") }
             } else {
                 list(rows, calendar: calendar)
             }
         }
         .background(Theme.Color.bg)
+        .onChange(of: renameRevision) { _, _ in titles = [:] }
+        .onChange(of: sessions) { _, updated in
+            for session in updated where titles[session.id] == (session.title ?? "") { titles[session.id] = nil }
+        }
     }
 
     private func list(_ rows: [Row], calendar: Calendar) -> some View {
@@ -111,7 +122,10 @@ struct TrailTimeline: View {
                             onCommitRename: { commitRename(restoreFocus: true) },
                             onCancelRename: cancelRename,
                             onResume: { resume(s) },
-                            onOpen: { file, anchor in select(s.id); onOpen(file, anchor) }
+                            onOpen: { file, anchor in select(s.id); onOpen(file, anchor) },
+                            previousSessionName: previousSessionNames[s.id],
+                            correctionBusy: correctionBusy,
+                            onCorrection: onCorrection.map { action in { action(s, $0) } }
                         )
                         .id(s.id)
                     }
@@ -266,6 +280,9 @@ struct SessionRow: View {
     let onCancelRename: () -> Void
     let onResume: () -> Void
     let onOpen: (FileRef, FileAnchor?) -> Void
+    var previousSessionName: String? = nil
+    var correctionBusy = false
+    var onCorrection: ((TrailCorrectionAction) -> Void)? = nil
     @State private var hovered = false
 
     private typealias M = TrailMetrics
@@ -296,19 +313,20 @@ struct SessionRow: View {
             }
             if canRename { Button("Rename", action: onBeginRename) }
             Button(expanded ? "Collapse" : "Expand", action: onToggle)
+            if onCorrection != nil { Divider(); correctionItems }
         }
     }
 
     private var gutterView: some View {
         HStack(spacing: Theme.Space.xs) {
-            Image(systemName: "chevron.right")
+            Button(action: onToggle) { Image(systemName: "chevron.right")
                 .font(Theme.Font.small)
                 .imageScale(.small)
                 .foregroundStyle(Theme.Color.textTertiary)
                 .rotationEffect(.degrees(expanded ? 90 : 0))
                 .frame(width: M.chevron, height: M.header)
                 .contentShape(Rectangle())
-                .onTapGesture(perform: onToggle)
+            }.buttonStyle(.plain).accessibilityLabel(expanded ? "Collapse session" : "Expand session")
             Text(range)
                 .font(Theme.Font.monoSmall)
                 .foregroundStyle(Theme.Color.textTertiary)
@@ -346,11 +364,56 @@ struct SessionRow: View {
                     Spacer(minLength: 0)
                 }
             }
-            if canResume, !editing {
-                IconButton("arrow.clockwise", help: "Resume", action: onResume)
-                    .opacity(hovered || selected ? 1 : 0)
-                    .animation(Theme.Motion.fast, value: hovered || selected)
+            // Actions appear on hover or selection; at rest the row is just the session.
+            HStack(spacing: 0) {
+                if canResume, !editing {
+                    if canRename { IconButton("pencil", help: "Name Session", action: onBeginRename) }
+                    IconButton("arrow.uturn.backward", help: "Resume", action: onResume)
+                }
+                if onCorrection != nil, !editing {
+                    Menu { correctionItems } label: {
+                        Image(systemName: "ellipsis").font(.system(size: Theme.Size.iconSmall))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .tint(Theme.Color.textSecondary)
+                    .fixedSize()
+                    .frame(width: 24, height: 24)
+                    .help("Session")
+                    .accessibilityLabel("Session corrections")
+                    .disabled(correctionBusy)
+                }
             }
+            .opacity(hovered || selected ? 1 : 0)
+            .animation(Theme.Motion.fast, value: hovered || selected)
+            if session.excludesInferredConnections {
+                Image(systemName: "eye.slash")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.Color.textTertiary)
+                    .help("Not used for suggested connections")
+                    .accessibilityLabel("Not used for suggested connections")
+            }
+        }
+    }
+
+    @ViewBuilder private var correctionItems: some View {
+        Button(session.excludesInferredConnections ? "Use for Suggested Connections" : "Don't Use for Suggested Connections") {
+            onCorrection?(.excluded(!session.excludesInferredConnections))
+        }
+        .disabled(correctionBusy)
+        if !session.correctionStops.isEmpty {
+            Menu("Split before stop") {
+                ForEach(session.correctionStops) { stop in
+                    Button(stop.label) { onCorrection?(.splitBefore(stop.id)) }
+                }
+            }.disabled(correctionBusy)
+        }
+        if let previousSessionName {
+            Button("Merge with previous: " + previousSessionName) { onCorrection?(.mergePrevious) }
+                .disabled(correctionBusy)
+        }
+        if session.hasGroupingCorrection {
+            Button("Use automatic grouping") { onCorrection?(.automaticGrouping) }.disabled(correctionBusy)
         }
     }
 
@@ -361,7 +424,7 @@ struct SessionRow: View {
         let x = gutter + M.rail / 2
         return ZStack(alignment: .topLeading) {
             if selected {
-                RoundedRectangle(cornerRadius: Theme.Radius.s)
+                Squircle(radius: Theme.Radius.s)
                     .fill(active ? Theme.Color.selection : Theme.Color.hover)
                     .frame(height: M.header)
                     .padding(.top, topGap)
@@ -422,19 +485,21 @@ struct TrailFileStop: View {
                 if links { Hairline() } else { Spacer(minLength: 0) }
             }
             .frame(height: TrailMetrics.thumb)
-            Text(file.name)
+            Button { onOpen(file, anchor) } label: { Text(file.name)
                 .font(Theme.Font.small)
                 .foregroundStyle(hover ? Theme.Color.text : Theme.Color.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .help(file.relativePath)
-                .onTapGesture { onOpen(file, anchor) }
+            }.buttonStyle(.plain).accessibilityLabel("Open " + file.relativePath)
             ForEach(notes) { note in
-                TrailNoteText(note: note)
-                    .padding(.leading, Theme.Space.s)
-                    .padding(.top, Theme.Space.xs)
-                    .contentShape(Rectangle())
-                    .onTapGesture { onOpen(file, note.anchor ?? anchor) }
+                VStack(alignment: .leading, spacing: 3) {
+                    Button(note.anchor?.label ?? "Open note location") { onOpen(file, note.anchor ?? anchor) }
+                        .font(.caption).buttonStyle(.plain).foregroundStyle(Theme.Color.textSecondary)
+                    TrailNoteText(note: note, source: file)
+                }
+                .padding(.leading, Theme.Space.s)
+                .padding(.top, Theme.Space.xs)
             }
         }
         .frame(width: notes.isEmpty ? TrailMetrics.fileColumn : TrailMetrics.notedColumn, alignment: .leading)
@@ -465,29 +530,13 @@ struct TrailSearchStop: View {
 /// A comment as the user wrote it: anchor in mono, wikilinks in the accent.
 struct TrailNoteText: View {
     let note: TrailNote
+    var source: FileRef? = nil
+    @Environment(\.trailOpenLink) private var openLink
 
     var body: some View {
-        Text(attributed)
-            .lineLimit(6)
+        TrailRichText(note: note, source: source, onOpenLink: openLink)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var attributed: AttributedString {
-        var text = AttributedString()
-        if let a = note.anchor {
-            var chip = AttributedString(a.label + "  ")
-            chip.font = Theme.Font.monoSmall
-            chip.foregroundColor = Theme.Color.textTertiary
-            text += chip
-        }
-        for seg in TrailPresentation.segments(note.text) {
-            var run = AttributedString(seg.text)
-            run.font = Theme.Font.body
-            run.foregroundColor = seg.isLink ? Theme.Color.accent : Theme.Color.text
-            text += run
-        }
-        return text
     }
 }
 
@@ -558,8 +607,8 @@ struct TrailThumb: View {
                     .resizable()
                     .interpolation(.high)
                     .frame(width: w, height: w / aspect)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.s - 2))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.s - 2)
+                    .clipShape(Squircle(radius: Theme.Radius.s - 2))
+                    .overlay(Squircle(radius: Theme.Radius.s - 2)
                         .stroke(Theme.Color.hairline, lineWidth: Theme.Size.hairline))
                     .frame(height: TrailMetrics.thumb)
             } else {
@@ -567,12 +616,19 @@ struct TrailThumb: View {
                     .frame(width: TrailMetrics.thumb, height: TrailMetrics.thumb)
             }
         }
-        .task(id: file.relativePath) {
+        .task(id: thumbnailVersion) {
             // Quick Look's audio "thumbnail" is a generic note; the family glyph says more.
-            guard image == nil, let root = vaultRoot, !FileFamily.audio.contains(file.ext) else { return }
+            guard let root = vaultRoot, !FileFamily.audio.contains(file.ext) else { return }
             let url = root.appendingPathComponent(file.relativePath)
             image = await TrailThumbnails.shared.image(for: url, side: TrailMetrics.thumbMaxWidth, scale: scale)
         }
+    }
+
+    private var thumbnailVersion: String {
+        guard let vaultRoot else { return file.relativePath }
+        let url = vaultRoot.appendingPathComponent(file.relativePath)
+        let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        return url.path + "|" + String(date?.timeIntervalSinceReferenceDate ?? 0)
     }
 }
 

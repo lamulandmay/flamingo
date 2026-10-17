@@ -9,6 +9,8 @@ usage: flamingo-index <vault> [options]
 
   (no options)        reindex, write graph.json, print a summary
   --search "q"        hits as  path  (anchor)  snippet
+  --unified "q"       names, contents, thoughts and folders, with elapsed time
+  --family <path>     inspect family evidence for a vault-relative file
   --sections "q"      every matching section, not grouped by file
   --comments "q"      matching comments
   --files "name"      fuzzy file-name match (the command palette)
@@ -17,8 +19,16 @@ usage: flamingo-index <vault> [options]
   --text <path>       the indexed text of one file
   --graph             node and edge counts by kind
   --bench             re-extract everything, then time searches
+  --semantic "q"      nearest passages by meaning, with relevance and model
+  --hybrid "q"        unified search with meaning (what the palette shows second)
+  --similar <path>    files closest in meaning to <path>
+  --pairs [min]       suggested connections across the vault (default: the model's floor)
+  --embed             embed everything pending now, with progress
+  --eval <cases.json> recall@5 / MRR for [{"query", "relevant": [paths], "kind"}]
+  --vector-bench N    time in-memory vector search over N synthetic passages
   --watch             keep running and apply changes as they happen
   --no-reindex        query the existing index as is
+  --catalog-indexed   benchmark unified filename fallback using indexed paths as catalog
   --force             re-extract every file, changed or not
   --limit N           cap results (default 20)
 
@@ -51,9 +61,10 @@ if args.isEmpty || args.contains("-h") || args.contains("--help") { print(usage,
 
 var vaultPath: String?
 var actions: [(String, String?)] = []
-var watch = false, reindexFirst = true, bench = false, force = false
+var watch = false, reindexFirst = true, bench = false, force = false, catalogIndexed = false
 var limit = 20
-let takesValue: Set<String> = ["--search", "--sections", "--comments", "--files", "--backlinks", "--text"]
+let takesValue: Set<String> = ["--search", "--sections", "--comments", "--files", "--backlinks", "--text", "--unified", "--family",
+                                "--semantic", "--hybrid", "--similar", "--eval", "--vector-bench"]
 var i = 0
 while i < args.count {
     let a = args[i]
@@ -64,9 +75,12 @@ while i < args.count {
     switch a {
     case "--watch": watch = true
     case "--no-reindex": reindexFirst = false
+    case "--catalog-indexed": catalogIndexed = true
     case "--force": force = true
     case "--bench": bench = true
-    case "--recent", "--graph": actions.append((a, nil))
+    case "--recent", "--graph", "--embed": actions.append((a, nil))
+    case "--pairs":
+        if i + 1 < args.count, Double(args[i + 1]) != nil { actions.append((a, args[i + 1])); i += 1 } else { actions.append((a, nil)) }
     case "--limit":
         guard i + 1 < args.count, let n = Int(args[i + 1]), n >= 0 else { fail("--limit needs a number ≥ 0") }
         limit = n; i += 1
@@ -118,8 +132,20 @@ if bench {
     }
 }
 
+// MARK: - Vector bench (no vault index needed)
+
+if let n = actions.first(where: { $0.0 == "--vector-bench" }).flatMap({ Int($0.1 ?? "") }) {
+    do {
+        for line in try SemanticBench.vectorSearch(passages: n, in: vault.stateDir) { print(line) }
+        exit(0)
+    } catch { fail("flamingo-index: \(error)") }
+}
+
+// Background embedding would die with this process; `--embed` runs it in the foreground.
+if !watch { IndexStore.autoEmbed = false }
+let readOnly = !reindexFirst && !watch && !actions.contains { ["--graph", "--embed"].contains($0.0) }
 let store: IndexStore
-do { store = try IndexStore(vault: vault) } catch { fail("cannot open index: \(error)") }
+do { store = try IndexStore(vault: vault, readOnly: readOnly) } catch { fail("cannot open index: \(error)") }
 
 // MARK: - Reindex
 
@@ -139,15 +165,43 @@ func reindex() throws {
 do {
 
     if reindexFirst { try reindex() }
-    let graph = try store.buildGraph()
-    if actions.isEmpty && !watch {
+    let needsGraph = reindexFirst || actions.contains { $0.0 == "--graph" }
+    let graph = needsGraph ? try store.buildGraph() : nil
+    if actions.isEmpty && !watch, let graph {
         let links = graph.edges.filter { $0.kind == .link }.count
         print("\(graph.nodes.count) nodes, \(links) links → \(store.graphURL.path)")
     }
 
+    let diagnosticCatalog = catalogIndexed ? try store.indexedFiles() : []
     for (action, value) in actions {
         let t = DispatchTime.now()
         switch action {
+        case "--unified":
+            let query = UnifiedSearchQuery(raw: value!)
+            let response = try store.unifiedSearch(query, limit: limit, catalogFiles: diagnosticCatalog)
+            let elapsed = ms(since: t)
+            for result in response.results {
+                let kind = result.isDirectory ? "folder" : "file"
+                print("[\(kind)] \(result.file.relativePath)  score=\(fmt(result.score, 2))")
+                result.hits.forEach { print("  " + line($0)) }
+                if let coverage = result.coverage { print("  " + coverage) }
+            }
+            if !query.summary.isEmpty { err(query.summary.joined(separator: " · ")) }
+            if let notice = response.notice { err(notice) }
+            err("\(response.results.count) unified results in \(fmt(elapsed, 2))ms")
+        case "--family":
+            let family = try store.fileFamily(for: FileRef(relativePath: value!), limit: limit)
+            let elapsed = ms(since: t)
+            for member in family.members {
+                print("[\(member.kind.label)] \(member.file.relativePath)  \(member.reason)")
+                if let comparison = member.comparison {
+                    print("  \(comparison.sharedSections) shared extracted sections; \(comparison.scope)")
+                    for evidence in comparison.selectedOnly { print("  Selected only: \(evidence.anchor?.rendered ?? "") \(evidence.excerpt)") }
+                    for evidence in comparison.candidateOnly { print("  Candidate only: \(evidence.anchor?.rendered ?? "") \(evidence.excerpt)") }
+                }
+            }
+            family.notes.forEach { err($0) }
+            err("\(family.members.count) family members in \(fmt(elapsed, 2))ms")
         case "--search":
             let hits = try store.search(value!, limit: limit)
             let elapsed = ms(since: t)
@@ -166,6 +220,59 @@ do {
             try store.files(matching: value!, limit: limit).forEach { print($0.relativePath) }
         case "--recent":
             try store.recent(limit: limit).forEach { print($0.relativePath) }
+        case "--semantic":
+            let hits = try store.semanticSearch(value!, limit: limit)
+            let elapsed = ms(since: t)
+            for h in hits {
+                print("\(fmt(h.relevance, 2))  cos \(fmt(h.score, 3))  \(line(h.hit))")
+            }
+            err("\(hits.count) passages in \(fmt(elapsed, 2))ms · \(store.semanticStatus().model ?? "no model")")
+        case "--hybrid":
+            let response = try store.unifiedSearch(UnifiedSearchQuery(raw: value!), limit: limit, includeSemantic: true)
+            let elapsed = ms(since: t)
+            for result in response.results {
+                print("[\(result.isDirectory ? "folder" : "file")] \(result.file.relativePath)  score=\(fmt(result.score, 2))")
+                result.hits.prefix(2).forEach { print("  " + line($0)) }
+            }
+            err("\(response.results.count) results in \(fmt(elapsed, 2))ms")
+        case "--similar":
+            let similar = try store.similarFiles(to: FileRef(relativePath: value!), limit: limit)
+            let elapsed = ms(since: t)
+            for s in similar { print("\(fmt(s.score, 3))  \(s.file.relativePath)  \(s.passage ?? "")") }
+            err("\(similar.count) similar files in \(fmt(elapsed, 2))ms")
+        case "--pairs":
+            let minScore = value.flatMap(Double.init) ?? store.similarityFloor()
+            let pairs = try store.similarPairs(minScore: minScore, perFile: 3)
+            let elapsed = ms(since: t)
+            for p in pairs.prefix(limit) { print("\(fmt(p.score, 3))  \(p.a)  ↔  \(p.b)") }
+            err("\(pairs.count) pairs ≥ \(fmt(minScore, 2)) in \(fmt(elapsed, 1))ms")
+        case "--embed":
+            var total = 0
+            while true {
+                let n = store.embedPending()
+                total += n
+                let status = store.semanticStatus()
+                err("\(status.model ?? "no model"): \(status.embedded)/\(status.total) sections, \(status.embeddedComments)/\(status.comments) thoughts")
+                if n == 0 || status.embedded >= status.total { break }
+            }
+            err("embedded \(total) sections in \(fmt(ms(since: t) / 1000, 1))s")
+        case "--eval":
+            let data = try Data(contentsOf: URL(fileURLWithPath: value!))
+            let cases = try JSONDecoder().decode([SemanticEval.Case].self, from: data)
+            func files(_ r: UnifiedSearchResponse) -> [String] { r.results.filter { !$0.isDirectory }.map(\.file.relativePath) }
+            let modes: [(String, (String) throws -> [String])] = [
+                ("lexical", { try store.search($0, inFolder: nil, limit: 20, includeSemantic: false).map(\.file.relativePath) }),
+                ("semantic-only", { try store.semanticSearch($0, limit: 50).map(\.hit.file.relativePath) }),
+                ("hybrid search()", { try store.search($0, limit: 20).map(\.file.relativePath) }),
+                ("sections (Ask)", { try store.searchSections($0, limit: 30).map(\.file.relativePath) }),
+                ("palette lexical", { files(try store.unifiedSearch(UnifiedSearchQuery(raw: $0), limit: 20)) }),
+                ("palette semantic", { files(try store.unifiedSearch(UnifiedSearchQuery(raw: $0), limit: 20, includeSemantic: true)) }),
+            ]
+            let reports = try modes.map { try SemanticEval.run(cases, mode: $0.0, rank: $0.1) }
+            print(SemanticEval.table(reports))
+            for r in reports where r.mode == "palette semantic" {
+                for m in r.misses { print("  \(m.rank.map(String.init) ?? "-")  \(m.query)  →  \(m.top.joined(separator: ", "))") }
+            }
         case "--backlinks":
             for (ref, c) in try store.backlinks(to: FileRef(relativePath: value!)).prefix(limit) {
                 print("\(ref.relativePath)\(c.anchor.map { "  \($0.rendered)" } ?? "")  \(c.text.replacingOccurrences(of: "\n", with: " "))")
@@ -177,6 +284,7 @@ do {
             }
             print(try store.text(of: ref) ?? "(not indexed)")
         case "--graph":
+            guard let graph else { break }
             let byKind = Dictionary(grouping: graph.edges, by: \.kind)
             let orphans = graph.nodes.filter { !FileManager.default.fileExists(atPath: vault.url(for: FileRef(relativePath: $0.id)).path) }
             print("\(graph.nodes.count) nodes (\(orphans.count) without a file), "

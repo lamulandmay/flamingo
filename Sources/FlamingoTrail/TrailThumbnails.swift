@@ -47,7 +47,19 @@ final class TrailThumbnails {
     /// Includes the modification date, so an edited file gets a fresh thumbnail and a file
     /// that failed once (still being written, say) is tried again once it changes.
     private func key(_ url: URL, _ side: CGFloat) -> String {
-        let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        return "\(Int(side))|\(modified?.timeIntervalSinceReferenceDate ?? 0)|\(url.path)"
+        "\(Int(side))|\(modified(url)?.timeIntervalSinceReferenceDate ?? 0)|\(url.path)"
+    }
+
+    /// Every thumbnail row asks for its key several times per render, on the main thread.
+    /// A modification date read in the last second is reused instead of another stat.
+    private var stamps: [String: (modified: Date?, read: TimeInterval)] = [:]
+
+    private func modified(_ url: URL) -> Date? {
+        let path = url.path, now = ProcessInfo.processInfo.systemUptime
+        if let s = stamps[path], now - s.read < 1 { return s.modified }
+        if stamps.count > 2000 { stamps.removeAll(keepingCapacity: true) }
+        let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        stamps[path] = (date, now)
+        return date
     }
 }

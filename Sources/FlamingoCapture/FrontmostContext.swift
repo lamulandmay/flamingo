@@ -11,6 +11,7 @@ import FlamingoCore
 public struct FrontmostContext: Sendable {
     public var appBundleID: String
     public var documentURL: URL?
+    public var sourceURL: URL? = nil
     public var anchor: FileAnchor?
     public var pid: pid_t = 0
     public var appName: String? = nil
@@ -43,7 +44,7 @@ public struct FrontmostContext: Sendable {
     /// (the deepest root wins when vaults nest). Code editors without `AXDocument` (VS Code)
     /// fall back to the window title naming exactly one vault file. Still non-nil when nothing
     /// matched, so the caller can fall back to an inbox note.
-    public static func current(in vaults: [Vault]) -> FrontmostContext? {
+    public static func current(in vaults: [Vault], candidates: [Vault: [FileRef]] = [:]) -> FrontmostContext? {
         guard var ctx = probe() else { return nil }
         guard !ctx.isFlamingo, !vaults.isEmpty else { return ctx }
         if let url = ctx.documentURL {
@@ -51,7 +52,7 @@ public struct FrontmostContext: Sendable {
                 ctx.vault = v; ctx.file = f
             }
         } else if titleFallbackApps(ctx.appBundleID), let title = ctx.windowTitle,
-                  let (v, f) = titleMatch(title, in: vaults) {
+                  let (v, f) = titleMatch(title, in: vaults, candidates: candidates) {
             ctx.vault = v; ctx.file = f
             ctx.documentURL = v.url(for: f)
         }
@@ -105,6 +106,7 @@ public struct FrontmostContext: Sendable {
         ctx.windowTitle = window?.title
         ctx.windowFrame = window?.frame
         ctx.documentURL = window?.documentURL
+        ctx.sourceURL = window?.sourceURL
 
         if let scripted = AnchorScripts.run(bundleID: ctx.appBundleID) {
             let pathWins = AnchorScripts.probes[ctx.appBundleID]?.pathWins ?? false
@@ -122,7 +124,22 @@ public struct FrontmostContext: Sendable {
         if ctx.anchor == nil, ctx.appBundleID == "com.apple.Preview" {
             ctx.anchor = AnchorFormat.page(fromTitle: ctx.windowTitle)
         }
+        if ctx.sourceURL == nil { ctx.sourceURL = ctx.documentURL ?? browserURL(bundleID: ctx.appBundleID) }
         return ctx
+    }
+
+    private static func browserURL(bundleID: String) -> URL? {
+        let expression: String
+        switch bundleID {
+        case "com.apple.Safari": expression = "URL of current tab of front window"
+        case "com.google.Chrome", "com.microsoft.edgemac", "company.thebrowser.Browser": expression = "URL of active tab of front window"
+        default: return nil
+        }
+        let script = NSAppleScript(source: "with timeout of 1 seconds\n tell application id \"\(bundleID)\" to return \(expression)\nend timeout")
+        var error: NSDictionary?
+        guard let raw = script?.executeAndReturnError(&error).stringValue, error == nil,
+              let url = URL(string: raw), ["http", "https"].contains(url.scheme ?? "") else { return nil }
+        return url
     }
 
     // MARK: Vault matching
@@ -171,9 +188,13 @@ public struct FrontmostContext: Sendable {
     /// Exactly one vault file whose name stands as a whole token in `title`
     /// (`● q3.pptx — decks`), else nil.
     static func titleMatch(_ title: String, in vaults: [Vault]) -> (Vault, FileRef)? {
+        titleMatch(title, in: vaults, candidates: Dictionary(uniqueKeysWithValues: vaults.map { ($0, TitleIndex.files(in: $0)) }))
+    }
+
+    static func titleMatch(_ title: String, in vaults: [Vault], candidates: [Vault: [FileRef]]) -> (Vault, FileRef)? {
         var hits: [(Vault, FileRef)] = []
         for v in vaults {
-            for f in TitleIndex.files(in: v) where titleContains(title, name: f.name) {
+            for f in candidates[v] ?? [] where titleContains(title, name: f.name) {
                 hits.append((v, f))
                 if hits.count > 1 { return nil }
             }
