@@ -120,6 +120,12 @@ enum FinderSettings {
     }
     static var showsAllFiles: Bool { value("AppleShowAllFiles") }
     static var foldersFirst: Bool { value("_FXSortFoldersFirst") }
+    /// Spring-loaded folders (Accessibility → Pointer Control): the delay, or nil when off.
+    static var springDelay: TimeInterval? {
+        let d = UserDefaults.standard
+        guard d.object(forKey: "com.apple.springing.enabled") as? Bool ?? true else { return nil }
+        return d.object(forKey: "com.apple.springing.delay") as? Double ?? 0.5
+    }
 }
 
 extension AppState {
@@ -185,6 +191,86 @@ extension AppState {
             NSSound.beep()
         }
     }
+
+    /// Files dropped or pasted into `folder`, anywhere on the Mac. A move inside the vault
+    /// goes through `move(_:into:)` so thoughts follow; the rest is the file system's, off
+    /// the main thread, a copy taking Finder's "copy" name when the name is taken.
+    func transfer(_ urls: [URL], into folder: URL, moving: Bool) {
+        var rest: [URL] = []
+        for url in urls {
+            if moving, let v = vault, let from = v.relativePath(of: url), !from.isEmpty, !v.isState(url),
+               let into = v.relativePath(of: folder), !v.isState(folder) {
+                move(from, into: into)
+            } else {
+                rest.append(url)
+            }
+        }
+        guard !rest.isEmpty else { return }
+        Task {
+            let failed = await Task.detached(priority: .userInitiated) {
+                FileDrop.transfer(rest, into: folder, moving: moving)
+            }.value
+            if let failed { showToast(ToastMessage(text: "Couldn't \(moving ? "move" : "copy") “\(failed)”")) }
+        }
+    }
+}
+
+/// Finder's rules for dropping and pasting files into a folder.
+enum FileDrop {
+    /// Somewhere `url` can go: not where it already is, not into itself.
+    static func canDrop(_ url: URL, into folder: URL) -> Bool {
+        url.deletingLastPathComponent().path != folder.path
+            && folder.path != url.path && !folder.path.hasPrefix(url.path + "/")
+    }
+
+    /// A move on the same disk, a copy onto another; ⌥ copies, ⌘ moves. `keepsThoughts`
+    /// is false when a vault file would leave the vault, which then copies so its thoughts
+    /// aren't left behind.
+    static func operation(_ urls: [URL], into folder: URL, mask: NSDragOperation, keepsThoughts: Bool) -> NSDragOperation {
+        let canMove = !mask.isDisjoint(with: [.move, .generic]) && keepsThoughts
+        let canCopy = mask.contains(.copy)
+        if canMove, !canCopy || urls.allSatisfy({ sameVolume($0, folder) }) { return .move }
+        return canCopy ? .copy : []
+    }
+
+    static func sameVolume(_ a: URL, _ b: URL) -> Bool {
+        let key: Set<URLResourceKey> = [.volumeIdentifierKey]
+        guard let va = (try? a.resourceValues(forKeys: key))?.volumeIdentifier,
+              let vb = (try? b.resourceValues(forKeys: key))?.volumeIdentifier else { return false }
+        return va.isEqual(vb)
+    }
+
+    /// Moves or copies each file into `folder`; the name of the last one that failed.
+    static func transfer(_ urls: [URL], into folder: URL, moving: Bool) -> String? {
+        let fm = FileManager.default
+        var failed: String?
+        for url in urls {
+            var dest = folder.appendingPathComponent(url.lastPathComponent)
+            if fm.fileExists(atPath: dest.path) {
+                // Finder asks before replacing; a move here never replaces.
+                if moving { failed = url.lastPathComponent; continue }
+                dest = copyName(for: url, in: folder)
+            }
+            do {
+                if moving { try fm.moveItem(at: url, to: dest) } else { try fm.copyItem(at: url, to: dest) }
+            } catch {
+                failed = url.lastPathComponent
+            }
+        }
+        return failed
+    }
+
+    /// "name copy.ext", then "name copy 2.ext", as Finder names a duplicate.
+    static func copyName(for url: URL, in folder: URL) -> URL {
+        let ext = url.pathExtension, base = url.deletingPathExtension().lastPathComponent
+        var n = 1
+        while true {
+            let name = base + (n == 1 ? " copy" : " copy \(n)") + (ext.isEmpty ? "" : "." + ext)
+            let candidate = folder.appendingPathComponent(name)
+            if !FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+            n += 1
+        }
+    }
 }
 
 // MARK: - The view
@@ -192,7 +278,8 @@ extension AppState {
 /// Finder's column view: one list per folder, side by side, the selection in each column
 /// opening the next, a preview at the end for a file. Arrow keys walk it (← → between
 /// columns), typing selects by name, Space is Quick Look, ⌘↓ or a double-click opens,
-/// ⌘↑ goes to the enclosing folder, ⇧⌘. shows hidden files. Drag a column's edge to
+/// ⌘↑ goes to the enclosing folder, ⇧⌘. shows hidden files. Drop files on a folder (rest
+/// on it to open it) or paste them with ⌘V. Drag a column's edge to
 /// resize it (⌥ for all), double-click the edge to fit. Built from `NSTableView`s so
 /// keyboard, type-select, scrolling and drag-out are the system's.
 struct ColumnBrowser: NSViewRepresentable {
@@ -241,6 +328,8 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     private var suppress = 0
     /// A column the keyboard should land in once it has listed its folder.
     private var pendingFocus: Int?
+    /// The folder row a drag is hovering, opening once the spring delay passes.
+    private var spring: (table: NSTableView, row: Int, work: DispatchWorkItem)?
 
     init(state: AppState, model: ColumnBrowserModel) {
         self.state = state
@@ -320,6 +409,7 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
         table.menu = menu
         table.setDraggingSourceOperationMask([.copy, .move], forLocal: true)
         table.setDraggingSourceOperationMask(.copy, forLocal: false)
+        table.registerForDraggedTypes([.fileURL])
         table.setAccessibilityLabel(FileManager.default.displayName(atPath: url.path))
         column.grip.onDrag = { [weak self, weak column] dx, all in
             guard let self, let column, let i = self.columns.firstIndex(where: { $0 === column }) else { return }
@@ -647,6 +737,82 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
         return FileHandoff.pasteboardItem(url: url, relativePath: vaultPath(url))
     }
 
+    // MARK: Drop and paste
+
+    /// Onto a folder's row, that folder; anywhere else in a column, the column's folder.
+    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
+                   proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+        springLoad(tableView, row: dropOperation == .on ? row : -1)
+        let urls = FileHandoff.fileURLs(on: info.draggingPasteboard)
+        guard let folder = dropFolder(in: tableView, row: dropOperation == .on ? row : -1), !urls.isEmpty,
+              urls.allSatisfy({ FileDrop.canDrop($0, into: folder) }) else { return [] }
+        if folder == index(of: tableView).map({ columns[$0].url }) { tableView.setDropRow(-1, dropOperation: .on) }
+        return dragOperation(urls, into: folder, mask: info.draggingSourceOperationMask)
+    }
+
+    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int,
+                   dropOperation: NSTableView.DropOperation) -> Bool {
+        cancelSpring()
+        let urls = FileHandoff.fileURLs(on: info.draggingPasteboard)
+        guard let folder = dropFolder(in: tableView, row: row), !urls.isEmpty else { return false }
+        let operation = dragOperation(urls, into: folder, mask: info.draggingSourceOperationMask)
+        guard !operation.isEmpty else { return false }
+        state.transfer(urls, into: folder, moving: operation == .move)
+        return true
+    }
+
+    /// Finder's spring-loading: a drag that rests on a folder opens it, so you can go deeper
+    /// without letting go. Even a folder that can't take the drop opens, to reach inside it.
+    private func springLoad(_ table: NSTableView, row: Int) {
+        if let spring, spring.table === table, spring.row == row { return }
+        cancelSpring()
+        guard row >= 0, row != table.selectedRow, let delay = FinderSettings.springDelay,
+              let i = index(of: table), dropFolder(in: table, row: row) != columns[i].url else { return }
+        let work = DispatchWorkItem { [weak self, weak table] in
+            guard let self, let table, row < table.numberOfRows else { return }
+            self.spring = nil
+            table.selectRowIndexes([row], byExtendingSelection: false)
+        }
+        spring = (table, row, work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    fileprivate func cancelSpring() {
+        spring?.work.cancel()
+        spring = nil
+    }
+
+    /// ⌘V copies the clipboard's files in, ⌥⌘V moves them, as Finder's Move Item Here:
+    /// into the selected folder, or else this column's folder.
+    fileprivate func paste(in table: NSTableView, moving: Bool) {
+        guard let folder = dropFolder(in: table, row: table.selectedRow) else { return }
+        paste(into: folder, moving: moving)
+    }
+
+    private func paste(into folder: URL, moving: Bool) {
+        let urls = FileHandoff.fileURLs(on: .general)
+        guard !urls.isEmpty else { NSSound.beep(); return }
+        state.transfer(urls, into: folder, moving: moving && keepsThoughts(urls, into: folder))
+    }
+
+    private func dropFolder(in table: NSTableView, row: Int) -> URL? {
+        guard let i = index(of: table) else { return nil }
+        guard row >= 0, row < columns[i].entries.count else { return columns[i].url }
+        let entry = columns[i].entries[row]
+        if entry.isFolder { return entry.url }
+        if entry.isAlias, let target = Self.resolveFolderAlias(entry.url) { return target }
+        return columns[i].url
+    }
+
+    private func dragOperation(_ urls: [URL], into folder: URL, mask: NSDragOperation) -> NSDragOperation {
+        FileDrop.operation(urls, into: folder, mask: mask, keepsThoughts: keepsThoughts(urls, into: folder))
+    }
+
+    /// False when a vault file would leave the vault, and its thoughts with it.
+    private func keepsThoughts(_ urls: [URL], into folder: URL) -> Bool {
+        !urls.contains { vaultPath($0) != nil } || state.vault?.relativePath(of: folder) != nil
+    }
+
     // MARK: Context menu
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -654,6 +820,13 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
         guard let column = columns.first(where: { $0.table.menu === menu }) else { return }
         let row = column.table.contextRow
         guard row >= 0, row < column.entries.count else {
+            let pasted = FileHandoff.fileURLs(on: .general).count
+            if pasted > 0 {
+                menu.addItem(ActionItem(pasted == 1 ? "Paste Item" : "Paste \(pasted) Items") { [weak self] in
+                    self?.paste(into: column.url, moving: false)
+                })
+                menu.addItem(.separator())
+            }
             menu.addItem(ActionItem("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([column.url]) })
             menu.addItem(ActionItem(model.showHidden ? "Hide Hidden Files" : "Show Hidden Files") { [weak self] in self?.toggleHidden() })
             return
@@ -761,7 +934,7 @@ private final class BrowserColumn {
     var loaded = false
     var generation = 0
     let table = ColumnTableView()
-    let scroll = NSScrollView()
+    let scroll = ColumnScrollView()
     let grip = ColumnGrip()
     var watcher: DirectoryWatcher?
 
@@ -798,6 +971,20 @@ private final class BrowserColumn {
         scroll.contentInsets = NSEdgeInsets(top: Theme.Space.xs, left: 0, bottom: Theme.Space.s, right: 0)
         scroll.documentView = table
         table.sizeLastColumnToFit()
+    }
+}
+
+/// A column's scroller. Up and down is its own; a sideways pan (or ⇧ with a wheel) goes
+/// to the strip, so the columns slide under the fingers as in Finder.
+private final class ColumnScrollView: NSScrollView {
+    private var sideways = false
+
+    override func scrollWheel(with event: NSEvent) {
+        // Decided once per gesture, so its momentum keeps going the same way.
+        if event.phase == .began || (event.phase.isEmpty && event.momentumPhase.isEmpty) {
+            sideways = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
+        }
+        if sideways, let strip = enclosingScrollView { strip.scrollWheel(with: event) } else { super.scrollWheel(with: event) }
     }
 }
 
@@ -863,6 +1050,7 @@ private final class ColumnTableView: NSTableView {
         case (51, .command): if !event.isARepeat, browser?.trashSelection(in: self) == true { return true }  // ⌘⌫
         case (47, [.command, .shift]): browser?.toggleHidden(); return true                         // ⇧⌘.
         case (16, .command): toggleQuickLook(); return true                                         // ⌘Y
+        case (9, [.command, .option]): browser?.paste(in: self, moving: true); return true          // ⌥⌘V
         default: break
         }
         return super.performKeyEquivalent(with: event)
@@ -871,6 +1059,16 @@ private final class ColumnTableView: NSTableView {
     @objc func copy(_ sender: Any?) {
         guard window?.firstResponder === self else { return }
         _ = browser?.copySelection(in: self)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        super.draggingExited(sender)
+        browser?.cancelSpring()
+    }
+
+    @objc func paste(_ sender: Any?) {
+        guard window?.firstResponder === self else { return }
+        browser?.paste(in: self, moving: false)
     }
 
     private func toggleQuickLook() {
@@ -960,6 +1158,12 @@ private final class ColumnRowView: NSTableRowView {
         ring.lineWidth = 1
         Theme.NS.accent.withAlphaComponent(0.55).setStroke()
         ring.stroke()
+    }
+
+    /// A folder about to take a drop lights up like a selection.
+    override func drawDraggingDestinationFeedback(in dirtyRect: NSRect) {
+        Theme.NS.selection.setFill()
+        NSBezierPath(squircleIn: bounds.insetBy(dx: Theme.Space.s, dy: 0), radius: Theme.Radius.s).fill()
     }
 
     override func drawSelection(in dirtyRect: NSRect) {

@@ -44,6 +44,12 @@ enum FileHandoff {
         pasteboard.clearContents()
         return pasteboard.writeObjects(files)
     }
+
+    /// The files on a pasteboard: a Finder copy, or a drag from Finder or Flamingo.
+    static func fileURLs(on pasteboard: NSPasteboard) -> [URL] {
+        let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        return urls.map { ColumnBrowserModel.normal($0) }
+    }
 }
 
 extension AppState {
