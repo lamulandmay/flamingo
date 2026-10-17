@@ -2,7 +2,7 @@ import SwiftUI
 import FlamingoCore
 import FlamingoDesign
 
-/// The ⌘⌥ ring: a squircle plate with up to eight recent files around a hub that names the
+/// The ⌘⌥ ring: a round plate with up to eight recent files around a hub that names the
 /// highlighted one. Slot 0 is at 12 o'clock and the rest follow clockwise in rank order. With
 /// four files or fewer the four compass slots are drawn larger. No labels; the hub shows only
 /// the file's own name, folder and times. It never takes hits, so clicks reach the app.
@@ -27,7 +27,7 @@ struct RadialRecentsView: View {
     }
 
     private var ring: some View {
-        let plate = Squircle(radius: 104)
+        let plate = Circle()
         let tile: CGFloat = radial.slotCount == 4 ? 72 : 56
         return ZStack {
             plate
@@ -47,12 +47,12 @@ struct RadialRecentsView: View {
     }
 
     private var hub: some View {
-        let shape = Squircle(radius: 36)
+        let shape = Circle()
         return ZStack {
             shape.fill(Theme.Color.fill)
             if let index = radial.highlight, radial.entries.indices.contains(index) {
                 RadialHubInfo(entry: radial.entries[index])
-                    .padding(Theme.Space.s)
+                    .padding(Theme.Space.m)
             }
         }
         .frame(width: Self.hub, height: Self.hub)

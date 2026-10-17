@@ -119,7 +119,7 @@ Finder's own glyphs. Column rows use real system icons, like thumbnails, because
 user's data.
 
 *Recent files.* Hold ⌘⌥ for a moment: up to eight recent files form a ring around the pointer on a
-squircle plate; flick toward one, let go to open it. Nothing highlighted, nothing opens. The hub names
+round plate (a circle, because it is a dial, not a panel); flick toward one, let go to open it. Nothing highlighted, nothing opens. The hub names
 the file, its folder and when you last touched it. A dot marks files you edited. Never labelled.
 
 There is no status bar. Indexing shows as a 2pt accent line under the title bar; a warning
