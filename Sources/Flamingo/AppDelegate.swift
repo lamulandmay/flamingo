@@ -69,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Leave the Carbon callback before showing the nonactivating search panel.
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                self.state.briefing.noteGlobalPalette()
                 PaletteController.shared.showFromAnyApp(state: self.state)
             }
         }
@@ -79,6 +80,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else {
             state.restoreLastVault()
         }
+        state.briefing.recoverInterruptedZoom()
+        state.briefing.install()
+        state.briefing.catchUp = { [weak state] onEvent in _ = await state?.nightShiftCatchUp(onEvent: onEvent) }
+        state.briefing.now = { AppState.now }
         // The rail's local graph takes first responder as it appears; keys start in the sidebar.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self, let w = self.window, !(w.firstResponder is NSText) else { return }
@@ -88,6 +93,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // Dock drops and `open -a Flamingo <folder>`.
     func application(_ application: NSApplication, open urls: [URL]) {
+        state.briefing.noteOpenFileRequest()
         state.handleDropped(urls)
     }
 
@@ -158,6 +164,12 @@ enum AppIcon {
 /// keyboard after one arrow press. Outside Graph mode the canvas gets focus only by a click.
 final class MainWindow: NSWindow {
     static var isGraphMode: () -> Bool = { false }
+    /// Set around a `setFrame(animate: true)` that should take this long (the briefing's zoom).
+    static var animationDuration: TimeInterval?
+
+    override func animationResizeTime(_ newFrame: NSRect) -> TimeInterval {
+        Self.animationDuration ?? super.animationResizeTime(newFrame)
+    }
 
     override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
         if let view = responder as? NSView, String(describing: type(of: view)) == "GraphInputNSView",

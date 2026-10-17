@@ -71,25 +71,13 @@ private struct RootLayout: View {
                 }
             }
             .ignoresSafeArea()
+            .overlay { BriefingOverlay(model: state.briefing, topInset: titlebar).ignoresSafeArea() }
         }
         .tint(Theme.Color.accent)
         .animation(Theme.Motion.normal, value: state.wander != nil)
         .animation(Theme.Motion.normal, value: state.connectGridShown)
         .sheet(isPresented: $state.isNewFilePresented) { NewFileSheet().environmentObject(state) }
         .sheet(isPresented: $state.isHealthPresented) { IndexHealthSheet(indexing: state.indexing).environmentObject(state) }
-        .sheet(isPresented: $state.isInboxPresented) {
-            if let vault = state.vault {
-                VStack(spacing: 0) {
-                    HStack { Spacer(); IconButton("xmark", help: "Close") { state.isInboxPresented = false }.keyboardShortcut(.cancelAction) }
-                        .padding([.top, .trailing], Theme.Space.m)
-                    CaptureInboxView(vault: vault, files: state.files, onOpen: { file, anchor in
-                        state.isInboxPresented = false; state.jump(to: file, anchor: anchor)
-                    }, onAttach: { comment, source, target in
-                        try await state.attachInboxThought(comment, from: source, to: target)
-                    })
-                }.background(Theme.Color.bg)
-            }
-        }
         .overlay {
             Rectangle()
                 .strokeBorder(Theme.Color.accent, lineWidth: 1)
@@ -114,7 +102,10 @@ private struct RootLayout: View {
         } else {
             switch state.mode {
             case .files, .ask:
+                // The morning inbox covers the window; the panes stay mounted underneath.
                 PreviewPane()
+                    .opacity(state.briefing.isPresented ? 0 : 1)
+                    .allowsHitTesting(!state.briefing.isPresented)
             case .graph:
                 GraphView(graph: state.graph, selected: state.selected, vault: state.vault, scope: state.selectedFolder,
                           onSelectionChange: { state.select($0, source: .graph) },

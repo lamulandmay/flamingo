@@ -80,6 +80,8 @@ enum MainMenu {
             let item = viewMenu.addItem(withTitle: m.title, action: #selector(AppDelegate.setMode(_:)), keyEquivalent: String(m.rawValue + 1))
             item.tag = m.rawValue
         }
+        let inbox = viewMenu.addItem(withTitle: "Inbox", action: #selector(AppDelegate.showInbox(_:)), keyEquivalent: "0")
+        inbox.keyEquivalentModifierMask = [.command]
         viewMenu.addItem(.separator())
         for (i, style) in FolderStyle.allCases.enumerated() {
             let item = viewMenu.addItem(withTitle: style.title, action: #selector(AppDelegate.setFolderStyle(_:)), keyEquivalent: style.key)
@@ -240,8 +242,12 @@ extension AppDelegate: NSMenuItemValidation {
     }
     @objc func reindex(_ sender: Any?) { state.reindex(force: true) }
     @objc func setMode(_ sender: NSMenuItem) {
-        if let m = AppState.Mode(rawValue: sender.tag) { state.mode = m }
+        guard let m = AppState.Mode(rawValue: sender.tag) else { return }
+        // The morning inbox leaves first: ⌘1 puts everything back, ⌘2 and ⌘3 then switch.
+        if state.briefing.isPresented { state.briefing.close(thenMode: m == .files ? nil : m); return }
+        state.mode = m
     }
+    @objc func showInbox(_ sender: Any?) { state.showBriefing() }
     @objc func setFolderStyle(_ sender: NSMenuItem) { state.showFolderStyle(FolderStyle.allCases[sender.tag]) }
     @objc func goToPlace(_ sender: NSMenuItem) { if let url = sender.representedObject as? URL { state.openFavorite(url) } }
     @objc func toggleRail(_ sender: Any?) { state.toggleRail() }
@@ -286,6 +292,9 @@ extension AppDelegate: NSMenuItemValidation {
             let status = undoRouting?.menu(direction)
             item.title = status?.title ?? (direction == .undo ? "Undo" : "Redo")
             return status?.enabled == true
+        case #selector(showInbox(_:)):
+            item.state = state.briefing.isPresented ? .on : .off
+            return hasVault
         case #selector(setMode(_:)):
             let chat = item.tag == AppState.Mode.ask.rawValue
             item.state = chat ? (state.railShown && state.inspectorTab == .chat ? .on : .off) : (item.tag == state.mode.rawValue ? .on : .off)

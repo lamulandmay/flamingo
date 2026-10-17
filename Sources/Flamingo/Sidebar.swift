@@ -112,7 +112,7 @@ struct Ribbon: View {
             IconButton("square.and.pencil", help: "Create new note") { state.newNote() }
             IconButton("dice", help: "Open random file") { state.openRandomFile() }
             Spacer(minLength: 0)
-            IconButton("tray", help: "Capture inbox") { state.isInboxPresented = true }
+            IconButton("tray", help: "Inbox", isOn: state.briefing.isPresented) { state.showBriefing() }
         }
         .padding(.top, Theme.Space.xs)
         .padding(.bottom, Theme.Space.m)

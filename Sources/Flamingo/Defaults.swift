@@ -3,7 +3,10 @@ import FlamingoCore
 
 /// Every UserDefaults key the shell touches, in one place. Plan 01 owns.
 enum Defaults {
-    private static let d = UserDefaults.standard
+    /// `FLAMINGO_DEFAULTS_SUITE` points every setting here at another suite, so QA never touches
+    /// the real ones.
+    private static let d: UserDefaults = ProcessInfo.processInfo.environment["FLAMINGO_DEFAULTS_SUITE"]
+        .flatMap { UserDefaults(suiteName: $0) } ?? .standard
 
     static var lastVault: String? {
         get { d.string(forKey: "lastVault") }
@@ -113,6 +116,33 @@ enum Defaults {
     static var autoReveal: Bool {
         get { d.object(forKey: "autoReveal") as? Bool ?? true }
         set { d.set(newValue, forKey: "autoReveal") }
+    }
+
+    // MARK: Morning inbox
+
+    /// `yyyy-MM-dd` of the last briefing day the morning inbox opened (the day starts at 04:00).
+    static var lastBriefingDay: String? {
+        get { d.string(forKey: "lastBriefingDay") }
+        set { d.set(newValue, forKey: "lastBriefingDay") }
+    }
+
+    /// The "Morning Inbox" toggle: open the inbox the first time each day.
+    static var briefingAutoOpen: Bool {
+        get { d.object(forKey: "briefingAutoOpen") as? Bool ?? true }
+        set { d.set(newValue, forKey: "briefingAutoOpen") }
+    }
+
+    /// Memo paths (`vault|path`) and the briefing day each was first shown: new that day, seen after.
+    static var briefingMemoDays: [String: String] {
+        get { d.dictionary(forKey: "briefingMemoDays") as? [String: String] ?? [:] }
+        set { d.set(newValue, forKey: "briefingMemoDays") }
+    }
+
+    /// The window's frame from before the briefing zoomed it, while the briefing is up, so a quit
+    /// in the middle doesn't leave the window filling the screen.
+    static var briefingSavedFrame: String? {
+        get { d.string(forKey: "briefingSavedFrame") }
+        set { d.set(newValue, forKey: "briefingSavedFrame") }
     }
 
     // MARK: Per-vault memory

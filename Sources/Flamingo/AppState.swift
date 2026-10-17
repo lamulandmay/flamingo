@@ -225,6 +225,8 @@ final class AppState: ObservableObject {
     @Published var openFiles: [FileRef] = []
     @Published var isHealthPresented = false
     @Published var isInboxPresented = false
+    /// The morning inbox (see `AppState+Briefing.swift`).
+    lazy var briefing: BriefingModel = { let model = BriefingModel(); model.state = self; return model }()
     @Published var analysisMessage: String?
     @Published var continuityError: String?
     private var reconcilingRenames: VaultSession?
@@ -2087,7 +2089,6 @@ final class AppState: ObservableObject {
             PaletteCommand(id: "new-file", title: "New File…", keys: "⌘N", symbol: "doc.badge.plus", enabled: hasVault) { [weak self] in self?.showNewFile() },
             PaletteCommand(id: "connect-grid", title: "Connect Files", keys: "⌘J", symbol: "square.grid.3x3", enabled: hasVault) { [weak self] in self?.connectGridShown.toggle() },
             PaletteCommand(id: "health", title: "Workspace Health", keys: nil, symbol: "externaldrive", enabled: hasVault) { [weak self] in self?.isHealthPresented = true },
-            PaletteCommand(id: "inbox", title: "Capture Inbox", keys: nil, symbol: "tray", enabled: hasVault) { [weak self] in self?.isInboxPresented = true },
             PaletteCommand(id: "open", title: "Open Vault…", keys: "⌘O", symbol: "folder") { [weak self] in self?.openVaultDialog() },
             PaletteCommand(id: "search", title: "Search", keys: "⌘F", symbol: "magnifyingglass", enabled: hasVault) { [weak self] in self?.showPalette(.search) },
             PaletteCommand(id: "thought", title: "Leave a Thought", keys: "⌘⇧C", symbol: "text.bubble", enabled: hasVault) { [weak self] in self?.leaveThought() },
@@ -2103,6 +2104,7 @@ final class AppState: ObservableObject {
         }
         list += paneCommands
         list += thoughtCommands
+        list += briefingCommands
         list += [
             PaletteCommand(id: "split", title: splitVisible ? "Close Split View" : "Split View", keys: "⌘\\", symbol: "rectangle.split.2x1", enabled: hasVault) { [weak self] in self?.toggleSplit() },
             PaletteCommand(id: "open-beside", title: "Open Beside", keys: nil, symbol: "rectangle.split.2x1", enabled: hasFile) { [weak self] in if let self, let file = self.selected { self.openBeside(file, anchor: self.anchor) } },
