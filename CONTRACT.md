@@ -110,6 +110,7 @@ One `TrailEvent` JSON per line, append-only. `opened`, `commented`, `searched`, 
 | ⌘⌥I | Toggle the comments rail |
 | ⌘[ ⌘] | Back, forward |
 | ⌘↑ ⌘↓ or ⌥↑ ⌥↓ | Previous/next anchor (page, slide) in the preview |
+| ⌘⌥ (hold) | Recent files: a ring around the pointer; flick toward one, release to open it |
 | Esc | Dismiss |
 
 ## How the shell wires things (so you know where your work shows up)

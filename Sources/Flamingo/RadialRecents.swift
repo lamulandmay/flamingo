@@ -413,6 +413,7 @@ final class RadialRecentsController {
     func qaOrigin(x: Double, y: Double) {
         guard let height = window?.contentView?.bounds.height else { return }
         qaOrigin = CGPoint(x: x, y: height - y)
+        if qaPointer == nil { qaPointer = .zero }   // a fixed origin means a fixed pointer
     }
 
     func qaReset() { qaKeyWindowOverride = false; qaPointer = nil; qaOrigin = nil }
