@@ -233,12 +233,76 @@ struct TileArrangement: Codable, Equatable {
     }
 }
 
+/// The side panels the layout may fold away to give tiles room.
+enum TilePanel: String, Hashable { case inspector, sidebar }
+
+/// Pure decisions about folding panels for a layout. Every column wants `minColumn` points; when the
+/// window can't give that, the inspector folds first, then the left sidebar (the ribbon stays).
+enum TilePanels {
+    static let minColumn: CGFloat = 260
+
+    /// What the columns of `layout` need, gaps included.
+    static func needed(_ layout: TileLayout) -> CGFloat {
+        CGFloat(layout.columnCount) * minColumn + CGFloat(layout.columnCount - 1) * TileLayout.gap
+    }
+
+    /// Widths of what is on screen. `sidebar` and `inspector` are 0 when folded or hidden; each
+    /// includes its separator.
+    struct Space: Equatable {
+        var window: CGFloat
+        var ribbon: CGFloat
+        var sidebar: CGFloat
+        var inspector: CGFloat
+        var content: CGFloat { window - ribbon - sidebar - inspector }
+    }
+
+    /// Which shown panels to fold so `layout` fits. Never more than needed; best effort when even
+    /// both folded can't reach it.
+    static func hide(for layout: TileLayout, _ space: Space) -> Set<TilePanel> {
+        guard layout.columnCount > 1 else { return [] }
+        let need = needed(layout)
+        if space.content >= need { return [] }
+        var out = Set<TilePanel>()
+        if space.inspector > 0 { out.insert(.inspector) }
+        if space.content + space.inspector >= need { return out }
+        if space.sidebar > 0 { out.insert(.sidebar) }
+        return out
+    }
+
+    /// Which auto-hidden panels may come back for `layout` without squeezing it below the
+    /// minimum. `space` is the current one; `autoHidden` carries each panel's width if restored.
+    static func restore(_ autoHidden: [TilePanel: CGFloat], for layout: TileLayout, _ space: Space) -> Set<TilePanel> {
+        let need = layout.columnCount > 1 ? needed(layout) : 0
+        var content = space.content
+        var out = Set<TilePanel>()
+        // The sidebar went last, so it returns first.
+        for panel in [TilePanel.sidebar, .inspector] {
+            guard let width = autoHidden[panel] else { continue }
+            if content - width >= need { out.insert(panel); content -= width }
+        }
+        return out
+    }
+
+    /// Can `layout` reach the minimum column width even with both panels folded?
+    static func reachable(_ layout: TileLayout, window: CGFloat, ribbon: CGFloat) -> Bool {
+        layout.columnCount <= 1 || window - ribbon >= needed(layout)
+    }
+}
+
 /// The layout the content area is in. Observed by the shell; `geometry` is separate so a
 /// divider drag redraws only the container.
 @MainActor
 final class PaneTiling: ObservableObject {
     @Published private(set) var arrangement = TileArrangement()
     let geometry: TileGeometry
+    /// Panels folded to make room, with the width each took. Not published: it only matters when the layout changes.
+    var autoHidden: [TilePanel: CGFloat] = Defaults.tileAutoHidden { didSet { if autoHidden != oldValue { Defaults.tileAutoHidden = autoHidden } } }
+    /// True while the shell itself folds or restores panels, so that isn't mistaken for the user opening one.
+    var applyingPanels = false
+    /// The user opened a panel by hand: it is theirs again, nothing will restore it later.
+    func userOpened(_ panel: TilePanel) { if !applyingPanels { autoHidden[panel] = nil } }
+    /// The window width the panels were last fitted for; a resize only folds when it narrows.
+    var lastFitWidth: CGFloat = 0
 
     init(geometry: TileGeometry? = nil) { self.geometry = geometry ?? TileGeometry() }
 

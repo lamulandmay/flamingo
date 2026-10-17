@@ -1,5 +1,7 @@
 import AppKit
+import SwiftUI
 import FlamingoCore
+import FlamingoDesign
 
 /// Panes and layouts. `AppState` owns four panes; `tiling.arrangement` says how many show and
 /// where. Selection still mirrors the active pane exactly as it did with two.
@@ -17,9 +19,9 @@ extension AppState {
     /// pane that must stay (the one whose ••• was clicked); the active pane by default.
     func setLayout(_ layout: TileLayout, from anchor: DocumentPaneID? = nil) {
         guard vault != nil, layout != tiling.arrangement.kind else { return }
-        let before = undoWorkspaceSnapshot(), wasSuppressed = suppressActionHistory
+        let before = undoWorkspaceSnapshot(), panelsBefore = panelState(), wasSuppressed = suppressActionHistory
         suppressActionHistory = true
-        defer { suppressActionHistory = wasSuppressed; recordWorkspaceChange("Change Layout", before: before) }
+        defer { suppressActionHistory = wasSuppressed }
         mode = .files
         let (arrangement, revealed) = tiling.arrangement.resized(to: layout, keeping: anchor ?? activePaneID)
         revealed.forEach { pane($0).reset() }
@@ -28,8 +30,70 @@ extension AppState {
             hostWindow?.makeFirstResponder(nil)
             pane(first).focusWhenReady()
         }
+        fitPanels(for: layout)
         persistWorkspace()
         logTiles("layout")
+        // Undo brings back the layout, the panes and the panels that were folded for it.
+        let after = undoWorkspaceSnapshot(), panelsAfter = panelState()
+        guard !openingVault, !wasSuppressed, !actionHistory.isApplying else { return }
+        actionHistory.register(name: "Change Layout",
+                               undo: { [weak self] in self?.restoreUndoWorkspace(before); self?.applyPanels(panelsBefore) },
+                               redo: { [weak self] in self?.restoreUndoWorkspace(after); self?.applyPanels(panelsAfter) })
+    }
+
+    // MARK: Making room
+
+    struct PanelState: Equatable {
+        var inspector: Bool, pinned: Bool, sidebarCollapsed: Bool
+        var autoHidden: [TilePanel: CGFloat]
+    }
+
+    func panelState() -> PanelState {
+        PanelState(inspector: railVisible, pinned: railPinned, sidebarCollapsed: sidebarCollapsed, autoHidden: tiling.autoHidden)
+    }
+
+    func applyPanels(_ state: PanelState) {
+        tiling.applyingPanels = true
+        withAnimation(Theme.Motion.normal) {
+            railVisible = state.inspector; railPinned = state.pinned; sidebarCollapsed = state.sidebarCollapsed
+        }
+        tiling.autoHidden = state.autoHidden
+        tiling.applyingPanels = false
+    }
+
+    /// What the window shows now, for deciding whether the tiles have room.
+    var tilePanelSpace: TilePanels.Space {
+        TilePanels.Space(window: windowWidth, ribbon: Ribbon.width + Theme.Size.hairline,
+                         sidebar: sidebarCollapsed ? 0 : Theme.Size.hairline + sidebarWidth,
+                         inspector: railShown ? Theme.Size.hairline + layout.rightWidth : 0)
+    }
+
+    /// Folds the inspector, then the sidebar, when `layout` can't give each column its width; brings
+    /// back exactly what was folded here once a layout (or window) has room again. A panel the user
+    /// reopened is theirs: it's dropped from the list and never touched.
+    func fitPanels(for layout: TileLayout, allowHide: Bool = true) {
+        let space = tilePanelSpace
+        let hide = allowHide ? TilePanels.hide(for: layout, space) : []
+        let restore = hide.isEmpty ? TilePanels.restore(tiling.autoHidden, for: layout, space) : []
+        guard !hide.isEmpty || !restore.isEmpty else { return }
+        tiling.applyingPanels = true
+        withAnimation(Theme.Motion.normal) {
+            if hide.contains(.inspector) { railVisible = false; railPinned = false; tiling.autoHidden[.inspector] = space.inspector }
+            if hide.contains(.sidebar) { sidebarCollapsed = true; tiling.autoHidden[.sidebar] = space.sidebar }
+            if restore.contains(.sidebar) { sidebarCollapsed = false }
+            if restore.contains(.inspector) { railVisible = true; railPinned = windowWidth < AppState.narrowWindow }
+            for panel in restore { tiling.autoHidden[panel] = nil }
+        }
+        tiling.applyingPanels = false
+        Log.debug("tiles: panels hide=\(hide.map(\.rawValue).sorted()) restore=\(restore.map(\.rawValue).sorted())")
+    }
+
+    /// A tiled window that gets narrower folds panels; one that gets wider gives them back.
+    func windowResizedForTiles() {
+        let width = windowWidth, narrower = width < tiling.lastFitWidth
+        defer { tiling.lastFitWidth = width }
+        guard splitVisible || !tiling.autoHidden.isEmpty else { return }
+        fitPanels(for: tiling.arrangement.kind, allowHide: narrower)
     }
 
     /// Installs an arrangement and keeps the active pane on screen: `preferred` takes focus if given.
@@ -62,6 +126,7 @@ extension AppState {
             second.sourceHighlight = sourceHighlight
             second.readSource = activePane.readSource
         }
+        fitPanels(for: .halves)
         persistWorkspace()
     }
 
@@ -76,6 +141,7 @@ extension AppState {
         tiling.set(tiling.arrangement.resized(to: .single, keeping: first).0)
         hostWindow?.makeFirstResponder(nil)
         pane(first).focusWhenReady()
+        fitPanels(for: .single)
         persistWorkspace()
     }
 
@@ -99,6 +165,7 @@ extension AppState {
         select(file, anchor: anchor, source: .other)
         hostWindow?.makeFirstResponder(nil)
         activePane.focusWhenReady()
+        fitPanels(for: tiling.arrangement.kind)
         persistWorkspace()
     }
 
@@ -138,6 +205,7 @@ extension AppState {
         activatePane(successor)
         hostWindow?.makeFirstResponder(nil)
         activePane.focusWhenReady()
+        fitPanels(for: tiling.arrangement.kind)
         persistWorkspace()
         logTiles("close")
     }

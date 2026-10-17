@@ -30,7 +30,7 @@ private struct TileContainer: View {
                 ForEach(visible, id: \.self) { id in
                     let slot = visible.firstIndex(of: id) ?? 0
                     let frame = frames.indices.contains(slot) ? frames[slot] : .zero
-                    DocumentPaneColumn(pane: state.pane(id), slot: slot, count: visible.count)
+                    DocumentPaneColumn(pane: state.pane(id), slot: slot, count: visible.count, width: frame.width)
                         .frame(width: frame.width, height: frame.height)
                         .clipped()
                         .position(x: frame.midX, y: frame.midY)
@@ -51,10 +51,13 @@ private struct DocumentPaneColumn: View {
     @ObservedObject var pane: DocumentPane
     let slot: Int
     let count: Int
+    var width: CGFloat = 1000
     @State private var hovering = false
 
     private var active: Bool { state.activePaneID == pane.id }
     private var tiled: Bool { count > 1 }
+    /// Too narrow for the name, ••• and the anchor side by side: ••• moves beside ✕, the anchor goes.
+    private var narrow: Bool { width < 360 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -90,16 +93,17 @@ private struct DocumentPaneColumn: View {
                         .foregroundStyle(active ? Theme.Color.text : Theme.Color.textSecondary)
                         .lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 0)
-                    if let anchor = pane.anchor {
+                    if !narrow, let anchor = pane.anchor {
                         Text(anchor.label).font(Theme.Font.monoSmall)
                             .foregroundStyle(Theme.Color.textTertiary).lineLimit(1)
                     }
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
                 .help(pane.file?.relativePath ?? "")
+            if narrow { TileHandle(paneID: pane.id, paneHovering: hovering) }
             IconButton("xmark", help: "Close Pane") { state.closePane(pane.id) }
         }
-        .overlay(alignment: .center) { TileHandle(paneID: pane.id, paneHovering: hovering) }
+        .overlay(alignment: .center) { if !narrow { TileHandle(paneID: pane.id, paneHovering: hovering) } }
         .padding(.horizontal, Theme.Space.m)
         .frame(height: 36)
         .background(active ? Theme.Color.bgRaised : Theme.Color.bg)

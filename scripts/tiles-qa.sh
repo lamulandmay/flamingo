@@ -33,7 +33,7 @@ last() { grep "$1" $LOG | tail -${2:-1}; }
 check() { if last "$2" | grep -q "$3"; then echo "ok   $1"; else echo "FAIL $1: wanted /$3/ in:"; last "$2" 2; fi }
 
 launch
-Q window 1000 600
+Q window 1200 760
 echo "single, with •••"
 Q open decks/q3-board-review.pptx; sleep 1; shot single
 
@@ -41,6 +41,7 @@ echo "B1 three columns: launchers in panes 2 and 3 with different picks"
 Q open notes/pricing-decisions.md
 Q tile thirds; sleep 2.2; shot thirds
 check "B1 layout" "tiles: layout" "layout=thirds"
+check "B1 thirds at 1200 folds the inspector" "tiles: panels" 'hide=\["inspector"\]'
 last "launcher: picks" 2
 S1=$(last "launcher: picks slot=1" | sed 's/.*picks slot=1 //'); S2=$(last "launcher: picks slot=2" | sed 's/.*picks slot=2 //')
 [[ -n $S1 && $S1 != $S2 ]] && echo "ok   B1 launchers differ" || echo "FAIL B1 launchers show the same picks"
@@ -69,6 +70,10 @@ echo "B7 four, then one and two"
 Q menu "Four"; sleep 1.5; shot grid
 Q menu "One and Two"; sleep 1.2; shot one-and-two
 Q menu "Two Side by Side"; sleep 0.6
+
+echo "B7b back to single restores the inspector"
+Q tile thirds; sleep 1.2; Q tile single; sleep 1; shot single-after
+check "B7b inspector back" "tiles: panels" 'restore=\["inspector"\]'
 
 echo "B8 relaunch: layout, panes and active pane come back"
 Q tile thirds; sleep 1; Q launch 2 '#1'; sleep 1.5

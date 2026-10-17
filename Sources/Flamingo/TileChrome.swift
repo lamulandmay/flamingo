@@ -28,7 +28,8 @@ struct TileHandle: View {
         .help("Arrange Panes")
         .accessibilityLabel("Arrange Panes")
         .popover(isPresented: $open, arrowEdge: .bottom) {
-            TileLayoutPicker(current: state.tiling.arrangement.kind) { layout in
+            TileLayoutPicker(current: state.tiling.arrangement.kind,
+                             reachable: { TilePanels.reachable($0, window: state.windowWidth, ribbon: Ribbon.width + Theme.Size.hairline) }) { layout in
                 open = false
                 state.activatePane(paneID)
                 state.setLayout(layout, from: paneID)
@@ -40,12 +41,13 @@ struct TileHandle: View {
 /// Five diagrams in a row, no words. ←/→ move, Return picks.
 struct TileLayoutPicker: View {
     let current: TileLayout
+    var reachable: (TileLayout) -> Bool = { _ in true }
     let pick: (TileLayout) -> Void
     @State private var highlighted: TileLayout
     @FocusState private var focused: Bool
 
-    init(current: TileLayout, pick: @escaping (TileLayout) -> Void) {
-        self.current = current; self.pick = pick
+    init(current: TileLayout, reachable: @escaping (TileLayout) -> Bool = { _ in true }, pick: @escaping (TileLayout) -> Void) {
+        self.current = current; self.reachable = reachable; self.pick = pick
         _highlighted = State(initialValue: current)
     }
 
@@ -54,6 +56,7 @@ struct TileLayoutPicker: View {
             ForEach(TileLayout.allCases) { layout in
                 Button { pick(layout) } label: {
                     TileDiagram(layout: layout, current: layout == current)
+                        .opacity(reachable(layout) ? 1 : Theme.Opacity.disabled)
                         .frame(width: 40, height: 30)
                         .background(Squircle(radius: Theme.Radius.s).fill(Theme.Color.hover).opacity(layout == highlighted ? 1 : 0))
                         .contentShape(Rectangle())

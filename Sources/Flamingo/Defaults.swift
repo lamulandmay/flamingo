@@ -58,6 +58,16 @@ enum Defaults {
         }
     }
 
+    /// Panels a tiled layout folded away to make room, and how wide each was, so they come back
+    /// even after a relaunch. Not the user's own choice, so it is kept apart from the panel keys.
+    static var tileAutoHidden: [TilePanel: CGFloat] {
+        get {
+            let raw = d.dictionary(forKey: "tileAutoHidden") as? [String: Double] ?? [:]
+            return Dictionary(uniqueKeysWithValues: raw.compactMap { key, value in TilePanel(rawValue: key).map { ($0, CGFloat(value)) } })
+        }
+        set { d.set(Dictionary(uniqueKeysWithValues: newValue.map { ($0.key.rawValue, Double($0.value)) }), forKey: "tileAutoHidden") }
+    }
+
     static var railVisible: Bool {
         get { d.object(forKey: "railVisible") as? Bool ?? true }
         set { d.set(newValue, forKey: "railVisible") }

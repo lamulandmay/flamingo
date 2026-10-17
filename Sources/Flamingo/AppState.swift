@@ -84,7 +84,7 @@ final class AppState: ObservableObject {
         set { layout.swipeAmount = newValue }
     }
     private var restoringHistory = false
-    private var openingVault = false
+    var openingVault = false
     @Published var anchor: FileAnchor? { didSet {
         if anchor != oldValue, !synchronizingPane {
             if activePane.anchor != anchor { activePane.anchor = anchor }
@@ -116,7 +116,7 @@ final class AppState: ObservableObject {
     /// The left sidebar: which tab shows, whether the panel beside the ribbon is open, and
     /// the file explorer's order and auto-reveal toggle.
     @Published var sidebarTab = Defaults.sidebarTab { didSet { Defaults.sidebarTab = sidebarTab; recordSetting("Change Sidebar", before: oldValue, after: sidebarTab) { [weak self] in self?.sidebarTab = $0 } } }
-    @Published var sidebarCollapsed = Defaults.sidebarCollapsed { didSet { Defaults.sidebarCollapsed = sidebarCollapsed } }
+    @Published var sidebarCollapsed = Defaults.sidebarCollapsed { didSet { Defaults.sidebarCollapsed = sidebarCollapsed; if !sidebarCollapsed { tiling.userOpened(.sidebar) } } }
     @Published var fileSort = Defaults.fileSort {
         didSet {
             guard fileSort != oldValue else { return }
@@ -167,13 +167,13 @@ final class AppState: ObservableObject {
     /// so it lives outside this object's `objectWillChange` and ticks don't redraw the window.
     let indexing = IndexingModel()
     var indexStatus: VaultSession.IndexStatus? { indexing.status }
-    @Published var railVisible = Defaults.railVisible { didSet { Defaults.railVisible = railVisible; refreshGraphIfShown() } }
+    @Published var railVisible = Defaults.railVisible { didSet { Defaults.railVisible = railVisible; if railVisible { tiling.userOpened(.inspector) }; refreshGraphIfShown() } }
     /// Set when the user shows the rail on a window too narrow to show it by itself.
-    @Published private(set) var railPinned = false
+    @Published var railPinned = false
     /// Tracked by the app delegate; the rail hides itself below `narrowWindow` unless pinned.
     var windowWidth: CGFloat {
         get { layout.windowWidth }
-        set { if layout.windowWidth != newValue { layout.windowWidth = newValue } }
+        set { if layout.windowWidth != newValue { layout.windowWidth = newValue; windowResizedForTiles() } }
     }
     static let narrowWindow: CGFloat = 980
 
@@ -2242,7 +2242,7 @@ extension AppState {
                           split: savedSplit())
     }
 
-    private func restoreUndoWorkspace(_ snapshot: WorkspaceSnapshot) {
+    func restoreUndoWorkspace(_ snapshot: WorkspaceSnapshot) {
         guard let vault else { return }
         suppressActionHistory = true
         defer { suppressActionHistory = false }

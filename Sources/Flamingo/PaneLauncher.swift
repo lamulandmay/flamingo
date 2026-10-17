@@ -201,7 +201,7 @@ private struct LauncherBody: View {
                 Hairline()
                 VStack(spacing: 0) {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
-                        launcherRow(row, selected: i == launcher.selection && state.activePaneID == pane.id, folder: proxy.size.width >= 300)
+                        launcherRow(row, selected: i == launcher.selection && state.activePaneID == pane.id, folder: proxy.size.width >= 300, reasons: proxy.size.width >= 340)
                             .onTapGesture { launcher.open(at: i, in: state) }
                     }
                 }
@@ -219,7 +219,7 @@ private struct LauncherBody: View {
         return launcher.rows(in: state)
     }
 
-    private func launcherRow(_ row: LauncherRow, selected: Bool, folder: Bool) -> some View {
+    private func launcherRow(_ row: LauncherRow, selected: Bool, folder: Bool, reasons: Bool) -> some View {
         HStack(spacing: Theme.Space.s) {
             FileGlyph(ext: row.file.ext)
             Text(row.file.name).font(Theme.Font.body).foregroundStyle(Theme.Color.text).lineLimit(1).truncationMode(.middle)
@@ -229,7 +229,7 @@ private struct LauncherBody: View {
                     .lineLimit(1).truncationMode(.head)
             }
             Spacer(minLength: Theme.Space.xs)
-            ForEach(Array(row.reasons.enumerated()), id: \.offset) { i, reason in
+            ForEach(Array((reasons ? row.reasons : []).enumerated()), id: \.offset) { i, reason in
                 Image(systemName: reason.symbol).font(.system(size: Theme.Size.iconSmall - 2))
                     .foregroundStyle(Theme.Color.textTertiary)
                     .help(row.phrases.indices.contains(i) ? row.phrases[i] : "")
