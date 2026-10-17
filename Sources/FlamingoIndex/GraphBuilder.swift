@@ -11,39 +11,60 @@ extension IndexStore {
     /// the note, weight 1, as in Obsidian. `extraEdges` between known nodes are merged in.
     public func buildGraph(extraEdges: [Graph.Edge] = []) throws -> Graph {
         try requireVault()   // never recreate `.flamingo` in a folder that was moved away
-        let (paths, counts, linking) = try read(snapshot: true) { db in
+        let (paths, counts, linking, written) = try read(snapshot: true) { db in
             (try db.query("SELECT path FROM files ORDER BY path") { $0.string(0) },
              try db.query("SELECT path, count(*) FROM comments GROUP BY path") { ($0.string(0), $0.int(1)) },
-             try db.query("SELECT path, text FROM comments WHERE instr(text, '[[') > 0 ORDER BY rowid") { ($0.string(0), $0.string(1)) }
+             try db.query("SELECT path, text FROM comments WHERE instr(text, '[[') > 0 AND origin != 'ai' ORDER BY rowid") { ($0.string(0), $0.string(1)) }
              + db.query("""
                 SELECT s.path, group_concat(coalesce(s.title, '') || char(10) || s.text, char(10)) FROM sections s
                 JOIN files f ON f.path = s.path
                 WHERE f.ext IN ('md', 'markdown', 'mdown', 'mkd', 'mdx') AND (instr(s.text, '[[') > 0 OR instr(s.title, '[[') > 0)
                 GROUP BY s.path ORDER BY s.path
-                """) { ($0.string(0), $0.string(1)) })
+                """) { ($0.string(0), $0.string(1)) },
+             // Links a model wrote into a reply are suggestions, not links a person made.
+             try db.query("SELECT path, text FROM comments WHERE instr(text, '[[') > 0 AND origin = 'ai' ORDER BY rowid") { ($0.string(0), $0.string(1)) })
         }
         var nodes: [String: Graph.Node] = [:]
         for p in paths { nodes[p] = Self.node(p) }
-        for (p, n) in counts { nodes[p, default: Self.node(p)].commentCount = n }
+        // A thought on a folder (`.flamingo/notes/<folder>.md`) counts on the folder's node (`folder/`),
+        // which is where the graph draws folders; anything else without a file keeps its own node.
+        let fileSet = Set(paths)
+        var folderNotes = Set<String>()
+        for (p, n) in counts {
+            if !fileSet.contains(p), !FileRef(relativePath: p).isVirtual, isDirectory(p) {
+                let id = p + "/"
+                folderNotes.insert(p)
+                nodes[id, default: Graph.Node(id: id, name: (p as NSString).lastPathComponent, ext: "")].commentCount += n
+            } else {
+                nodes[p, default: Self.node(p)].commentCount = n
+            }
+        }
+        func sourceID(_ path: String) -> String { folderNotes.contains(path) ? path + "/" : path }
 
         let resolver = LinkResolver(paths: paths, aliases: try PathAliases(vault: vault).all())
         // Unresolved targets differing only in case are one node, spelled the same every build.
         var spellings: [String: String] = [:]
-        for (_, text) in linking {
+        for (_, text) in linking + written {
             for target in Wikilink.parse(text) where resolver.resolve(target, from: "") == nil {
                 spellings[target.lowercased()] = min(spellings[target.lowercased()] ?? target, target)
             }
         }
         var weights: [EdgeKey: Double] = [:]
-        for (source, text) in linking {
-            var linked = Set<String>()
-            for target in Wikilink.parse(text) {
-                let dest = resolver.resolve(target, from: source) ?? spellings[target.lowercased()] ?? target
-                guard dest != source, linked.insert(dest).inserted else { continue }
-                if nodes[dest] == nil { nodes[dest] = Self.node(dest) }
-                weights[EdgeKey(source: source, target: dest, kind: .link), default: 0] += 1
+        func addLinks(_ rows: [(String, String)], kind: Graph.Edge.Kind) {
+            for (source, text) in rows {
+                var linked = Set<String>()
+                let from = sourceID(source)
+                for target in Wikilink.parse(text) {
+                    let dest = resolver.resolve(target, from: source) ?? spellings[target.lowercased()] ?? target
+                    guard dest != source, linked.insert(dest).inserted else { continue }
+                    if nodes[dest] == nil { nodes[dest] = Self.node(dest) }
+                    if nodes[from] == nil { nodes[from] = Self.node(from) }
+                    weights[EdgeKey(source: from, target: dest, kind: kind), default: 0] += 1
+                }
             }
         }
+        addLinks(linking, kind: .link)
+        addLinks(written, kind: .related)
         for (key, w) in try mentionEdges(paths: paths) where nodes[key.source] != nil && nodes[key.target] != nil {
             weights[key, default: 0] += w
         }
@@ -66,9 +87,9 @@ extension IndexStore {
     public func backlinks(to ref: FileRef) throws -> [(FileRef, Comment)] {
         let rows = try read(snapshot: true) { db in
             try db.query("""
-                SELECT path, id, ts, anchor_kind, anchor_value, text, provenance FROM comments
+                SELECT path, id, ts, anchor_kind, anchor_value, text, provenance, meta FROM comments
                 WHERE instr(text, '[[') > 0 ORDER BY ts DESC, rowid DESC
-                """) { (path: $0.string(0), comment: Self.comment($0, 1, provenanceColumn: 6)) }
+                """) { (path: $0.string(0), comment: Self.comment($0, 1, provenanceColumn: 6, metaColumn: 7)) }
         }
         let resolver = LinkResolver(paths: try indexedPaths(), aliases: try PathAliases(vault: vault).all())
         var found = rows.compactMap { row -> (FileRef, Comment)? in

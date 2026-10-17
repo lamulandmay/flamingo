@@ -74,7 +74,7 @@ public final class IndexStore: @unchecked Sendable {
     public var databaseURL: URL { vault.stateDir.appendingPathComponent("index.sqlite") }
     public var graphURL: URL { vault.stateDir.appendingPathComponent("graph.json") }
 
-    static let schemaVersion = 8
+    static let schemaVersion = 9
     /// Changes whenever extraction output may differ, so files indexed by older extractors
     /// are re-extracted even though they haven't changed on disk.
     static var extractVersion: String { "\(Extract.version)" }
@@ -140,6 +140,25 @@ public final class IndexStore: @unchecked Sendable {
         if Self.allowsMemoryMapping(vault.stateDir) { try? reader.exec("PRAGMA mmap_size = \(Self.readerMapSize)") }
         // Finish a merge an earlier run left half done, even if this run writes nothing.
         noteWrite()
+        if !readOnly { reloadCommentsIfNeeded() }
+    }
+
+    /// After a schema step that added comment columns (`comments_reload`), or a change to
+    /// `ThoughtRules` (`ThoughtRules.version`), read every note again once. Rows whose text did
+    /// not change are updated in place, so their vectors stay and nothing is embedded again.
+    private func reloadCommentsIfNeeded() {
+        let flagged = metaValue("comments_reload") == "1"
+        let rules = String(ThoughtRules.version)
+        guard flagged || metaValue("thought_rules") != rules else { return }
+        writeLock.lock(); defer { writeLock.unlock() }
+        do {
+            try replaceAllComments(sidecars.all())
+            try writer.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('comments_reload', '0')")
+            try writer.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('thought_rules', ?)", rules)
+            invalidateCaches()
+        } catch {
+            // Leave the flag set: the next open tries again, and reindex reads the notes anyway.
+        }
     }
 
     static let readerMapSize = 1 << 30
@@ -465,16 +484,20 @@ public final class IndexStore: @unchecked Sendable {
         invalidateCaches()
     }
 
-    /// Replaces every indexed comment with these. `reindex` calls it with `SidecarStore.all()`.
+    /// Makes the indexed comments these. `reindex` calls it with `SidecarStore.all()`. A thought
+    /// whose text is unchanged keeps its row (and so its vector); only its metadata is updated.
     func replaceAllComments(_ all: [FileRef: [Comment]]) throws {
         writeLock.lock(); defer { writeLock.unlock() }
         let rules = PathRules(vault: vault)
         try writer.transaction {
-            try writer.exec("DELETE FROM comments")
+            let existing = Set(try writer.query("SELECT DISTINCT path FROM comments") { $0.string(0) })
+            var kept = Set<String>()
             for (ref, comments) in all.sorted(by: { $0.key.relativePath < $1.key.relativePath })
                 where rules.admits(ref.relativePath, isDirectory: false) {
-                try insertComments(comments, for: ref)
+                kept.insert(ref.relativePath)
+                try syncComments(comments, path: ref.relativePath)
             }
+            for path in existing.subtracting(kept) { try writer.run("DELETE FROM comments WHERE path = ?", path) }
         }
     }
 
@@ -688,6 +711,11 @@ public final class IndexStore: @unchecked Sendable {
                 }
                 try db.exec("PRAGMA user_version = 8;")
             }
+            if v < 9 {
+                let columns = Set(try db.query("PRAGMA table_info(comments)") { $0.string(1) })
+                for c in Schema.v9Columns where !columns.contains(c.column) { try db.exec(c.ddl) }
+                try db.exec(Schema.v9)
+            }
             let stored = try db.query("SELECT value FROM meta WHERE key = 'extract_version'") { $0.string(0) }.first
             if stored != extractVersion {
                 try db.exec("UPDATE files SET size = -1")   // stale; keep serving old text until reindexed
@@ -870,28 +898,43 @@ public final class IndexStore: @unchecked Sendable {
             // Propagate a read failure; the transaction keeps the last good comments.
             comments = try sidecars.comments(for: ref)
         }
-        // Every pass re-reads every target's note. Rewriting rows that didn't change would
-        // churn the comment FTS index (and the WAL) on each launch, so compare first.
-        let stored = try writer.query("SELECT id, ts, anchor_kind, anchor_value, text, provenance FROM comments WHERE path = ? ORDER BY rowid", ref.relativePath) {
-            StoredComment(id: $0.string(0), ts: $0.double(1), anchorKind: $0.optionalString(2), anchorValue: $0.optionalString(3),
-                          text: $0.string(4), provenance: $0.optionalString(5))
-        }
-        if stored.count == comments.count, zip(stored, comments).allSatisfy({ $0 == StoredComment($1) }) { return }
-        try writer.run("DELETE FROM comments WHERE path = ?", ref.relativePath)
-        try insertComments(comments, for: ref)
+        try syncComments(comments, path: ref.relativePath)
     }
 
-    /// A `comments` row as `insertComments` writes it.
+    /// A `comments` row as `syncComments` writes it.
     struct StoredComment: Equatable {
         var id: String, ts: Double, anchorKind: String?, anchorValue: String?, text: String, provenance: String?
+        var uid: String?, parent: String?, kind: String?, kindBy: String?, state: String
+        var due: Double?, snoozeUntil: Double?, modified: Double?
+        var origin: String, action: String?, meta: String?
 
-        init(id: String, ts: Double, anchorKind: String?, anchorValue: String?, text: String, provenance: String?) {
-            self.id = id; self.ts = ts; self.anchorKind = anchorKind; self.anchorValue = anchorValue; self.text = text; self.provenance = provenance
+        static let columns = "id, ts, anchor_kind, anchor_value, text, provenance, uid, parent, kind, kind_by, state, due, snooze_until, modified, origin, action, meta"
+
+        init(row r: Row, at i: Int32 = 0) {
+            id = r.string(i); ts = r.double(i + 1); anchorKind = r.optionalString(i + 2); anchorValue = r.optionalString(i + 3)
+            text = r.string(i + 4); provenance = r.optionalString(i + 5); uid = r.optionalString(i + 6); parent = r.optionalString(i + 7)
+            kind = r.optionalString(i + 8); kindBy = r.optionalString(i + 9); state = r.string(i + 10)
+            due = r.isNull(i + 11) ? nil : r.double(i + 11); snoozeUntil = r.isNull(i + 12) ? nil : r.double(i + 12)
+            modified = r.isNull(i + 13) ? nil : r.double(i + 13)
+            origin = r.string(i + 14); action = r.optionalString(i + 15); meta = r.optionalString(i + 16)
         }
 
         init(_ c: Comment) {
-            self.init(id: c.id.uuidString, ts: c.timestamp.timeIntervalSince1970, anchorKind: c.anchor?.kind.rawValue,
-                      anchorValue: c.anchor?.value, text: c.text, provenance: IndexStore.provenanceJSON(c))
+            id = c.id.uuidString; ts = c.timestamp.timeIntervalSince1970; anchorKind = c.anchor?.kind.rawValue; anchorValue = c.anchor?.value
+            text = c.text; provenance = IndexStore.provenanceJSON(c)
+            let meta = c.meta
+            uid = meta?.uid; parent = meta?.parent
+            let reading = ThoughtRules.read(c.text, at: c.timestamp)
+            kind = (meta?.kind ?? reading.kind).rawValue
+            kindBy = (meta?.kindBy ?? (meta?.kind != nil ? .model : .rules)).rawValue
+            state = (meta?.state ?? .open).rawValue
+            // The person's or a model's due date wins over the one read from the words.
+            due = meta?.due.flatMap { ThoughtDates.parse($0)?.date.timeIntervalSince1970 } ?? reading.due?.date.timeIntervalSince1970
+            snoozeUntil = meta?.snoozeUntil.flatMap { ThoughtDates.parse($0)?.date.timeIntervalSince1970 }
+            modified = meta?.modified.flatMap { ThoughtDates.parse($0)?.date.timeIntervalSince1970 }
+            origin = (c.provenance?.origin ?? .human).rawValue
+            action = meta?.intent?.action
+            self.meta = SidecarFormat.metadataJSON(of: c)
         }
     }
 
@@ -899,12 +942,37 @@ public final class IndexStore: @unchecked Sendable {
         c.provenance.flatMap { try? String(decoding: JSONEncoder().encode($0), as: UTF8.self) }
     }
 
-    private func insertComments(_ comments: [Comment], for ref: FileRef) throws {
-        for c in comments {
-            try writer.run("""
-                INSERT INTO comments(path, id, ts, anchor_kind, anchor_value, text, provenance) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, ref.relativePath, c.id.uuidString, c.timestamp.timeIntervalSince1970,
-                c.anchor?.kind.rawValue, c.anchor?.value, c.text, Self.provenanceJSON(c))
+    /// Makes the rows for `path` these comments. Every pass re-reads every target's note, so
+    /// rows that did not change are left alone (rewriting them would churn the comment FTS
+    /// index and the WAL on each launch). A thought with the same derived id (same words,
+    /// time and anchor) is updated in place, without touching `text`: its rowid and vector
+    /// survive a done, a snooze, a new kind or a reply elsewhere in the thread.
+    func syncComments(_ comments: [Comment], path: String) throws {
+        let stored = try writer.query("SELECT rowid, \(StoredComment.columns) FROM comments WHERE path = ? ORDER BY rowid", path) {
+            ($0.int(0), StoredComment(row: $0, at: 1))
+        }
+        let wanted = comments.map(StoredComment.init)
+        if stored.count == wanted.count, zip(stored, wanted).allSatisfy({ $0.1 == $1 }) { return }
+        let wantedIDs = Set(wanted.map(\.id))
+        var byID: [String: (rowid: Int, row: StoredComment)] = [:]
+        for (rowid, row) in stored {
+            if wantedIDs.contains(row.id), byID[row.id] == nil { byID[row.id] = (rowid, row) }
+            else { try writer.run("DELETE FROM comments WHERE rowid = ?", rowid) }
+        }
+        for w in wanted {
+            if let existing = byID.removeValue(forKey: w.id) {
+                guard existing.row != w else { continue }
+                // `text` is not in the SET list, so the text triggers (and the vector) stay out of it.
+                try writer.run("""
+                    UPDATE comments SET provenance = ?, uid = ?, parent = ?, kind = ?, kind_by = ?, state = ?, due = ?,
+                        snooze_until = ?, modified = ?, origin = ?, action = ?, meta = ? WHERE rowid = ?
+                    """, w.provenance, w.uid, w.parent, w.kind, w.kindBy, w.state, w.due, w.snoozeUntil, w.modified, w.origin, w.action, w.meta, existing.rowid)
+            } else {
+                try writer.run("""
+                    INSERT INTO comments(path, \(StoredComment.columns)) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, path, w.id, w.ts, w.anchorKind, w.anchorValue, w.text, w.provenance, w.uid, w.parent, w.kind, w.kindBy, w.state,
+                    w.due, w.snoozeUntil, w.modified, w.origin, w.action, w.meta)
+            }
         }
     }
 

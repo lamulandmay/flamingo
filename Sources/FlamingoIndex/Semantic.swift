@@ -205,6 +205,8 @@ extension IndexStore {
         var isCard: Bool = false
         /// Line breaks in the section before the passage (line-anchored text only).
         var linesBefore: Int = 0
+        /// A thought with no file row behind it: in the inbox, on a web page, or on a folder.
+        var isGhost: Bool = false
     }
 
     /// The in-memory indexes for every model with vectors in this file, refreshed.
@@ -265,7 +267,7 @@ extension IndexStore {
     /// each with the passage that matched. Scope (`folder`, `filePredicate` over `files f`)
     /// applies before the limit. Empty when nothing is embedded or no model can embed the
     /// query in time.
-    func semanticSections(_ query: String, limit: Int, folder: String? = nil, filePredicate: String = "1 = 1",
+    func semanticSections(_ query: String, limit: Int, folder: String? = nil, filePredicate: String = "1 = 1", commentsOnly: Bool = false,
                           wait: TimeInterval = IndexStore.directEmbedWait, shouldCancel: @Sendable () -> Bool = { false }) -> [SemanticHit] {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, limit > 0, !shouldCancel() else { return [] }
@@ -292,9 +294,9 @@ extension IndexStore {
             }
             return resolve(candidates, folder: folder, filePredicate: filePredicate)
         }
-        var hits = rank(allow: nil)
+        var hits = rank(allow: commentsOnly ? { $0.isComment } : nil)
         if scoped, hits.count < limit, !shouldCancel(), let allowed = scopeSets(folder: folder, filePredicate: filePredicate) {
-            hits = rank { $0.isComment ? allowed.comments.contains($0.owner) : allowed.sections.contains($0.owner) }
+            hits = rank { $0.isComment ? allowed.comments.contains($0.owner) : (!commentsOnly && allowed.sections.contains($0.owner)) }
         }
         guard let best = hits.first?.relevance else { return [] }
         // Far below the best hit is noise, however many there are.
@@ -334,7 +336,7 @@ extension IndexStore {
                 WHERE \(filePredicate) \(Self.folderPredicate(folder, column: "f.path")) LIMIT ?
                 """, cap + 1) { sections.insert(Int64($0.int(0))) }
             _ = try db.query("""
-                SELECT c.rowid FROM comments c JOIN files f ON f.path = c.path
+                SELECT c.rowid FROM comments c LEFT JOIN files f ON f.path = c.path
                 WHERE \(filePredicate) \(Self.folderPredicate(folder, column: "c.path"))
                 """) { comments.insert(Int64($0.int(0))) }
             return sections.count > cap ? nil : (sections, comments)
@@ -347,7 +349,7 @@ extension IndexStore {
         guard !candidates.isEmpty else { return [] }
         let spans = candidates.filter { !$0.2.isComment }
         let comments = candidates.filter { $0.2.isComment }
-        struct Found { var section: Int; var path: String; var ord: Int; var anchor: FileAnchor?; var title: String; var text: String; var length: Int; var commentID: UUID?; var lines = 0 }
+        struct Found { var section: Int; var path: String; var ord: Int; var anchor: FileAnchor?; var title: String; var text: String; var length: Int; var commentID: UUID?; var lines = 0; var ghost = false }
         var found: [Int64: Found] = [:]
         var live = Set<Int64>()
         _ = try? read(snapshot: true) { db in
@@ -375,12 +377,12 @@ extension IndexStore {
                 let ids = Self.json(comments.map(\.2.owner))
                 _ = try db.query("SELECT comment FROM comment_vectors WHERE comment IN (SELECT value FROM json_each(?))", ids) { live.insert(-Int64($0.int(0))) }
                 _ = try db.query("""
-                    SELECT c.rowid, c.path, c.id, c.anchor_kind, c.anchor_value, c.text
-                    FROM comments c JOIN files f ON f.path = c.path
+                    SELECT c.rowid, c.path, c.id, c.anchor_kind, c.anchor_value, c.text, f.path IS NULL
+                    FROM comments c LEFT JOIN files f ON f.path = c.path
                     WHERE c.rowid IN (SELECT value FROM json_each(?1)) \(Self.folderPredicate(folder, column: "c.path")) AND \(filePredicate)
                     """, ids) {
                     found[-Int64($0.int(0))] = Found(section: -$0.int(0), path: $0.string(1), ord: -1, anchor: Self.anchor($0, 3),
-                                                     title: "", text: $0.string(5), length: 0, commentID: UUID(uuidString: $0.string(2)))
+                                                     title: "", text: $0.string(5), length: 0, commentID: UUID(uuidString: $0.string(2)), ghost: $0.int(6) != 0)
                 }
             }
         }
@@ -395,12 +397,72 @@ extension IndexStore {
             let relevance = Double((score - profile.floor) / max(0.01, profile.strong - profile.floor))
             let hit = SemanticHit(section: f.section, path: f.path, ord: f.ord, anchor: f.anchor, title: f.title, text: f.text, score: score,
                                   relevance: relevance, commentID: f.commentID, offset: row.offset, model: profile.id,
-                                  isCard: f.commentID == nil && f.ord == 0 && f.length == 0, linesBefore: f.lines)
+                                  isCard: f.commentID == nil && f.ord == 0 && f.length == 0, linesBefore: f.lines, isGhost: f.ghost)
             if let prior = best[f.section], prior.relevance >= relevance { continue }
             best[f.section] = hit
         }
         for (index, keys) in gone.values { index.remove(keys: keys) }
         return best.values.sorted { $0.relevance != $1.relevance ? $0.relevance > $1.relevance : $0.section < $1.section }
+    }
+
+    // MARK: - What a thought is embedded as
+
+    /// `Question on Pricing memo (pricing-memo.docx), slide 7 · re: <parent line> · links: <titles>`.
+    /// The kind word comes from the rules alone, and state and due date are left out, so a
+    /// thought's vector changes only when its text does.
+    static func thoughtHeader(path: String, title: String?, tags: String?, hasFile: Bool, isFolder: Bool, kind: ThoughtKind,
+                              anchor: FileAnchor?, parentLine: String?, links: [String]) -> String {
+        let label: String
+        switch kind {
+        case .question: label = "Question"
+        case .todo: label = "To do"
+        case .intent: label = "Intent"
+        case .idea: label = "Thought"
+        }
+        var header = label + " on " + thoughtSubject(path: path, title: title, tags: tags, hasFile: hasFile, isFolder: isFolder)
+        if let anchor { header += ", " + anchor.label }
+        if let parentLine, !parentLine.isEmpty { header += " · re: " + parentLine }
+        if !links.isEmpty { header += " · links: " + links.joined(separator: ", ") }
+        return header
+    }
+
+    static func thoughtSubject(path: String, title: String?, tags: String?, hasFile: Bool, isFolder: Bool) -> String {
+        let ref = FileRef(relativePath: path)
+        if ref.isInbox { return "a note with no file" }
+        if ref.isWeb {
+            let parts = ref.components
+            let host = parts.count > 1 ? parts[1] : "web"
+            var slug = (parts.last ?? "")
+            if let dash = slug.lastIndex(of: "-") { slug = String(slug[..<dash]) }
+            return "web page " + host + (slug.isEmpty ? "" : " (" + slug.replacingOccurrences(of: "-", with: " ") + ")")
+        }
+        if isFolder { return "folder " + ref.name }
+        return SemanticChunker.FileContext(path: path, title: title, tags: tags).display
+    }
+
+    func isDirectory(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: filePath(FileRef(relativePath: path)), isDirectory: &isDir) && isDir.boolValue
+    }
+
+    /// Titles (else names) of the files a thought links to, at most three.
+    func linkedTitles(in text: String, from path: String, using resolver: LinkResolver) -> [String] {
+        guard text.contains("[[") else { return [] }
+        var resolved: [String] = []
+        for target in Wikilink.parse(text) {
+            if let dest = resolver.resolve(target, from: path), !resolved.contains(dest) { resolved.append(dest) }
+            if resolved.count == 3 { break }
+        }
+        guard !resolved.isEmpty else { return [] }
+        let titles = (try? read { db in
+            try db.query("SELECT path, title FROM files WHERE path IN (SELECT value FROM json_each(?))", Self.json(resolved)) { ($0.string(0), $0.optionalString(1)) }
+        }) ?? []
+        let byPath = Dictionary(titles.map { ($0.0, $0.1) }, uniquingKeysWith: { a, _ in a })
+        return resolved.map { p in
+            let name = FileRef(relativePath: p).name
+            if let t = byPath[p] ?? nil, !t.isEmpty, t != name { return t }
+            return name
+        }
     }
 
     // MARK: - Snippets
@@ -516,23 +578,38 @@ final class EmbeddingPass {
 
     func comments() {
         var after = 0
+        var resolver: LinkResolver?
         while !cancelled {
-            let rows = (try? store.read { db in
+            struct Row { var rowid: Int; var path: String; var anchorKind: String?; var anchorValue: String?; var text: String; var ts: Double
+                         var title: String?; var tags: String?; var hasFile: Bool; var parent: String? }
+            let raw: [Row] = (try? store.read { db in
                 try db.query("""
-                    SELECT c.rowid, c.path, c.anchor_kind, c.anchor_value, c.text, f.title, f.tags FROM comments c
-                    LEFT JOIN files f ON f.path = c.path
+                    SELECT c.rowid, c.path, c.anchor_kind, c.anchor_value, c.text, f.title, f.tags, c.ts, f.path IS NOT NULL,
+                        CASE WHEN c.parent IS NULL THEN NULL ELSE
+                            (SELECT substr(p.text, 1, 400) FROM comments p WHERE p.path = c.path AND p.uid = c.parent LIMIT 1) END
+                    FROM comments c LEFT JOIN files f ON f.path = c.path
                     WHERE c.rowid > ?1 AND NOT EXISTS (SELECT 1 FROM comment_vectors v WHERE v.comment = c.rowid AND v.model = ?2)
                     ORDER BY c.rowid LIMIT 128
-                    """, after, profile.id) { r -> (Int, String, String) in
-                    let file = SemanticChunker.FileContext(path: r.string(1), title: r.optionalString(5), tags: r.optionalString(6))
-                    var header = "Thought on " + file.display
-                    if let anchor = IndexStore.anchor(r, 2) { header += ", " + anchor.label }
-                    let body = String(String.UnicodeScalarView(r.string(4).unicodeScalars.prefix(SemanticChunker.maxCommentScalars)))
-                    return (r.int(0), r.string(4), profile.document(header: header, body: body))
+                    """, after, profile.id) {
+                    Row(rowid: $0.int(0), path: $0.string(1), anchorKind: $0.optionalString(2), anchorValue: $0.optionalString(3), text: $0.string(4),
+                        ts: $0.double(7), title: $0.optionalString(5), tags: $0.optionalString(6), hasFile: $0.int(8) != 0, parent: $0.optionalString(9))
                 }
             }) ?? []
-            guard let last = rows.last else { return }
-            after = last.0
+            guard let last = raw.last else { return }
+            after = last.rowid
+            if resolver == nil, raw.contains(where: { $0.text.contains("[[") }) {
+                resolver = LinkResolver(paths: (try? store.indexedPaths()) ?? [], aliases: [:])
+            }
+            let rows = raw.map { r -> (Int, String, String) in
+                let anchor = IndexStore.anchor(r.anchorKind, r.anchorValue)
+                let titles = resolver.map { store.linkedTitles(in: r.text, from: r.path, using: $0) } ?? []
+                let header = IndexStore.thoughtHeader(path: r.path, title: r.title, tags: r.tags, hasFile: r.hasFile,
+                                                      isFolder: !r.hasFile && !FileRef(relativePath: r.path).isVirtual && store.isDirectory(r.path),
+                                                      kind: ThoughtRules.read(r.text, at: Date(timeIntervalSince1970: r.ts)).kind,
+                                                      anchor: anchor, parentLine: r.parent.map(IndexStore.firstLine), links: titles)
+                let body = String(String.UnicodeScalarView(r.text.unicodeScalars.prefix(SemanticChunker.maxCommentScalars)))
+                return (r.rowid, r.text, profile.document(header: header, body: body))
+            }
             let hashes = rows.map { SemanticChunker.hash(profile.id, $0.2) }
             guard let vectors = vectors(for: rows.map(\.2), hashes: hashes) else { return }
             store.writeLock.lock()

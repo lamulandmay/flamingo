@@ -19,6 +19,9 @@ public struct ThoughtReading: Hashable, Sendable {
 }
 
 public enum ThoughtRules {
+    /// Bumped whenever the rules change what they read, so an index re-reads its thoughts once.
+    public static let version = 1
+
     /// The thought's own words: quote lines (selected text from another app) are not what
     /// the person said, so they are left out, as are `@ai` / `@flamingo` mentions.
     public static func prose(of text: String) -> String {

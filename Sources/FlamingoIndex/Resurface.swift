@@ -19,15 +19,18 @@ extension IndexStore {
     }
 
     /// A thought left a while ago, chosen at random, preferring ones older than `age`.
-    /// Inbox thoughts (no file) are skipped.
+    /// Thoughts with no file (inbox, web pages) and AI replies are skipped. For a pick that
+    /// bears on what is open, see `resurfaceableThought(near:olderThan:now:seen:)`.
     public func resurfaceableThought(olderThan age: TimeInterval = 3 * 86_400, now: Date = Date()) throws -> (FileRef, Comment)? {
         try read(snapshot: true) { db in
             let sql = """
-                SELECT path, id, ts, anchor_kind, anchor_value, text, provenance FROM comments
-                WHERE path NOT LIKE '\\_inbox/%' ESCAPE '\\' AND ts < ? ORDER BY random() LIMIT 1
+                SELECT c.path, c.id, c.ts, c.anchor_kind, c.anchor_value, c.text, c.provenance, c.meta FROM comments c
+                LEFT JOIN files f ON f.path = c.path
+                WHERE c.path NOT LIKE '\\_inbox/%' ESCAPE '\\' AND c.path NOT LIKE '\\_web/%' ESCAPE '\\'
+                AND f.path IS NOT NULL AND c.origin = 'human' AND c.state = 'open' AND c.ts < ? ORDER BY random() LIMIT 1
                 """
             let pick = { (cutoff: Double) in
-                try db.query(sql, cutoff) { (FileRef(relativePath: $0.string(0)), Self.comment($0, 1, provenanceColumn: 6)) }.first
+                try db.query(sql, cutoff) { (FileRef(relativePath: $0.string(0)), Self.comment($0, 1, provenanceColumn: 6, metaColumn: 7)) }.first
             }
             return try pick(now.timeIntervalSince1970 - age) ?? pick(now.timeIntervalSince1970 + 1)
         }
