@@ -350,6 +350,9 @@ public final class TrailStore: @unchecked Sendable {
         return all
     }
 
+    /// Every event in file-then-buffer order, unsorted: for callers that filter first.
+    func unsortedEvents() throws -> [TrailEvent] { try backend.events() }
+
     /// Clustered sessions, oldest first, with their names applied.
     public func sessions(ignoringCorrections: Bool = false) throws -> [TrailSession] {
         let names = self.names()
