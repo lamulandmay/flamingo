@@ -1,4 +1,5 @@
 import AppKit
+import Quartz
 import SwiftUI
 import FlamingoDesign
 
@@ -7,7 +8,7 @@ import FlamingoDesign
 /// itself (so the clicked row gets a ring that matches the selection shape instead of the
 /// system's full-width box), renames rows in place, and takes keyboard focus when nothing
 /// else has it. Plan 01 owns.
-final class SidebarOutlineView: NSOutlineView, NSTextFieldDelegate {
+final class SidebarOutlineView: NSOutlineView, QLPreviewPanelDataSource {
     /// The row a context menu is open for, else -1.
     private(set) var contextRow = -1
     /// ⌫ / ⌦ with nothing held. Returns `false` to let the key through (it beeps).
@@ -20,6 +21,14 @@ final class SidebarOutlineView: NSOutlineView, NSTextFieldDelegate {
     var onReturn: (() -> Bool)?
     /// File copy when this outline owns focus; editors retain their text clipboard.
     var onCopy: (() -> Bool)?
+    /// ⌘V copies the clipboard's files in, ⌥⌘V moves them. Returns `false` to let it through.
+    var onPaste: ((_ moving: Bool) -> Bool)?
+    /// What ⌘Y shows in Quick Look; nil leaves the key alone.
+    var quickLookURL: (() -> URL?)?
+    /// The pointer or the wheel moved over the list, for the explorer's idle timer.
+    var onActivity: (() -> Void)?
+    /// A context menu for empty space too, with `contextRow` -1.
+    var menuOnEmptySpace = false
 
     /// One configured the way both sidebar lists want it.
     static func make(label: String) -> SidebarOutlineView {
@@ -90,6 +99,20 @@ final class SidebarOutlineView: NSOutlineView, NSTextFieldDelegate {
         _ = onCopy?()
     }
 
+    @objc func paste(_ sender: Any?) {
+        guard window?.firstResponder === self, editor == nil else { return }
+        if onPaste?(false) != true { NSSound.beep() }
+    }
+
+    /// Edit → Copy and Paste only where this list does them (not in the bookmarks).
+    @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(copy(_:)): onCopy != nil && selectedRow >= 0
+        case #selector(paste(_:)): onPaste != nil && !FileHandoff.fileURLs(on: .general).isEmpty
+        default: true
+        }
+    }
+
     private func handleSelectionKey(_ event: NSEvent) -> Bool {
         // Key equivalents visit views outside the responder chain. A document editor,
         // search field, or in-place rename must retain its own editing shortcuts.
@@ -105,7 +128,46 @@ final class SidebarOutlineView: NSOutlineView, NSTextFieldDelegate {
             onClearSelection?()
             return true
         }
+        if event.keyCode == 9, modifiers == [.command, .option], let onPaste { return onPaste(true) }   // ⌥⌘V
+        if event.keyCode == 16, modifiers == .command, quickLookURL?() != nil { toggleQuickLook(); return true } // ⌘Y
         return false
+    }
+
+    // MARK: Quick Look
+
+    func toggleQuickLook() {
+        guard let panel = QLPreviewPanel.shared() else { return }
+        if QLPreviewPanel.sharedPreviewPanelExists(), panel.isVisible { panel.orderOut(nil) }
+        else { panel.makeKeyAndOrderFront(nil) }
+    }
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { quickLookURL != nil }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) { panel.dataSource = self }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) { panel.dataSource = nil }
+
+    func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { quickLookURL?() == nil ? 0 : 1 }
+
+    func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
+        quickLookURL?().map { $0 as NSURL }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        onActivity?()
+        super.scrollWheel(with: event)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas where area.owner === self && area.userInfo?["activity"] != nil { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: ["activity": true]))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        onActivity?()
+        super.mouseMoved(with: event)
     }
 
     override func frameOfOutlineCell(atRow row: Int) -> NSRect {
@@ -156,66 +218,24 @@ final class SidebarOutlineView: NSOutlineView, NSTextFieldDelegate {
 
     // MARK: Rename in place
 
-    private var editor: NSTextField?
-    private var commitEdit: ((String) -> Void)?
+    private lazy var renamer = RowRenamer(table: self)
+    private var editor: NSTextField? { renamer.field }
+    var isEditing: Bool { editor != nil }
 
     /// A text field over the row's name: ↩ or clicking away commits, Esc cancels. `leading`
     /// is where the name starts in the cell (after the glyph).
     func beginEditing(row: Int, text: String, selecting range: NSRange,
                       leading: CGFloat = Theme.Size.icon + Theme.Space.s, commit: @escaping (String) -> Void) {
-        finishEditing(commit: false)
+        renamer.finish(commit: false)
         guard row >= 0, row < numberOfRows else { return }
         scrollRowIntoView(row)
         let cell = frameOfCell(atColumn: 0, row: row)
-        let field = NSTextField(string: text)
-        field.font = Theme.NS.body
-        field.textColor = Theme.NS.text
-        field.isBordered = false
-        field.drawsBackground = true
-        field.backgroundColor = Theme.NS.bg
-        field.focusRingType = .none
-        field.lineBreakMode = .byClipping
-        field.cell?.isScrollable = true
-        field.wantsLayer = true
         let x = cell.minX + leading - 3
-        field.frame = NSRect(x: x, y: cell.minY + 3, width: max(60, cell.maxX - Theme.Space.s - x), height: cell.height - 6)
-        field.layer?.applySquircle(radius: Theme.Radius.s - 1, border: Theme.NS.accent)
-        field.delegate = self
-        addSubview(field)
-        editor = field
-        commitEdit = commit
-        window?.makeFirstResponder(field)
-        field.currentEditor()?.selectedRange = range
+        let frame = NSRect(x: x, y: cell.minY + 3, width: max(60, cell.maxX - Theme.Space.s - x), height: cell.height - 6)
+        renamer.begin(frame: frame, text: text, selecting: range, commit: commit)
     }
 
-    private func finishEditing(commit: Bool) {
-        guard let field = editor else { return }
-        let action = commitEdit
-        editor = nil
-        commitEdit = nil
-        let text = field.stringValue
-        field.delegate = nil
-        field.removeFromSuperview()
-        window?.makeFirstResponder(self)
-        if commit { action?(text) }
-    }
-
-    func controlTextDidEndEditing(_ obj: Notification) {
-        finishEditing(commit: true)
-    }
-
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        switch selector {
-        case #selector(NSResponder.cancelOperation(_:)):
-            finishEditing(commit: false)
-            return true
-        case #selector(NSResponder.insertNewline(_:)):
-            finishEditing(commit: true)
-            return true
-        default:
-            return false
-        }
-    }
+    private func finishEditing(commit: Bool) { renamer.finish(commit: commit) }
 
     override func reloadData() {
         finishEditing(commit: false)
@@ -239,11 +259,12 @@ final class SidebarOutlineView: NSOutlineView, NSTextFieldDelegate {
 
     private func showContextMenu(for event: NSEvent) -> Bool {
         let row = row(at: convert(event.locationInWindow, from: nil))
-        guard row >= 0, let menu else { return false }
+        guard row >= 0 || menuOnEmptySpace, let menu else { return false }
         contextRow = row
-        (rowView(atRow: row, makeIfNecessary: false) as? SidebarRowView)?.isContextTarget = true
+        if row >= 0 { (rowView(atRow: row, makeIfNecessary: false) as? SidebarRowView)?.isContextTarget = true }
         NSMenu.popUpContextMenu(menu, with: event, for: self)
         endContextMenu()
+        contextRow = -1
         return true
     }
 
@@ -331,5 +352,74 @@ final class SidebarCellView: NSHostingView<SidebarRowHost>, SidebarSelectableCel
     var rowSelected: Bool {
         get { rootView.selected }
         set { rootView.selected = newValue }
+    }
+}
+
+/// A text field over a row's name, for renaming in place: ↩ or clicking away commits, Esc
+/// cancels. The sidebar's lists and the columns share it.
+@MainActor
+final class RowRenamer: NSObject, NSTextFieldDelegate {
+    private weak var table: NSTableView?
+    private(set) var field: NSTextField?
+    private var commit: ((String) -> Void)?
+    /// After the field goes, committed or not.
+    var onEnd: (() -> Void)?
+
+    init(table: NSTableView) { self.table = table }
+
+    var isEditing: Bool { field != nil }
+
+    /// `frame` is in the table's coordinates.
+    func begin(frame: NSRect, text: String, selecting range: NSRange, commit: @escaping (String) -> Void) {
+        finish(commit: false)
+        guard let table else { return }
+        let field = NSTextField(string: text)
+        field.font = Theme.NS.body
+        field.textColor = Theme.NS.text
+        field.isBordered = false
+        field.drawsBackground = true
+        field.backgroundColor = Theme.NS.bg
+        field.focusRingType = .none
+        field.lineBreakMode = .byClipping
+        field.cell?.isScrollable = true
+        field.wantsLayer = true
+        field.frame = frame
+        field.layer?.applySquircle(radius: Theme.Radius.s - 1, border: Theme.NS.accent)
+        field.delegate = self
+        table.addSubview(field)
+        self.field = field
+        self.commit = commit
+        table.window?.makeFirstResponder(field)
+        field.currentEditor()?.selectedRange = range
+    }
+
+    func finish(commit shouldCommit: Bool) {
+        guard let field else { return }
+        let action = commit
+        self.field = nil
+        commit = nil
+        let text = field.stringValue
+        field.delegate = nil
+        field.removeFromSuperview()
+        if let table { table.window?.makeFirstResponder(table) }
+        if shouldCommit { action?(text) }
+        onEnd?()
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        finish(commit: true)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.cancelOperation(_:)):
+            finish(commit: false)
+            return true
+        case #selector(NSResponder.insertNewline(_:)):
+            finish(commit: true)
+            return true
+        default:
+            return false
+        }
     }
 }

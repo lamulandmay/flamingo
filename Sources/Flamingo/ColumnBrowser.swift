@@ -90,6 +90,26 @@ final class ColumnBrowserModel: ObservableObject {
         if self.folder != folder { self.folder = folder }
     }
 
+    /// The sidebar's folder now stands for this place, because it followed the columns here;
+    /// the surface needn't move to it.
+    func markFollowed(_ sidebarFolder: URL) { followed = Self.normal(sidebarFolder) }
+
+    /// Something on show was renamed: everything under its old name moves with it, so the
+    /// columns keep their place.
+    func renamed(_ old: URL, to new: URL) {
+        // By path: a folder's URL loses its trailing slash once nothing is there.
+        let old = old.standardizedFileURL.path, new = Self.normal(new)
+        func moved(_ url: URL) -> URL {
+            if url.path == old { return new }
+            guard url.path.hasPrefix(old + "/") else { return url }
+            return Self.normal(URL(fileURLWithPath: new.path + url.path.dropFirst(old.count)))
+        }
+        trail = trail.map(moved)
+        root = root.map(moved)
+        folder = folder.map(moved)
+        followed = followed.map(moved)
+    }
+
     private func reset(to url: URL) {
         let url = Self.normal(url)
         root = url
@@ -192,6 +212,73 @@ extension AppState {
         }
     }
 
+    /// Renames a file or folder in place. Inside the vault it goes through `rename(_:to:)`, so
+    /// thoughts, bookmarks and history follow; anywhere else it is a plain rename, as Finder's.
+    /// The new URL, or nil when nothing was renamed.
+    func renameItem(at url: URL, to newName: String) -> URL? {
+        let url = ColumnBrowserModel.normal(url)
+        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name != url.lastPathComponent, canRename(url) else { return nil }
+        let dest = url.deletingLastPathComponent().appendingPathComponent(name)
+        // Normalized once it exists, so a folder spells itself as its listing will.
+        if let rel = FileMenu.vaultPath(url, state: self) { return rename(rel, to: name) ? ColumnBrowserModel.normal(dest) : nil }
+        guard !name.isEmpty, !name.contains("/"), !name.contains(":"),
+              !name.hasPrefix(".") || url.lastPathComponent.hasPrefix(".") else { NSSound.beep(); return nil }
+        let fm = FileManager.default
+        // A case-only rename is the same file on a case-insensitive disk.
+        if fm.fileExists(atPath: dest.path), name.lowercased() != url.lastPathComponent.lowercased() {
+            showToast(ToastMessage(text: name + " already exists"))
+            return nil
+        }
+        do { try fm.moveItem(at: url, to: dest) } catch {
+            showToast(ToastMessage(text: "Couldn't rename “\(url.lastPathComponent)”"))
+            return nil
+        }
+        return ColumnBrowserModel.normal(dest)
+    }
+
+    /// Anything but a disk, the vault (or a folder holding it) and Flamingo's own state.
+    func canRename(_ url: URL) -> Bool {
+        let path = ColumnBrowserModel.normal(url).path
+        guard path != "/", (try? url.resourceValues(forKeys: [.isVolumeKey]))?.isVolume != true else { return false }
+        if let v = vault {
+            let root = ColumnBrowserModel.normal(v.root).path
+            if root == path || root.hasPrefix(path + "/") || v.isState(url) { return false }
+        }
+        return true
+    }
+
+    /// ⌘V copies the clipboard's files into `folder`, ⌥⌘V moves them (Finder's Move Item
+    /// Here). A vault file leaving the vault is copied, so its thoughts aren't left behind.
+    func paste(into folder: URL, moving: Bool) {
+        let urls = FileHandoff.fileURLs(on: .general)
+        guard !urls.isEmpty else { NSSound.beep(); return }
+        transfer(urls, into: folder, moving: moving && keepsThoughts(urls, into: folder))
+    }
+
+    /// False when a vault file would leave the vault, and its thoughts with it.
+    func keepsThoughts(_ urls: [URL], into folder: URL) -> Bool {
+        !urls.contains { FileMenu.vaultPath($0, state: self) != nil } || FileMenu.vaultFolder(folder, state: self) != nil
+    }
+
+    /// The columns moved: `item` is what they have selected, `folder` the deepest folder on
+    /// show. Inside the vault the sidebar follows: its folder becomes that one (no history
+    /// entry, the columns are one place), and the file explorer highlights `item` without
+    /// opening it.
+    func columnsPicked(item: URL?, folder: URL?) {
+        guard mode == .files, selected == nil else { return }
+        if let folder, let rel = FileMenu.vaultFolder(folder, state: self) {
+            browser.markFollowed(folder)
+            let f: String? = rel.isEmpty ? nil : rel
+            if selectedFolder != f {
+                selectedFolder = f
+                persistWorkspaceSoon()
+            }
+        }
+        let path = item.flatMap { FileMenu.vaultPath($0, state: self) }
+        if columnsSelection != path { columnsSelection = path }
+    }
+
     /// Files dropped or pasted into `folder`, anywhere on the Mac. A move inside the vault
     /// goes through `move(_:into:)` so thoughts follow; the rest is the file system's, off
     /// the main thread, a copy taking Finder's "copy" name when the name is taken.
@@ -278,8 +365,10 @@ enum FileDrop {
 /// Finder's column view: one list per folder, side by side, the selection in each column
 /// opening the next, a preview at the end for a file. Arrow keys walk it (← → between
 /// columns), typing selects by name, Space is Quick Look, ⌘↓ or a double-click opens,
-/// ⌘↑ goes to the enclosing folder, ⇧⌘. shows hidden files. Drop files on a folder (rest
-/// on it to open it) or paste them with ⌘V. Drag a column's edge to
+/// ↩ (or a slow second click on the name) renames, ⌘↑ goes to the enclosing folder, ⇧⌘.
+/// shows hidden files. Drop files on a folder (rest on it to open it) or paste them with
+/// ⌘V. The context menu is the file explorer's (`FileMenu`), and the explorer follows what
+/// is selected here. Drag a column's edge to
 /// resize it (⌥ for all), double-click the edge to fit. Built from `NSTableView`s so
 /// keyboard, type-select, scrolling and drag-out are the system's.
 struct ColumnBrowser: NSViewRepresentable {
@@ -330,6 +419,8 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     private var pendingFocus: Int?
     /// The folder row a drag is hovering, opening once the spring delay passes.
     private var spring: (table: NSTableView, row: Int, work: DispatchWorkItem)?
+    /// A folder just made here, to rename once its column lists it.
+    private var pendingRename: URL?
 
     init(state: AppState, model: ColumnBrowserModel) {
         self.state = state
@@ -371,6 +462,15 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
         if model.focusRevision != focusRevision {
             focusRevision = model.focusRevision
             takePendingFocus()
+        }
+        if let request = state.renameRequest, request.inColumns, let v = state.vault, state.take(request.id) {
+            let url = ColumnBrowserModel.normal(v.root.appendingPathComponent(request.target))
+            pendingRename = url
+            // Gone if the columns never get there, so it can't fire on a later visit.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                if self?.pendingRename == url { self?.pendingRename = nil }
+            }
+            renamePending()
         }
         if newCounts != counts {
             counts = newCounts
@@ -423,6 +523,10 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
             guard let self, let column, self.columns.contains(where: { $0 === column }) else { return }
             self.load(column)
         }
+        table.renamer.onEnd = { [weak self, weak column] in
+            guard let self, let column, column.stale, self.columns.contains(where: { $0 === column }) else { return }
+            self.load(column)
+        }
         columns.append(column)
         strip.addSubview(column.scroll)
         for c in columns { strip.addSubview(c.grip, positioned: .above, relativeTo: nil) }
@@ -442,6 +546,9 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     }
 
     private func load(_ column: BrowserColumn) {
+        // A name being typed keeps its row; the listing waits until the field goes.
+        if column.table.renamer.isEditing { column.stale = true; return }
+        column.stale = false
         column.generation += 1
         let generation = column.generation, url = column.url
         let hidden = showHidden, foldersFirst = FinderSettings.foldersFirst
@@ -486,6 +593,17 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
             takePendingFocus()
         }
         layoutColumns()
+        renamePending()
+    }
+
+    /// Lists column `i` again as if new, replaying the trail from it, so after a rename the
+    /// selection and the columns after it carry on under the new name.
+    private func relist(from i: Int) {
+        guard i < columns.count else { return }
+        removeColumns(after: i)
+        hidePreview()
+        columns[i].loaded = false
+        load(columns[i])
     }
 
     /// The user (or the keyboard) chose `row` in column `i`; -1 clears that column.
@@ -524,6 +642,7 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
 
     private func publish() {
         model.columnsChanged(trail: model.trail, folder: columns.last?.url)
+        state.columnsPicked(item: model.trail.last ?? model.root, folder: columns.last?.url)
     }
 
     private func width(_ i: Int) -> CGFloat { i < model.widths.count ? model.widths[i] : Self.defaultWidth }
@@ -673,6 +792,45 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
         }
     }
 
+    // MARK: Rename
+
+    fileprivate func renameSelection(in table: NSTableView) {
+        guard let i = index(of: table), table.selectedRow >= 0 else { NSSound.beep(); return }
+        beginRename(column: i, row: table.selectedRow)
+    }
+
+    /// A field over the row's name, the name without its extension selected, as in Finder.
+    private func beginRename(column i: Int, row: Int) {
+        guard i < columns.count, row >= 0, row < columns[i].entries.count else { return }
+        let column = columns[i], entry = column.entries[row], table = column.table
+        guard state.canRename(entry.url) else { NSSound.beep(); return }
+        if table.selectedRow != row { table.selectRowIndexes([row], byExtendingSelection: false) }
+        table.scrollRowToVisible(row)
+        guard let cell = table.view(atColumn: 0, row: row, makeIfNecessary: true) as? ColumnCellView else { return }
+        let rowRect = table.rect(ofRow: row)
+        let x = cell.convert(cell.nameFrame, to: table).minX - 3
+        // The field draws its text at its top; this puts it on the label's line.
+        let frame = NSRect(x: x, y: rowRect.minY + 3.5, width: max(60, rowRect.maxX - Theme.Space.m - x), height: rowRect.height - 7)
+        let name = entry.url.lastPathComponent
+        let stem = entry.isFolder ? name : (name as NSString).deletingPathExtension
+        window?.makeFirstResponder(table)
+        table.renamer.begin(frame: frame, text: name, selecting: NSRange(location: 0, length: (stem as NSString).length)) { [weak self, weak column] new in
+            guard let self, let column, let i = self.columns.firstIndex(where: { $0 === column }),
+                  let renamed = self.state.renameItem(at: entry.url, to: new) else { return }
+            self.model.renamed(entry.url, to: renamed)
+            self.relist(from: i)
+        }
+    }
+
+    /// A folder just made from here: rename it once it is listed and selected.
+    private func renamePending() {
+        guard let url = pendingRename, model.trail.contains(where: { $0.path == url.path }),
+              let i = columns.firstIndex(where: { $0.loaded && $0.url.path == url.deletingLastPathComponent().path }),
+              let row = columns[i].entries.firstIndex(where: { $0.url.path == url.path }) else { return }
+        pendingRename = nil
+        DispatchQueue.main.async { [weak self] in self?.beginRename(column: i, row: row) }
+    }
+
     fileprivate func trashSelection(in table: NSTableView) -> Bool {
         guard let i = index(of: table), table.selectedRow >= 0, table.selectedRow < columns[i].entries.count,
               let rel = vaultPath(columns[i].entries[table.selectedRow].url) else { return false }
@@ -786,13 +944,7 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     /// into the selected folder, or else this column's folder.
     fileprivate func paste(in table: NSTableView, moving: Bool) {
         guard let folder = dropFolder(in: table, row: table.selectedRow) else { return }
-        paste(into: folder, moving: moving)
-    }
-
-    private func paste(into folder: URL, moving: Bool) {
-        let urls = FileHandoff.fileURLs(on: .general)
-        guard !urls.isEmpty else { NSSound.beep(); return }
-        state.transfer(urls, into: folder, moving: moving && keepsThoughts(urls, into: folder))
+        state.paste(into: folder, moving: moving)
     }
 
     private func dropFolder(in table: NSTableView, row: Int) -> URL? {
@@ -805,12 +957,7 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     }
 
     private func dragOperation(_ urls: [URL], into folder: URL, mask: NSDragOperation) -> NSDragOperation {
-        FileDrop.operation(urls, into: folder, mask: mask, keepsThoughts: keepsThoughts(urls, into: folder))
-    }
-
-    /// False when a vault file would leave the vault, and its thoughts with it.
-    private func keepsThoughts(_ urls: [URL], into folder: URL) -> Bool {
-        !urls.contains { vaultPath($0) != nil } || state.vault?.relativePath(of: folder) != nil
+        FileDrop.operation(urls, into: folder, mask: mask, keepsThoughts: state.keepsThoughts(urls, into: folder))
     }
 
     // MARK: Context menu
@@ -820,50 +967,26 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
         guard let column = columns.first(where: { $0.table.menu === menu }) else { return }
         let row = column.table.contextRow
         guard row >= 0, row < column.entries.count else {
-            let pasted = FileHandoff.fileURLs(on: .general).count
-            if pasted > 0 {
-                menu.addItem(ActionItem(pasted == 1 ? "Paste Item" : "Paste \(pasted) Items") { [weak self] in
-                    self?.paste(into: column.url, moving: false)
-                })
-                menu.addItem(.separator())
-            }
-            menu.addItem(ActionItem("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([column.url]) })
-            menu.addItem(ActionItem(model.showHidden ? "Hide Hidden Files" : "Show Hidden Files") { [weak self] in self?.toggleHidden() })
+            FileMenu.buildBackground(menu, folder: column.url, state: state, extra: [
+                ActionItem(model.showHidden ? "Hide Hidden Files" : "Show Hidden Files") { [weak self] in self?.toggleHidden() },
+            ])
             return
         }
-        let entry = column.entries[row]
-        let rel = vaultPath(entry.url)
-        menu.addItem(ActionItem("Open") { [weak self] in self?.open(entry) })
-        if !entry.isFolder {
-            if rel != nil {
-                menu.addItem(ActionItem("Open Beside") { [weak self] in
-                    if let rel { self?.state.openBeside(FileRef(relativePath: rel)) }
-                })
-            }
-            menu.addItem(ActionItem("Open in Default App") { [weak self] in self?.open(entry, externally: true) })
-        }
-        menu.addItem(ActionItem("Quick Look") { [weak self, weak column] in
-            guard let self, let column else { return }
-            column.table.selectRowIndexes([row], byExtendingSelection: false)
-            self.window?.makeFirstResponder(column.table)
-            QLPreviewPanel.shared().makeKeyAndOrderFront(nil)
-        })
-        menu.addItem(.separator())
-        menu.addItem(ActionItem("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([entry.url]) })
-        menu.addItem(ActionItem(entry.isFolder ? "Copy Folder" : "Copy File") { FileHandoff.copy(urls: [entry.url]) })
-        menu.addItem(ActionItem("Copy Path") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(entry.url.path, forType: .string)
-        })
-        if let rel {
-            menu.addItem(.separator())
-            let marked = state.isBookmarked(rel, folder: entry.isFolder)
-            menu.addItem(ActionItem(marked ? "Remove Bookmark" : "Bookmark") { [weak self] in
-                self?.state.toggleBookmark(path: rel, folder: entry.isFolder)
-            })
-            menu.addItem(.separator())
-            menu.addItem(ActionItem("Move to Trash") { [weak self] in self?.state.requestTrash(rel, in: self?.window) })
-        }
+        let entry = column.entries[row], table = column.table
+        FileMenu.build(menu, url: entry.url, isFolder: entry.isFolder, state: state, host: FileMenu.Host(
+            open: { [weak self] in self?.open(entry) },
+            rename: state.canRename(entry.url) ? { [weak self, weak column] in
+                guard let self, let column, let i = self.columns.firstIndex(where: { $0 === column }),
+                      let row = column.entries.firstIndex(of: entry) else { return }
+                self.beginRename(column: i, row: row)
+            } : nil,
+            quickLook: { [weak self, weak table] in
+                guard let self, let table else { return }
+                table.selectRowIndexes([row], byExtendingSelection: false)
+                self.window?.makeFirstResponder(table)
+                QLPreviewPanel.shared().makeKeyAndOrderFront(nil)
+            },
+            window: window))
     }
 
     // MARK: Quick Look
@@ -932,6 +1055,8 @@ private final class BrowserColumn {
     let url: URL
     var entries: [ColumnEntry] = []
     var loaded = false
+    /// Changed on disk while a rename was being typed; listed when it ends.
+    var stale = false
     var generation = 0
     let table = ColumnTableView()
     let scroll = ColumnScrollView()
@@ -1025,14 +1150,18 @@ private final class ColumnGrip: NSView {
 /// A column's list. Finder's keys on top of the table's own (↑ ↓, type-select).
 private final class ColumnTableView: NSTableView {
     weak var browser: ColumnBrowserView?
+    lazy var renamer = RowRenamer(table: self)
+    /// Finder's slow second click on a selected name, waiting out the double-click time.
+    private var slowClick: DispatchWorkItem?
 
     override func keyDown(with event: NSEvent) {
+        slowClick?.cancel()
         let modifiers = event.modifierFlags.intersection([.command, .option, .shift, .control])
         if modifiers.isEmpty {
             switch event.keyCode {
             case 124: browser?.moveRight(from: self); return                      // →
             case 123: browser?.moveLeft(from: self); return                       // ←
-            case 36, 76: browser?.openSelection(in: self); return                 // ↩
+            case 36, 76: browser?.renameSelection(in: self); return               // ↩ renames, as in Finder
             case 49: toggleQuickLook(); return                                    // Space
             default: break
             }
@@ -1108,8 +1237,33 @@ private final class ColumnTableView: NSTableView {
     override func rightMouseDown(with event: NSEvent) { showContextMenu(for: event) }
 
     override func mouseDown(with event: NSEvent) {
+        slowClick?.cancel()
+        slowClick = nil
         if event.modifierFlags.contains(.control) { showContextMenu(for: event); return }
-        super.mouseDown(with: event)
+        if renamer.isEditing { renamer.finish(commit: true) }
+        let point = convert(event.locationInWindow, from: nil)
+        let row = row(at: point)
+        // A click on the name of the row already selected, in the focused column: a rename,
+        // unless a second click makes it a double-click or the pointer drags it away.
+        let renames = event.clickCount == 1 && event.modifierFlags.intersection([.command, .shift, .option]).isEmpty
+            && window?.firstResponder === self && row >= 0 && row == selectedRow && isOnName(point, row: row)
+        let down = NSEvent.mouseLocation
+        super.mouseDown(with: event)   // tracks until the button comes up
+        guard renames else { return }
+        let up = NSEvent.mouseLocation
+        guard hypot(up.x - down.x, up.y - down.y) < 4, NSEvent.pressedMouseButtons == 0 else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.selectedRow == row, self.window?.firstResponder === self else { return }
+            self.slowClick = nil
+            self.browser?.renameSelection(in: self)
+        }
+        slowClick = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval, execute: work)
+    }
+
+    private func isOnName(_ point: NSPoint, row: Int) -> Bool {
+        guard let cell = view(atColumn: 0, row: row, makeIfNecessary: false) as? ColumnCellView else { return false }
+        return cell.nameFrame.contains(cell.convert(point, from: self))
     }
 
     private func showContextMenu(for event: NSEvent) {
@@ -1187,6 +1341,12 @@ private final class ColumnCellView: NSTableCellView {
     private let badge = NSTextField(labelWithString: "")
 
     var iconFrame: NSRect { icon.frame }
+    /// The name's text, as far as it runs, in the cell's coordinates.
+    var nameFrame: NSRect {
+        var frame = name.frame
+        frame.size.width = min(frame.width, name.attributedStringValue.size().width + 4)
+        return frame
+    }
 
     init() {
         super.init(frame: .zero)
@@ -1287,19 +1447,4 @@ private final class DirectoryWatcher {
         pending?.cancel()
         source.cancel()
     }
-}
-
-/// A context-menu item that runs a closure.
-private final class ActionItem: NSMenuItem {
-    private let run: () -> Void
-
-    init(_ title: String, run: @escaping () -> Void) {
-        self.run = run
-        super.init(title: title, action: #selector(runAction), keyEquivalent: "")
-        target = self
-    }
-
-    required init(coder: NSCoder) { fatalError("init(coder:) is not used") }
-
-    @objc private func runAction() { run() }
 }

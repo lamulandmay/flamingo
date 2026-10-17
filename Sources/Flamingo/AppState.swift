@@ -35,6 +35,8 @@ struct RenameRequest: Equatable {
     let id = UUID()
     let tab: SidebarTab
     let target: String
+    /// A new folder made while the columns are on screen: they rename it, not the sidebar.
+    var inColumns = false
 }
 
 /// The active preview, if it can move between anchors (PDF pages, media time).
@@ -203,6 +205,9 @@ final class AppState: ObservableObject {
         if !synchronizingPane { activePane.jumpRequest = jumpRequest }
     } }
     @Published private(set) var revealRequest: RevealRequest?
+    /// What the columns have selected, vault-relative, for the file explorer to highlight
+    /// without opening it (ColumnBrowser.swift). Cleared when the sidebar picks for itself.
+    @Published var columnsSelection: String?
     @Published private(set) var history = History()
     @Published var trailEnabled = TrailStore.isEnabled { didSet { TrailStore.isEnabled = trailEnabled; recents.refreshSoon(); recordSetting("Record Trail", before: oldValue, after: trailEnabled) { [weak self] in self?.trailEnabled = $0 } } }
 
@@ -348,7 +353,7 @@ final class AppState: ObservableObject {
         synchronizingPane = false
         textBuffers = [:]; openFiles = []; savedAnchors = [:]
         sourceHighlight = ""; selectedCommentID = nil
-        jumpRequest = nil; revealRequest = nil
+        jumpRequest = nil; revealRequest = nil; columnsSelection = nil
         comments = []; commentCounts = [:]; graph = Graph(); graphRevision &+= 1; sections = []
         history = History()
         graphStale = true
@@ -948,7 +953,9 @@ final class AppState: ObservableObject {
             if !fileSet.contains(ref) { setFiles(files + [ref]) }
             jump(to: ref, anchor: nil)
         }
-        renameRequest = RenameRequest(tab: .files, target: rel)
+        // The columns rename a folder they will show: one inside the folder they start at.
+        let shownInColumns = browser.style == .columns && browser.root.flatMap { ColumnBrowserModel.chain(from: $0, to: url) } != nil
+        renameRequest = RenameRequest(tab: .files, target: rel, inColumns: isFolder && shownInColumns)
     }
 
     /// Only the focused Files outline invokes this, through Command–Delete.
@@ -1578,6 +1585,7 @@ final class AppState: ObservableObject {
     /// The sidebar's selection in one step: the folder (a folder row, or the file's parent)
     /// and the file, so a folder-only selection is one history entry rather than two.
     func selectFromSidebar(folder: String?, file: FileRef?) {
+        if columnsSelection != nil { columnsSelection = nil }
         if selectedFolder != folder { selectedFolder = folder }
         if file == nil, selected == nil, !restoringHistory {
             history.push(History.Entry(file: nil, anchor: nil, mode: mode, folder: folder, transient: true))

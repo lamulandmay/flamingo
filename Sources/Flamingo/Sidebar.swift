@@ -1,4 +1,5 @@
 import AppKit
+import Quartz
 import SwiftUI
 import FlamingoCore
 import FlamingoDesign
@@ -267,13 +268,16 @@ private struct VaultSwitcher: View {
 /// The whole vault as a tree, each folder listed from disk when it is first opened. An
 /// `NSOutlineView` so arrow keys, ←/→, type-to-select, scrolling and drag and drop are the
 /// system's; each visible row hosts a `SidebarRow` so glyphs and type come from
-/// `FlamingoDesign`. Drag a file or folder onto a folder to move it there.
+/// `FlamingoDesign`. Drag a file or folder onto a folder to move it there, or drop files
+/// from Finder; ↩ renames, ⌘V pastes, ⌘Y is Quick Look; the context menu is the columns'
+/// (`FileMenu`). It follows what the columns select, and folders close again after a
+/// while left alone.
 struct FileExplorer: View {
     @EnvironmentObject var state: AppState
 
     var body: some View {
         FileExplorerOutline(state: state, tree: state.tree, revision: state.treeRevision, selected: state.selected,
-                            selectedFolder: state.selectedFolder, bookmarks: state.bookmarks,
+                            selectedFolder: state.selectedFolder, columnsSelection: state.columnsSelection, bookmarks: state.bookmarks,
                             reveal: state.revealRequest, collapse: state.collapseRequest.flatMap { $0.tab == .files ? $0.id : nil },
                             rename: state.renameRequest, autoReveal: state.autoReveal)
     }
@@ -285,6 +289,7 @@ private struct FileExplorerOutline: NSViewRepresentable {
     let revision: Int
     let selected: FileRef?
     let selectedFolder: String?
+    let columnsSelection: String?
     let bookmarks: Bookmarks
     let reveal: RevealRequest?
     let collapse: UUID?
@@ -295,7 +300,7 @@ private struct FileExplorerOutline: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let outline = SidebarOutlineView.make(label: "Files")
-        outline.registerForDraggedTypes([FileExplorerCoordinator.pathType])
+        outline.registerForDraggedTypes([FileExplorerCoordinator.pathType, .fileURL])
         outline.setDraggingSourceOperationMask([.move, .copy, .link], forLocal: true)
         outline.setDraggingSourceOperationMask(.copy, forLocal: false)
         outline.draggingDestinationFeedbackStyle = .regular
@@ -304,7 +309,9 @@ private struct FileExplorerOutline: NSViewRepresentable {
         outline.dataSource = coordinator
         outline.delegate = coordinator
         outline.target = coordinator
+        outline.action = #selector(FileExplorerCoordinator.clicked(_:))
         outline.doubleAction = #selector(FileExplorerCoordinator.doubleClicked(_:))
+        outline.menuOnEmptySpace = true
         let menu = NSMenu()
         menu.delegate = coordinator
         outline.menu = menu
@@ -344,6 +351,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     private var expanded: Set<String> = []
     private var lastSelected: FileRef?
     private var lastFolder: String?
+    private var lastColumns: String?
     private var showAllFolders = false
     private var rootItems: [AnyObject] = []
     private let pinnedHeader = ExplorerSection("Pinned")
@@ -355,13 +363,22 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     private var pinPaths: [String] {
         state.bookmarks.all.compactMap { $0.bookmark.kind == .folder ? $0.bookmark.path : nil }
     }
-    private var selectionPath: String? { state.selected?.relativePath ?? state.selectedFolder }
+    /// The open file, else what the columns have selected, else the sidebar's folder.
+    private var selectionPath: String? { state.selected?.relativePath ?? state.columnsSelection ?? state.selectedFolder }
     /// True while the outline's selection is being changed programmatically.
     private var suppressSelection = false
     /// True while a reload restores expansion, so nothing is persisted mid-way.
     private var restoring = false
     /// Clearing the row highlight must survive watcher refreshes without closing the preview.
     private var selectionCleared = false
+    /// A row shown in Quick Look from its context menu, without selecting (opening) it.
+    private var quickLookNode: FileNode?
+
+    /// Folders close after this long without the explorer being used or led anywhere, all
+    /// but the way to the current place, so it doesn't keep open every folder it went through.
+    static let idleCollapse: TimeInterval = 30
+    private var lastActivity = Date()
+    private var idleCheck: DispatchWorkItem?
 
     init(state: AppState) {
         self.state = state
@@ -381,6 +398,29 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
             guard let self, let node = self.selectedNode else { return false }
             return self.state.copyFiles([FileRef(relativePath: node.id)])
         }
+        outline.onReturn = { [weak self] in
+            guard let self, let node = self.selectedNode, !node.id.isEmpty else { return false }
+            self.beginRename(node)
+            return true
+        }
+        outline.onPaste = { [weak self] moving in
+            guard let self, let v = self.vault else { return false }
+            var folder = self.selectedNode
+            if let f = folder, !f.isFolder { folder = f.parent }
+            self.state.paste(into: self.url(of: folder) ?? v.root, moving: moving)
+            return true
+        }
+        outline.quickLookURL = { [weak self] in
+            guard let self, let node = self.quickLookNode ?? self.selectedNode else { return nil }
+            return self.url(of: node)
+        }
+        outline.onActivity = { [weak self] in self?.noteActivity() }
+    }
+
+    /// Where a row is on disk.
+    private func url(of node: FileNode?) -> URL? {
+        guard let v = vault, let node, node.depth >= 0 else { return nil }
+        return v.root.appendingPathComponent(node.id, isDirectory: node.isFolder)
     }
 
     /// Called from `makeNSView` and every `updateNSView`. Cheap unless something changed.
@@ -399,22 +439,31 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         if let reveal = v.reveal, state.take(reveal.id), reveal.force || v.autoReveal {
             selectionCleared = false
             self.reveal(reveal.file, scroll: true, expand: reveal.expand)
+            noteActivity()
         }
-        if v.selected != lastSelected || v.selectedFolder != lastFolder {
+        if v.selected != lastSelected || v.selectedFolder != lastFolder || v.columnsSelection != lastColumns {
             selectionCleared = false
             lastSelected = v.selected
             lastFolder = v.selectedFolder
-            if let path = v.selected?.relativePath ?? v.selectedFolder {
-                if selectedNode?.id != path {
-                    let ref = FileRef(relativePath: path)
-                    let shown = v.autoReveal ? self.reveal(ref, scroll: true) : selectIfVisible(ref)
-                    if !shown { deselectFile() }
-                }
+            lastColumns = v.columnsSelection
+            quickLookNode = nil
+            func place(_ path: String) -> Bool {
+                if selectedNode?.id == path { return true }
+                let ref = FileRef(relativePath: path)
+                return v.autoReveal ? self.reveal(ref, scroll: true) : selectIfVisible(ref)
+            }
+            if let path = v.selected?.relativePath ?? v.columnsSelection ?? v.selectedFolder {
+                // Something the columns show that the tree leaves out (an ignored file):
+                // its folder instead.
+                var shown = place(path)
+                if !shown, v.selected == nil, path == v.columnsSelection, let folder = v.selectedFolder { shown = place(folder) }
+                if !shown { deselectFile() }
             } else {
                 deselectFile()
             }
+            noteActivity()
         }
-        if let rename = v.rename, rename.tab == .files, state.take(rename.id) {
+        if let rename = v.rename, rename.tab == .files, !rename.inColumns, state.take(rename.id) {
             let path = rename.target
             DispatchQueue.main.async { [weak self] in self?.beginRename(path) }
         }
@@ -446,6 +495,8 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         reloadRows()
         lastSelected = state.selected
         lastFolder = state.selectedFolder
+        lastColumns = state.columnsSelection
+        noteActivity()
     }
 
     /// Pinned folders first, a hairline, then the vault's own tree: every folder, then the
@@ -510,6 +561,66 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         persistExpansion()
     }
 
+    // MARK: Closing folders when left alone
+
+    private func noteActivity() {
+        lastActivity = Date()
+        if idleCheck == nil { scheduleIdleCheck(after: Self.idleCollapse) }
+    }
+
+    private func scheduleIdleCheck(after delay: TimeInterval) {
+        let work = DispatchWorkItem { [weak self] in self?.idleCheckFired() }
+        idleCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func idleCheckFired() {
+        idleCheck = nil
+        guard let outline, let window = outline.window, window.isVisible else { return }
+        let idle = Date().timeIntervalSince(lastActivity)
+        if idle < Self.idleCollapse { return scheduleIdleCheck(after: Self.idleCollapse - idle) }
+        if inUse(in: window) { return noteActivity() }
+        collapseIdle()
+    }
+
+    /// The pointer over the list, a name being typed, its menu open, or a drag under way.
+    private func inUse(in window: NSWindow) -> Bool {
+        if outline.isEditing || outline.contextRow >= 0 || NSEvent.pressedMouseButtons != 0 { return true }
+        let mouse = NSEvent.mouseLocation
+        guard NSWindow.windowNumber(at: mouse, belowWindowWithWindowNumber: 0) == window.windowNumber else { return false }
+        return scroll.bounds.contains(scroll.convert(window.convertPoint(fromScreen: mouse), from: nil))
+    }
+
+    /// Closes every open folder except those holding the selected row (or, with the
+    /// highlight cleared, the current place).
+    private func collapseIdle() {
+        var keepRows = Set<ObjectIdentifier>(), keepPaths = Set<String>()
+        var node = selectedNode?.parent
+        while let n = node, n.depth >= 0 { keepRows.insert(ObjectIdentifier(n)); keepPaths.insert(n.id); node = n.parent }
+        if selectedNode == nil, let path = selectionPath {
+            var parent = (path as NSString).deletingLastPathComponent
+            while !parent.isEmpty { keepPaths.insert(parent); parent = (parent as NSString).deletingLastPathComponent }
+        }
+        let closing = (0..<outline.numberOfRows).reversed().compactMap { row -> FileNode? in
+            guard let n = outline.item(atRow: row) as? FileNode, n.isFolder, outline.isItemExpanded(n) else { return nil }
+            let kept = selectedNode == nil ? keepPaths.contains(n.id) : keepRows.contains(ObjectIdentifier(n))
+            return kept ? nil : n
+        }
+        guard !closing.isEmpty || !expanded.isSubset(of: keepPaths) else { return }
+        let wasSuppressed = suppressSelection
+        restoring = true
+        suppressSelection = true
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Theme.Motion.fastSeconds
+            for n in closing { outline.animator().collapseItem(n, collapseChildren: true) }
+        }
+        suppressSelection = wasSuppressed
+        restoring = false
+        expanded.formIntersection(keepPaths)
+        persistExpansion()
+        if outline.selectedRow >= 0 { outline.scrollRowIntoView(outline.selectedRow) }
+    }
+
     /// Expands the file's ancestors (outermost first), selects its row and, if asked,
     /// scrolls it into view. Never calls back into `state.select`. `false` when the file
     /// isn't in the tree.
@@ -566,6 +677,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     private func beginRename(_ node: FileNode) {
         let row = outline.row(forItem: node)
         guard row >= 0 else { return }
+        noteActivity()
         let name = node.name
         let stem = node.isFolder ? name : (name as NSString).deletingPathExtension
         let id = node.id
@@ -601,13 +713,22 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     }
 
     /// Onto a folder, or onto a file's folder; never into the dragged folder itself or
-    /// where it already is.
+    /// where it already is. Files from Finder (or from outside the vault in the columns)
+    /// move or copy in by Finder's rules, as they do in the columns.
     func outlineView(_ outlineView: NSOutlineView, validateDrop info: NSDraggingInfo, proposedItem item: Any?,
                      proposedChildIndex index: Int) -> NSDragOperation {
-        guard item == nil || item is FileNode,
-              let path = info.draggingPasteboard.string(forType: Self.pathType), !path.isEmpty else { return [] }
+        guard item == nil || item is FileNode else { return [] }
+        noteActivity()
         var target = item as? FileNode
         if let t = target, !t.isFolder { target = t.parent.flatMap { $0.depth >= 0 ? $0 : nil } }
+        guard let path = info.draggingPasteboard.string(forType: Self.pathType), !path.isEmpty else {
+            let urls = FileHandoff.fileURLs(on: info.draggingPasteboard)
+            guard let folder = url(of: target) ?? vault?.root, !urls.isEmpty,
+                  urls.allSatisfy({ FileDrop.canDrop($0, into: folder) }) else { return [] }
+            outlineView.setDropItem(target, dropChildIndex: NSOutlineViewDropOnItemIndex)
+            return FileDrop.operation(urls, into: folder, mask: info.draggingSourceOperationMask,
+                                      keepsThoughts: state.keepsThoughts(urls, into: folder))
+        }
         let folder = target?.id ?? ""
         let parent = (path as NSString).deletingLastPathComponent
         guard folder != parent, !FileTree.contains(path, folder) else { return [] }
@@ -616,12 +737,20 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     }
 
     func outlineView(_ outlineView: NSOutlineView, acceptDrop info: NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
-        guard item == nil || item is FileNode,
-              let path = info.draggingPasteboard.string(forType: Self.pathType), !path.isEmpty else { return false }
+        guard item == nil || item is FileNode else { return false }
         let folder = (item as? FileNode)?.id ?? ""
         if !folder.isEmpty, let node = item as? FileNode, !outline.isItemExpanded(node) {
             expanded.insert(folder)
             persistExpansion()
+        }
+        guard let path = info.draggingPasteboard.string(forType: Self.pathType), !path.isEmpty else {
+            let urls = FileHandoff.fileURLs(on: info.draggingPasteboard)
+            guard let into = url(of: item as? FileNode) ?? vault?.root, !urls.isEmpty else { return false }
+            let operation = FileDrop.operation(urls, into: into, mask: info.draggingSourceOperationMask,
+                                               keepsThoughts: state.keepsThoughts(urls, into: into))
+            guard !operation.isEmpty else { return false }
+            state.transfer(urls, into: into, moving: operation == .move)
+            return true
         }
         return state.move(path, into: folder)
     }
@@ -700,15 +829,19 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
+        if QLPreviewPanel.sharedPreviewPanelExists(), QLPreviewPanel.shared().isVisible { QLPreviewPanel.shared().reloadData() }
         guard !suppressSelection else { return }
         guard let node = selectedNode else { return }
         selectionCleared = false
+        quickLookNode = nil
+        noteActivity()
         state.selectFromSidebar(folder: node.ref == nil ? node.id : (node.id as NSString).deletingLastPathComponent,
                                 file: node.ref)
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
         guard let node = notification.userInfo?["NSObject"] as? FileNode else { return }
+        if !restoring { noteActivity() }
         if !restoring, !expanded.contains(node.id) {
             expanded.insert(node.id)
             persistExpansion()
@@ -720,12 +853,26 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     }
 
     func outlineViewItemDidCollapse(_ notification: Notification) {
-        guard !restoring, let node = notification.userInfo?["NSObject"] as? FileNode, expanded.contains(node.id) else { return }
+        guard !restoring, let node = notification.userInfo?["NSObject"] as? FileNode else { return }
+        noteActivity()
+        guard expanded.contains(node.id) else { return }
         expanded.remove(node.id)
         persistExpansion()
     }
 
     // MARK: Mouse
+
+    /// A click on the row already selected changes no selection, so a row highlighted
+    /// because the columns have it selected opens here, as any other click would.
+    @objc func clicked(_ sender: Any?) {
+        let row = outline.clickedRow
+        guard row >= 0, row == outline.selectedRow, let node = outline.item(atRow: row) as? FileNode else { return }
+        if let ref = node.ref {
+            if state.selected != ref { state.selectFromSidebar(folder: (node.id as NSString).deletingLastPathComponent, file: ref) }
+        } else if state.columnsSelection != nil || state.selectedFolder != node.id {
+            state.selectFromSidebar(folder: node.id, file: nil)
+        }
+    }
 
     @objc func doubleClicked(_ sender: Any?) {
         let row = outline.clickedRow
@@ -743,106 +890,25 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        guard let v = vault else { return }
         let row = outline.contextRow
-        guard row >= 0, let node = outline.item(atRow: row) as? FileNode else { return }
-        func add(_ title: String, _ action: Selector) {
-            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
-            item.target = self
-            item.representedObject = node
-            menu.addItem(item)
-        }
-        let bookmarked = state.isBookmarked(node.id, folder: node.isFolder)
-        if let ref = node.ref {
-            add("Open Beside", #selector(openBeside(_:)))
-            add("Open in " + (state.defaultAppName(for: ref) ?? "Default App"), #selector(openInApp(_:)))
-            add("Leave a Thought", #selector(leaveThought(_:)))
-        } else {
-            add("New File…", #selector(newFile(_:)))
-            add("New Note", #selector(newNote(_:)))
-            add("New Folder", #selector(newFolder(_:)))
-            add("Search in Folder", #selector(searchInFolder(_:)))
-        }
-        menu.addItem(.separator())
-        add(node.isFolder ? (bookmarked ? "Unpin Folder" : "Pin Folder") : (bookmarked ? "Remove Bookmark" : "Bookmark"), #selector(toggleBookmark(_:)))
-        if !node.id.isEmpty { add("Rename…", #selector(rename(_:))) }
-        menu.addItem(.separator())
-        add("Reveal in Finder", #selector(revealInFinder(_:)))
-        add(node.isFolder ? "Copy Folder" : "Copy File", #selector(copyFile(_:)))
-        add("Copy Path", #selector(copyPath(_:)))
+        guard row >= 0 else { return FileMenu.buildBackground(menu, folder: v.root, state: state) }
+        guard let node = outline.item(atRow: row) as? FileNode, let url = url(of: node) else { return }
+        noteActivity()
+        FileMenu.build(menu, url: url, isFolder: node.isFolder, state: state, host: FileMenu.Host(
+            open: { [weak self] in self?.state.openFromBrowser(url, isFolder: node.isFolder) },
+            rename: node.id.isEmpty ? nil : { [weak self] in self?.beginRename(node) },
+            quickLook: { [weak self] in
+                guard let self else { return }
+                self.quickLookNode = node
+                self.outline.window?.makeFirstResponder(self.outline)
+                self.outline.toggleQuickLook()
+            },
+            window: outline.window))
     }
 
     func menuDidClose(_ menu: NSMenu) {
         outline.endContextMenu()
-    }
-
-    private func node(_ sender: NSMenuItem) -> FileNode? { sender.representedObject as? FileNode }
-
-    @objc private func openInApp(_ sender: NSMenuItem) {
-        guard let ref = node(sender)?.ref else { return }
-        state.openExternally(ref)
-    }
-
-    @objc private func openBeside(_ sender: NSMenuItem) {
-        guard let ref = node(sender)?.ref else { return }
-        state.openBeside(ref)
-    }
-
-    @objc private func newFile(_ sender: NSMenuItem) {
-        guard let n = node(sender) else { return }
-        state.showNewFile(in: n.id)
-    }
-
-    @objc private func newNote(_ sender: NSMenuItem) {
-        guard let n = node(sender) else { return }
-        state.newNote(in: n.id)
-    }
-
-    @objc private func newFolder(_ sender: NSMenuItem) {
-        guard let n = node(sender) else { return }
-        state.newFolder(in: n.id)
-    }
-
-    @objc private func searchInFolder(_ sender: NSMenuItem) {
-        guard let n = node(sender) else { return }
-        state.showSidebarSearch(SidebarSearchModel.scopedQuery(folder: n.id))
-    }
-
-    @objc private func toggleBookmark(_ sender: NSMenuItem) {
-        guard let n = node(sender) else { return }
-        state.toggleBookmark(path: n.id, folder: n.isFolder)
-    }
-
-    @objc private func rename(_ sender: NSMenuItem) {
-        guard let n = node(sender) else { return }
-        beginRename(n)
-    }
-
-    @objc private func revealInFinder(_ sender: NSMenuItem) {
-        guard let n = node(sender) else { return }
-        // A folder has no ref; its relative path resolves the same way through the vault.
-        state.revealInFinder(n.ref ?? FileRef(relativePath: n.id))
-    }
-
-    @objc private func copyPath(_ sender: NSMenuItem) {
-        guard let n = node(sender) else { return }
-        state.copyPath(n.ref ?? FileRef(relativePath: n.id))
-    }
-
-    @objc private func copyFile(_ sender: NSMenuItem) {
-        guard let n = node(sender) else { return }
-        state.copyFiles([n.ref ?? FileRef(relativePath: n.id)])
-    }
-
-    @objc private func leaveThought(_ sender: NSMenuItem) {
-        guard let n = node(sender), let ref = n.ref else { return }
-        let row = outline.row(forItem: n)
-        if row >= 0 {
-            suppressSelection = true
-            outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            suppressSelection = false
-        }
-        state.select(ref, source: .sidebar)
-        state.leaveThought()
     }
 }
 
