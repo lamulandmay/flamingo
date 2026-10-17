@@ -37,6 +37,8 @@ enum QAHook {
     private static func run(_ command: String) {
         Log.debug("qa: \(command)")
         let parts = command.split(separator: " ", maxSplits: 1).map(String.init)
+        // Briefing QA verbs
+        if parts.first == "briefing" { return runBriefing(parts.count > 1 ? parts[1] : "") }
         guard parts.count == 2 else { return }
         if parts[0] == "type" {
             for ch in parts[1] { send(code: 0, chars: String(ch), flags: []) }
@@ -82,7 +84,7 @@ enum QAHook {
         }
         if parts[0] == "window" {
             guard let window = (NSApp.delegate as? AppDelegate)?.window else { return }
-            let n = parts[1].split(separator: " ").compactMap { Double($0) }
+            let n = parts[1].split(whereSeparator: { $0 == " " || $0 == "x" }).compactMap { Double($0) }
             if parts[1] == "full", let screen = window.screen { window.setFrame(screen.visibleFrame, display: true) }
             else if n.count == 2 { window.setContentSize(NSSize(width: n[0], height: n[1])) }
             return
@@ -153,6 +155,51 @@ enum QAHook {
         if let f = special[code] { chars = String(UnicodeScalar(UInt16(f)).map(Character.init) ?? " ") }
         else { chars = [51: "\u{7f}", 117: "\u{f728}", 36: "\r", 53: "\u{1b}", 48: "\t"][code] ?? letter(code) }
         send(code: code, chars: chars, flags: flags)
+    }
+
+    // Briefing QA verbs
+    //     briefing                 opens the morning inbox without zooming the window
+    //     briefing zoom            opens it as the day's first open does: the window grows to the screen
+    //     briefing reset           forgets that today's briefing was shown
+    //     briefing close           what Esc does
+    //     briefing key e           j k e s r a esc return delete up down left right
+    //     briefing select 3        the nth item the arrows walk (1-based)
+    //     briefing reply text      replies to the selected thought; briefing attach q3 attaches a loose capture
+    //     briefing status          logs the selection, the items and the window frame
+    private static func runBriefing(_ rest: String) {
+        guard let state = (NSApp.delegate as? AppDelegate)?.state else { return }
+        let model = state.briefing
+        let args = rest.split(separator: " ", maxSplits: 1).map(String.init)
+        switch args.first ?? "" {
+        case "": model.show(zoom: false)
+        case "zoom": model.show(zoom: true)
+        case "reset": model.resetDay()
+        case "close": model.close()
+        case "key":
+            let name = args.count > 1 ? args[1] : ""
+            let codes: [String: UInt16] = ["esc": 53, "return": 36, "delete": 51, "up": 126, "down": 125, "left": 123, "right": 124]
+            let action: BriefingKeyAction = codes[name].map { BriefingKeys.action(characters: nil, keyCode: $0, modifiers: []) }
+                ?? BriefingKeys.action(characters: name, keyCode: 0, modifiers: [])
+            model.handle(action)
+        case "select":
+            if let n = args.dropFirst().first.flatMap({ Int($0) }), model.navigation.indices.contains(n - 1) { model.select(model.navigation[n - 1].id) }
+        case "reply":
+            if let item = model.selectedItem { model.beginReply(item); model.replyText = args.count > 1 ? args[1] : ""; if args.count > 1 { model.submitReply() } }
+        case "attach":
+            guard let item = model.selectedItem else { return }
+            model.beginAttach(item)
+            guard args.count > 1 else { return }
+            model.attachQuery = args[1]; model.searchTargets()
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                if let first = model.attachMatches.first { model.attach(to: first) }
+            }
+        case "status":
+            let frame = state.hostWindow.map { BriefingWindowPlan.encode($0.frame) } ?? "-"
+            let screen = state.hostWindow?.screen.map { BriefingWindowPlan.encode($0.visibleFrame) } ?? "-"
+            Log.debug("qa: briefing status presented=\(model.isPresented) selection=\(model.selection ?? "-") items=\(model.navigation.count) zoomed=\(model.zoomed) frame=\(frame) visible=\(screen)")
+        default: Log.debug("qa: briefing: unknown verb \(args.first ?? "")")
+        }
     }
 
     private static func runTiling(_ verb: String, _ rest: String, _ state: AppState) {

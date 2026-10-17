@@ -15,7 +15,7 @@ struct CaptureDraft: Codable, Equatable, Sendable {
     var updatedAt = Date()
 }
 
-enum CaptureDraftStore {
+public enum CaptureDraftStore {
     private static let lock = NSLock()
     static func url(in vault: Vault) -> URL { vault.stateDir.appendingPathComponent("capture-drafts.json") }
     static func recoveryKey(for file: FileRef, in vault: Vault) -> String {
@@ -26,6 +26,11 @@ enum CaptureDraftStore {
         ThoughtDraftCheckpoint.enqueue(key: recoveryKey(for: draft.file, in: vault), operation: {
             try save(draft, in: vault)
         }, completion: completion)
+    }
+    /// The first lines of the unsaved thoughts left behind, newest first (the briefing lists them).
+    public static func pending(in vault: Vault) -> [String] {
+        drafts(in: vault).sorted { $0.updatedAt > $1.updatedAt }
+            .map { $0.text.split(separator: "\n", omittingEmptySubsequences: true).first.map(String.init) ?? $0.text }
     }
     static func drafts(in vault: Vault) -> [CaptureDraft] {
         lock.lock(); defer { lock.unlock() }
