@@ -2,7 +2,9 @@ import AppKit
 import SwiftUI
 import FlamingoCore
 
-enum DocumentPaneID: String, Codable { case primary, secondary }
+/// The fixed pool of four panes. Raw values never change: older snapshots hold `primary`
+/// and `secondary`, and newer ones still write only those in their legacy fields.
+enum DocumentPaneID: String, Codable, CaseIterable { case primary, secondary, third, fourth }
 
 /// Navigation belongs to a document surface. The shell mirrors only the focused pane;
 /// scrolling, loading or playing media in its neighbour cannot change the capture target.

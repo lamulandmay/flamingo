@@ -45,6 +45,19 @@ enum Defaults {
         set { d.set(newValue, forKey: "radialHoldDelay") }
     }
 
+    /// Where the lines between tiles sit, per layout. Shared by every vault.
+    static var tileFractions: [TileLayout: TileFractions] {
+        get {
+            guard let data = d.data(forKey: "tileFractions"),
+                  let raw = try? JSONDecoder().decode([String: TileFractions].self, from: data) else { return [:] }
+            return Dictionary(uniqueKeysWithValues: raw.compactMap { key, value in TileLayout(rawValue: key).map { ($0, value) } })
+        }
+        set {
+            let raw = Dictionary(uniqueKeysWithValues: newValue.map { ($0.key.rawValue, $0.value) })
+            if let data = try? JSONEncoder().encode(raw) { d.set(data, forKey: "tileFractions") }
+        }
+    }
+
     static var railVisible: Bool {
         get { d.object(forKey: "railVisible") as? Bool ?? true }
         set { d.set(newValue, forKey: "railVisible") }

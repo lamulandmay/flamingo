@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import UniformTypeIdentifiers
 import SwiftUI
 import FlamingoCore
@@ -63,7 +64,7 @@ enum PaletteMode { case commands, search }
 @MainActor
 final class AppState: ObservableObject {
     let actionHistory: ActionHistory
-    private var suppressActionHistory = false
+    var suppressActionHistory = false
 
     // MARK: Contract
 
@@ -241,12 +242,19 @@ final class AppState: ObservableObject {
         get { activePane.navigator }
         set { activePane.navigator = newValue }
     }
-    let primaryPane = DocumentPane(id: .primary)
-    let secondaryPane = DocumentPane(id: .secondary)
-    @Published private(set) var activePaneID: DocumentPaneID = .primary
-    @Published private(set) var splitVisible = false
-    var activePane: DocumentPane { activePaneID == .primary ? primaryPane : secondaryPane }
-    private var synchronizingPane = false
+    /// The four panes, built once; the layout decides which show (AppState+Tiling.swift).
+    let allPanes = DocumentPaneID.allCases.map { DocumentPane(id: $0) }
+    let tiling = PaneTiling()
+    /// What each empty pane offers (PaneLauncher.swift).
+    let launcher = PaneLauncherModel()
+    private var tilingObserver: AnyCancellable?
+    var primaryPane: DocumentPane { allPanes[0] }
+    var secondaryPane: DocumentPane { allPanes[1] }
+    @Published var activePaneID: DocumentPaneID = .primary
+    var splitVisible: Bool { tiling.arrangement.kind != .single }
+    var activePane: DocumentPane { pane(activePaneID) }
+    func pane(_ id: DocumentPaneID) -> DocumentPane { allPanes[DocumentPaneID.allCases.firstIndex(of: id)!] }
+    var synchronizingPane = false
     /// Set by the sidebar so panels can hand keyboard focus back.
     var focusSidebar: (() -> Void)?
     /// The main window. Floating panels parent to it.
@@ -268,10 +276,13 @@ final class AppState: ObservableObject {
 
     init(actionHistory: ActionHistory? = nil) {
         self.actionHistory = actionHistory ?? ActionHistory()
-        for pane in [primaryPane, secondaryPane] {
+        for pane in allPanes {
             pane.onActivate = { [weak self] id in self?.activatePane(id) }
             pane.onLocationChanged = { [weak self] pane in self?.paneLocationChanged(pane) }
         }
+        // Layout changes are rare, so the whole shell may redraw for them (menus, the top bar).
+        tilingObserver = tiling.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        launcher.attach(self)
         sidebarSearch.runUnified = { [weak self] query in
             guard let self else { throw CancellationError() }
             return try await self.unifiedSearch(query, limit: 150)
@@ -327,7 +338,7 @@ final class AppState: ObservableObject {
         tree = FileTree(vault: v, sort: fileSort)
         sidebarSearch.reset()
         synchronizingPane = true
-        primaryPane.reset(); secondaryPane.reset(); activePaneID = .primary; splitVisible = false
+        allPanes.forEach { $0.reset() }; activePaneID = .primary; tiling.set(TileArrangement())
         selected = nil; selectedFolder = nil; anchor = nil; navigator = nil
         synchronizingPane = false
         textBuffers = [:]; openFiles = []; savedAnchors = [:]
@@ -392,10 +403,7 @@ final class AppState: ObservableObject {
         }
         if let split = remembered?.split {
             synchronizingPane = true
-            primaryPane.restore(split.primary, in: v)
-            secondaryPane.restore(split.secondary, in: v)
-            splitVisible = split.visible
-            activePaneID = split.visible ? split.activePane : .primary
+            restoreSplit(split, in: v)
             synchronizingPane = false
             synchronizeActivePane(record: false)
             pendingWorkspaceSelection = activePane.pendingFile
@@ -808,8 +816,7 @@ final class AppState: ObservableObject {
         guard !openingVault, let v = vault else { return }
         Defaults.setWorkspace(WorkspaceSnapshot(selected: selected ?? pendingWorkspaceSelection, folder: selectedFolder, mode: mode.rawValue,
                                                 anchors: savedAnchors, openFiles: openFiles, history: SavedHistory(history),
-                                                split: SavedSplitWorkspace(visible: splitVisible, activePane: activePaneID,
-                                                                          primary: primaryPane.snapshot, secondary: secondaryPane.snapshot)), in: v)
+                                                split: savedSplit()), in: v)
     }
 
     /// Completion and outbox drainage arrive separately. Failed/cancelled scans never
@@ -824,7 +831,7 @@ final class AppState: ObservableObject {
         let pending = pendingWorkspaceSelection
         pendingWorkspaceSelection = nil
         workspaceRestorationPending = false
-        for pane in [primaryPane, secondaryPane] where pane.id != activePaneID {
+        for pane in allPanes where pane.id != activePaneID {
             if let pending = pane.pendingFile {
                 let resolved = v.exists(pending) ? pending : Wikilink.resolve(pending.relativePath, in: v, candidates: openFiles)
                 let location = pane.anchor ?? pane.anchors[pending.relativePath]
@@ -838,7 +845,7 @@ final class AppState: ObservableObject {
             let current = v.exists(pending) ? pending : Wikilink.resolve(pending.relativePath, in: v, candidates: openFiles)
             if let current { select(current, anchor: activePane.anchor ?? activePane.anchors[pending.relativePath] ?? savedAnchors[current.relativePath], source: .other, record: false) }
         }
-        for pane in [primaryPane, secondaryPane] { pane.pendingFile = nil }
+        for pane in allPanes { pane.pendingFile = nil }
         pruneMissingPanes()
         persistWorkspace()
     }
@@ -849,11 +856,11 @@ final class AppState: ObservableObject {
 
     func closeCurrentDocument() {
         guard canCloseDocument else { return }
-        if splitVisible { closeActivePane() } else if let selected { closeTab(selected) }
+        if splitVisible { closePane(activePaneID) } else if let selected { closeTab(selected) }
     }
 
     /// Drops a file from the tab strip once its draft is safe; false leaves it open.
-    private func releaseTab(_ file: FileRef) -> Bool {
+    func releaseTab(_ file: FileRef) -> Bool {
         if let buffer = textBuffers[file.relativePath], !buffer.persistDraft() {
             showToast(ToastMessage(text: "This draft could not be backed up. Save a copy before closing it.")); return false
         }
@@ -870,7 +877,7 @@ final class AppState: ObservableObject {
         defer { suppressActionHistory = wasSuppressed }
         let before = undoWorkspaceSnapshot()
         guard releaseTab(file) else { return }
-        for pane in [primaryPane, secondaryPane] where pane.id != activePaneID && (pane.file == file || pane.pendingFile == file) { pane.show(nil); pane.pendingFile = nil }
+        for pane in allPanes where pane.id != activePaneID && (pane.file == file || pane.pendingFile == file) { pane.show(nil); pane.pendingFile = nil }
         if selected == file { select(openFiles.last, source: .other) }
         persistWorkspace()
         let after = undoWorkspaceSnapshot()
@@ -1000,7 +1007,7 @@ final class AppState: ObservableObject {
             return false
         } catch { report(error); return false }
 
-        for pane in [primaryPane, secondaryPane] where pane.id != activePaneID { pane.remove(path) }
+        for pane in allPanes where pane.id != activePaneID { pane.remove(path) }
         openFiles.removeAll { FileTree.contains(path, $0.relativePath) }
         if let pending = pendingWorkspaceSelection, FileTree.contains(path, pending.relativePath) { pendingWorkspaceSelection = nil }
         for key in affected.keys { textBuffers.removeValue(forKey: key) }
@@ -1124,7 +1131,7 @@ final class AppState: ObservableObject {
         do { try s.connections.reconcile(oldPath: old, newPath: new) } catch { report(error) }
         do { try s.trail.reconcile(oldPath: old, newPath: new) } catch { report(error) }
         do { try PathAliases(vault: v).reconcile(oldPath: old, newPath: new) } catch { report(error) }
-        for pane in [primaryPane, secondaryPane] where pane.id != activePaneID { pane.relocate(old, to: new) }
+        for pane in allPanes where pane.id != activePaneID { pane.relocate(old, to: new) }
         history.relocate(old, to: new)
         func relocatedPath(_ path: String) -> String { FileTree.contains(old, path) ? new + path.dropFirst(old.count) : path }
         openFiles = openFiles.map { FileRef(relativePath: relocatedPath($0.relativePath)) }
@@ -1237,7 +1244,7 @@ final class AppState: ObservableObject {
                     if updatedBookmarks != bookmarks, bookmarksError == nil {
                         try updatedBookmarks.save(in: s.vault); bookmarks = updatedBookmarks
                     }
-                    for pane in [primaryPane, secondaryPane] where pane.id != activePaneID { pane.relocate(move.from.relativePath, to: move.to.relativePath) }
+                    for pane in allPanes where pane.id != activePaneID { pane.relocate(move.from.relativePath, to: move.to.relativePath) }
                     history.relocate(move.from.relativePath, to: move.to.relativePath)
                     openFiles = openFiles.map { $0 == move.from ? move.to : $0 }
                     if pendingWorkspaceSelection == move.from { pendingWorkspaceSelection = move.to }
@@ -1326,7 +1333,7 @@ final class AppState: ObservableObject {
             guard let (list, set) = await s.applyDiskChanges(refs), self.session === s else { return }
             let gone = selected.map { !set.contains($0) } ?? false
             setFiles(list, set: set)
-            if gone || primaryPane.file != nil || secondaryPane.file != nil { pruneMissingPanes() }
+            if gone || allPanes.contains(where: { $0.file != nil }) { pruneMissingPanes() }
         }
     }
 
@@ -1386,13 +1393,13 @@ final class AppState: ObservableObject {
     /// Focusing a pane republishes its existing location without issuing another jump.
     /// This preserves native text selections, PDF scroll positions and media playheads.
     func activatePane(_ id: DocumentPaneID) {
-        guard id != activePaneID, id == .primary || splitVisible else { return }
+        guard id != activePaneID, tiling.arrangement.visible.contains(id) else { return }
         activePane.cancelFocusRequest()
         activePaneID = id
         synchronizeActivePane(record: true)
     }
 
-    private func synchronizeActivePane(record: Bool) {
+    func synchronizeActivePane(record: Bool) {
         let changedFile = selected != activePane.file
         synchronizingPane = true
         selected = activePane.file
@@ -1418,90 +1425,11 @@ final class AppState: ObservableObject {
         persistWorkspace()
     }
 
-    func openBeside(_ file: FileRef, anchor: FileAnchor? = nil) {
-        let before = undoWorkspaceSnapshot(), wasSuppressed = suppressActionHistory
-        suppressActionHistory = true
-        defer { suppressActionHistory = wasSuppressed; recordWorkspaceChange("Open Beside", before: before) }
-        guard vault?.exists(file) == true else { return }
-        let destination: DocumentPaneID = activePaneID == .primary ? .secondary : .primary
-        splitVisible = true
-        mode = .files
-        activatePane(destination)
-        select(file, anchor: anchor, source: .other)
-        hostWindow?.makeFirstResponder(nil)
-        activePane.focusWhenReady()
-        persistWorkspace()
-    }
-
-    func toggleSplit() {
-        let before = undoWorkspaceSnapshot(), wasSuppressed = suppressActionHistory
-        suppressActionHistory = true
-        defer { suppressActionHistory = wasSuppressed; recordWorkspaceChange("Toggle Split View", before: before) }
-        guard vault != nil else { return }
-        if splitVisible { closeSplit(); return }
-        splitVisible = true
-        mode = .files
-        if secondaryPane.file == nil, let selected {
-            secondaryPane.show(selected)
-            secondaryPane.anchor = anchor
-            secondaryPane.jumpRequest = anchor.map { JumpRequest(file: selected, anchor: $0) }
-            secondaryPane.sourceHighlight = sourceHighlight
-            secondaryPane.readSource = primaryPane.readSource
-        }
-        persistWorkspace()
-    }
-
-    func closeSplit() {
-        let before = undoWorkspaceSnapshot(), wasSuppressed = suppressActionHistory
-        suppressActionHistory = true
-        defer { suppressActionHistory = wasSuppressed; recordWorkspaceChange("Close Split View", before: before) }
-        guard splitVisible else { return }
-        activatePane(.primary)
-        splitVisible = false
-        hostWindow?.makeFirstResponder(nil)
-        primaryPane.focusWhenReady()
-        persistWorkspace()
-    }
-
-    /// The focused pane closes with its tab (unless its neighbour shows the same file);
-    /// the remaining document always ends up in the primary pane.
-    private func closeActivePane() {
-        let before = undoWorkspaceSnapshot(), wasSuppressed = suppressActionHistory
-        suppressActionHistory = true
-        defer { suppressActionHistory = wasSuppressed; recordWorkspaceChange("Close Pane", before: before) }
-        guard splitVisible, let vault else { return }
-        let closing = activePane, remaining = activePaneID == .primary ? secondaryPane : primaryPane
-        if let file = closing.file, file != remaining.file { guard releaseTab(file) else { return } }
-        if closing.id == .primary {
-            let anchors = primaryPane.anchors, highlight = remaining.sourceHighlight
-            synchronizingPane = true
-            primaryPane.restore(remaining.snapshot, in: vault)
-            primaryPane.anchors.merge(anchors) { kept, _ in kept }
-            primaryPane.sourceHighlight = highlight
-            synchronizingPane = false
-            synchronizeActivePane(record: true)
-        } else {
-            activatePane(.primary)
-        }
-        secondaryPane.show(nil)
-        splitVisible = false
-        hostWindow?.makeFirstResponder(nil)
-        primaryPane.focusWhenReady()
-        persistWorkspace()
-    }
-
-    func focusOtherPane() {
-        guard splitVisible else { return }
-        activatePane(activePaneID == .primary ? .secondary : .primary)
-        // The containing pane remains mounted. Its native responder is focused by the
-        // pane host; no anchor request is regenerated just because focus moved.
-        hostWindow?.makeFirstResponder(nil)
-        activePane.focusWhenReady()
-    }
+    // Layouts, splitting, closing and focusing panes: AppState+Tiling.swift.
 
     private func pruneMissingPanes() {
         guard let vault else { return }
-        for pane in [primaryPane, secondaryPane] {
+        for pane in allPanes {
             if let file = pane.file, !vault.exists(file) {
                 if pane.id == activePaneID { selected = nil } else { pane.show(nil) }
             }
@@ -2183,9 +2111,9 @@ final class AppState: ObservableObject {
         for place in favorites.favorites {
             list.append(PaletteCommand(id: "go-" + place.url.path, title: "Go to " + place.name, keys: nil, symbol: "folder", enabled: hasVault) { [weak self] in self?.openFavorite(place.url) })
         }
+        list += paneCommands
         list += [
             PaletteCommand(id: "split", title: splitVisible ? "Close Split View" : "Split View", keys: "⌘\\", symbol: "rectangle.split.2x1", enabled: hasVault) { [weak self] in self?.toggleSplit() },
-            PaletteCommand(id: "focus-other-pane", title: "Focus Other Pane", keys: "⌘⌥→", symbol: "arrow.left.arrow.right", enabled: splitVisible) { [weak self] in self?.focusOtherPane() },
             PaletteCommand(id: "open-beside", title: "Open Beside", keys: nil, symbol: "rectangle.split.2x1", enabled: hasFile) { [weak self] in if let self, let file = self.selected { self.openBeside(file, anchor: self.anchor) } },
             PaletteCommand(id: "rail", title: railShown ? "Hide Inspector" : "Show Inspector", keys: "⌘⌥I", symbol: "sidebar.right") { [weak self] in self?.toggleRail() },
             PaletteCommand(id: "tab-thoughts", title: "Inspector: Thoughts", keys: nil, symbol: InspectorTab.thoughts.symbol, enabled: hasVault) { [weak self] in self?.showInspector(.thoughts) },
@@ -2301,7 +2229,7 @@ extension AppState {
         guard current.device == device, current.inode == inode else { throw UndoFailure.changed }
     }
 
-    private func recordWorkspaceChange(_ name: String, before: WorkspaceSnapshot) {
+    func recordWorkspaceChange(_ name: String, before: WorkspaceSnapshot) {
         guard !openingVault, !suppressActionHistory, !actionHistory.isApplying else { return }
         let after = undoWorkspaceSnapshot()
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
@@ -2309,9 +2237,9 @@ extension AppState {
         actionHistory.register(name: name, undo: { [weak self] in self?.restoreUndoWorkspace(before) }, redo: { [weak self] in self?.restoreUndoWorkspace(after) })
     }
 
-    private func undoWorkspaceSnapshot() -> WorkspaceSnapshot {
+    func undoWorkspaceSnapshot() -> WorkspaceSnapshot {
         WorkspaceSnapshot(selected: selected, folder: selectedFolder, mode: mode.rawValue, anchors: savedAnchors, openFiles: openFiles, history: SavedHistory(history),
-                          split: SavedSplitWorkspace(visible: splitVisible, activePane: activePaneID, primary: primaryPane.snapshot, secondary: secondaryPane.snapshot))
+                          split: savedSplit())
     }
 
     private func restoreUndoWorkspace(_ snapshot: WorkspaceSnapshot) {
@@ -2320,8 +2248,7 @@ extension AppState {
         defer { suppressActionHistory = false }
         if let split = snapshot.split {
             synchronizingPane = true
-            primaryPane.restore(split.primary, in: vault); secondaryPane.restore(split.secondary, in: vault)
-            splitVisible = split.visible; activePaneID = split.activePane
+            restoreSplit(split, in: vault)
             synchronizingPane = false
         }
         openFiles = snapshot.openFiles.filter { vault.exists($0) }

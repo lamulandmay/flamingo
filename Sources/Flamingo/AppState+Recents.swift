@@ -28,7 +28,7 @@ extension AppState {
             recents.refreshSoon(after: 0)
             return
         }
-        let visible = splitVisible ? [primaryPane, secondaryPane] : [primaryPane]
+        let visible = visiblePanes
         if let other = visible.first(where: { $0.id != activePaneID && $0.file == file }) {
             mode = .files
             activatePane(other.id)
