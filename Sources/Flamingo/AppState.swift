@@ -203,9 +203,13 @@ final class AppState: ObservableObject {
     } }
     @Published private(set) var revealRequest: RevealRequest?
     @Published private(set) var history = History()
-    @Published var trailEnabled = TrailStore.isEnabled { didSet { TrailStore.isEnabled = trailEnabled; recordSetting("Record Trail", before: oldValue, after: trailEnabled) { [weak self] in self?.trailEnabled = $0 } } }
+    @Published var trailEnabled = TrailStore.isEnabled { didSet { TrailStore.isEnabled = trailEnabled; recents.refreshSoon(); recordSetting("Record Trail", before: oldValue, after: trailEnabled) { [weak self] in self?.trailEnabled = $0 } } }
 
     private(set) var session: VaultSession?
+    /// Recent files for the ⌘⌥ ring and Go → Recent Files (AppState+Recents.swift). Separate
+    /// objects, so their updates redraw only the ring, not the window.
+    let recents = RecentFilesModel()
+    let radial = RadialMenuModel()
     @Published var isNewFilePresented = false
     /// Connect mode (⌘J): the grid of files you click to connect, over the content.
     @Published var connectGridShown = false
@@ -314,6 +318,7 @@ final class AppState: ObservableObject {
         let s = VaultSession(vault: v)
         session = s
         vault = v
+        attachRecents(to: s)
         VaultScanner.writeDefaultIgnoreFile(in: v)
         do { bookmarks = try Bookmarks.loadOrCreateChecked(in: v); bookmarksError = nil }
         catch { bookmarks = Bookmarks(); bookmarksError = error.localizedDescription; report(error) }

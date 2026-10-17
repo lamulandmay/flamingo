@@ -11,6 +11,10 @@ import FlamingoCore
 ///     postnote com.flamingo.qa "menu Leave a Thought"
 ///     postnote com.flamingo.qa "focus ThoughtNSTextView"
 ///     postnote com.flamingo.qa "thought see [[q3-model.xlsx]]"
+///     postnote com.flamingo.qa "open decks/q3.pptx"     jump to a file, as a click would
+///     postnote com.flamingo.qa "flags cmd opt"          hold ⌘⌥ (the recent-files ring); "flags none" releases
+///     postnote com.flamingo.qa "radial 90 80"           pointer 80 pt clockwise from 12 o'clock, 90°; "radial center"
+///     postnote com.flamingo.qa "radial origin 400 300"  where the next ring opens (window coordinates, y down)
 @MainActor
 enum QAHook {
     /// `FLAMINGO_QA_CHANNEL` picks another name, so concurrent test builds don't hear each other.
@@ -50,12 +54,48 @@ enum QAHook {
             func find(_ menu: NSMenu?) -> NSMenuItem? {
                 for item in menu?.items ?? [] {
                     if item.title == parts[1], item.action != nil { return item }
+                    // Submenus built when opened (Go → Recent Files) are filled first.
+                    if let sub = item.submenu { sub.delegate?.menuNeedsUpdate?(sub) }
                     if let hit = find(item.submenu) { return hit }
                 }
                 return nil
             }
             guard let item = find(NSApp.mainMenu), let action = item.action else { return Log.debug("qa: no menu item \(parts[1])") }
             NSApp.sendAction(action, to: item.target, from: item)
+            return
+        }
+        // `open decks/q3.pptx`: what clicking the file would do.
+        if parts[0] == "open" {
+            guard let state = (NSApp.delegate as? AppDelegate)?.state else { return }
+            state.jump(to: FileRef(relativePath: parts[1]), anchor: nil)
+            return
+        }
+        // `flags cmd opt` presses ⌘⌥ for the recent-files ring, `flags none` lets go. Synthesized
+        // events never reach a local monitor, so these call the controller directly.
+        if parts[0] == "flags" {
+            var flags: NSEvent.ModifierFlags = []
+            for m in parts[1].split(separator: " ") {
+                switch m {
+                case "cmd": flags.insert(.command)
+                case "shift": flags.insert(.shift)
+                case "opt": flags.insert(.option)
+                case "ctrl": flags.insert(.control)
+                default: break
+                }
+            }
+            RadialRecentsController.shared?.qaIngest(flags: flags)
+            return
+        }
+        // `radial 90 [80]`: pointer 90° clockwise of 12 o'clock, 80 pt from where the ring opened.
+        // `radial center`. `radial origin 400 300`: where the next ring opens.
+        if parts[0] == "radial" {
+            let args = parts[1].split(separator: " ").map(String.init)
+            if args.first == "center" { RadialRecentsController.shared?.qaPointer(degrees: nil) }
+            else if args.first == "origin", args.count == 3, let x = Double(args[1]), let y = Double(args[2]) {
+                RadialRecentsController.shared?.qaOrigin(x: x, y: y)
+            } else if let degrees = args.first.flatMap(Double.init) {
+                RadialRecentsController.shared?.qaPointer(degrees: degrees, distance: args.count > 1 ? Double(args[1]) ?? 80 : 80)
+            }
             return
         }
         // `focus ThoughtNSTextView`: the keyboard into the first view of that class, for
@@ -96,11 +136,13 @@ enum QAHook {
         let map: [UInt16: String] = [0: "a", 11: "b", 8: "c", 2: "d", 14: "e", 3: "f", 5: "g", 4: "h", 34: "i", 38: "j",
                                      40: "k", 37: "l", 46: "m", 45: "n", 31: "o", 35: "p", 12: "q", 15: "r", 1: "s",
                                      17: "t", 32: "u", 9: "v", 13: "w", 7: "x", 16: "y", 6: "z", 18: "1", 19: "2",
-                                     20: "3", 21: "4", 33: "[", 30: "]", 42: "\\"]
+                                     20: "3", 21: "4", 23: "5", 33: "[", 30: "]", 42: "\\"]
         return map[code] ?? ""
     }
 
     private static func send(code: UInt16, chars: String, flags: NSEvent.ModifierFlags) {
+        // The recent-files ring sees keys first, as its monitor would; Esc is consumed.
+        if RadialRecentsController.shared?.qaIngest(keyCode: code) == true { return }
         guard let window = NSApp.keyWindow ?? NSApp.orderedWindows.first(where: { $0.isVisible && $0.canBecomeKey }),
               let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags,
                                            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,

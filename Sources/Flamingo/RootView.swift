@@ -98,6 +98,7 @@ private struct RootLayout: View {
                 .allowsHitTesting(false)
                 .ignoresSafeArea()
         }
+        .overlay { RadialRecentsView(radial: state.radial, recents: state.recents) }
         .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
             Task { @MainActor in
                 let urls = await DroppedURLs.load(providers)

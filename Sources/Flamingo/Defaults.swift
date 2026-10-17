@@ -39,6 +39,12 @@ enum Defaults {
         }
     }
 
+    /// How long ⌘⌥ is held before the recent-files ring opens. A hidden preference.
+    static var radialHoldDelay: TimeInterval {
+        get { min(max(d.object(forKey: "radialHoldDelay") as? Double ?? 0.30, 0.15), 1) }
+        set { d.set(newValue, forKey: "radialHoldDelay") }
+    }
+
     static var railVisible: Bool {
         get { d.object(forKey: "railVisible") as? Bool ?? true }
         set { d.set(newValue, forKey: "railVisible") }

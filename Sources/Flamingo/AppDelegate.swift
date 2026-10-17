@@ -9,6 +9,8 @@ import FlamingoExtract
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
     private var swipes: SwipeNavigator?
+    private var radialRecents: RadialRecentsController?
+    private let recentsMenu = RecentFilesMenu()
     var undoRouting: UndoRouting?
     var globalSearchShortcut: GlobalSearchShortcut?
     let state = AppState()
@@ -55,6 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                   undo: { [weak self] in self?.state.undoAction() },
                                   redo: { [weak self] in self?.state.redoAction() })
         swipes = SwipeNavigator(state: state, window: w)
+        radialRecents = RadialRecentsController(state: state, window: w)
+        recentsMenu.install(state: state)
         state.windowWidth = w.frame.width
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

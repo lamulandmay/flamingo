@@ -141,6 +141,9 @@ enum MainMenu {
         searchAll.keyEquivalentModifierMask = [.command, .shift]
         goMenu.addItem(withTitle: "Reveal in File Explorer", action: #selector(AppDelegate.revealInExplorer(_:)), keyEquivalent: "")
         goMenu.addItem(withTitle: "Random File", action: #selector(AppDelegate.openRandomFile(_:)), keyEquivalent: "")
+        let recentFiles = NSMenuItem(title: RecentFilesMenu.title, action: nil, keyEquivalent: "")
+        recentFiles.submenu = NSMenu(title: RecentFilesMenu.title)   // filled when opened (RecentFilesMenu)
+        goMenu.addItem(recentFiles)
         goMenu.addItem(.separator())
         goMenu.addItem(withTitle: "Back", action: #selector(AppDelegate.goBack(_:)), keyEquivalent: "[")
         goMenu.addItem(withTitle: "Forward", action: #selector(AppDelegate.goForward(_:)), keyEquivalent: "]")
