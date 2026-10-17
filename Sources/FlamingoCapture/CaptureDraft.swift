@@ -7,6 +7,11 @@ struct CaptureDraft: Codable, Equatable, Sendable {
     var anchor: FileAnchor?
     var text: String
     var provenance: CommentProvenance?
+    /// The uid of the thought the draft answers.
+    var replyParent: String?
+    /// Front matter and kind of a note with no file behind it (folder, web page), so a recovered draft lands the same way.
+    var frontmatter: [String: String]?
+    var isFolder: Bool?
     var updatedAt = Date()
 }
 

@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import FlamingoCore
 
 /// Thin Accessibility reads for the frontmost window. Every call is bounded by a short
 /// messaging timeout so a hung app can't hang capture. Never call these on our own pid
@@ -27,6 +28,20 @@ enum AXFrontmost {
         return Window(documentURL: documentURL(from: raw), sourceURL: raw.flatMap(URL.init(string:)),
                       title: copy(w, kAXTitleAttribute) as? String,
                       frame: frame)
+    }
+
+    /// The text selected in the app's focused element, at most `limit` characters. Nil when
+    /// nothing is selected, the element is a password field, or the app does not say.
+    static func selectedText(pid: pid_t, limit: Int = ThoughtQuote.limit) -> String? {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        guard let focused = element(app, kAXFocusedUIElementAttribute) else { return nil }
+        AXUIElementSetMessagingTimeout(focused, 0.5)
+        if (copy(focused, kAXSubroleAttribute) as? String) == (kAXSecureTextFieldSubrole as String) { return nil }
+        guard let raw = copy(focused, kAXSelectedTextAttribute) as? String else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(limit))
     }
 
     /// AX reports top-left-origin rects relative to the menu-bar display; AppKit wants

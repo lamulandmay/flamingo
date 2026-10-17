@@ -60,6 +60,8 @@ public enum Theme {
         /// `.capsStyle()` / `SectionMarker`, which apply both and uppercase.
         public static let caps = SwiftUI.Font.system(size: 11, weight: .medium)
         public static let capsTracking: CGFloat = 0.6
+        /// 26pt semibold. The briefing's date line, and nothing else. Pair with `Theme.NS.display` in AppKit.
+        public static let display = SwiftUI.Font.system(size: 26, weight: .semibold)
     }
 
     /// 4pt grid.
@@ -75,6 +77,10 @@ public enum Theme {
         public static let fast = Animation.easeOut(duration: 0.15), normal = Animation.easeOut(duration: 0.22)
         /// Same durations for `NSAnimationContext` and Core Animation.
         public static let fastSeconds: TimeInterval = 0.15, normalSeconds: TimeInterval = 0.22
+        /// Gap between neighbours that fade in one after another: 40ms. Opacity only, never movement.
+        public static let staggerSeconds: TimeInterval = 0.04
+        /// `normal`, delayed by `index` steps of `staggerSeconds`. For sequential fades.
+        public static func stagger(_ index: Int) -> Animation { normal.delay(staggerSeconds * Double(max(index, 0))) }
     }
 
     /// Fixed dimensions from DESIGN.md's layout.
@@ -89,6 +95,10 @@ public enum Theme {
         public static let icon: CGFloat = 14
         public static let iconSmall: CGFloat = 13
         public static let hairline: CGFloat = 1
+        /// A Quick Look thumbnail in a stack (memo sources).
+        public static let thumbnail: CGFloat = 44
+        /// A resume tile, 96×64.
+        public static let tile = CGSize(width: 96, height: 64)
     }
 
     /// Opacities for hover and dimming. Hover changes opacity, not size.
@@ -159,6 +169,7 @@ public enum Theme {
         public static let title = NSFont.systemFont(ofSize: 15, weight: .semibold)
         public static let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         public static let monoSmall = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        public static let display = NSFont.systemFont(ofSize: 26, weight: .semibold)
     }
 }
 

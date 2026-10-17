@@ -23,6 +23,16 @@ public struct CommentsRail: View {
     var recoveryFile: FileRef?
     var recoveryVault: Vault?
     var sharedUndo = false
+    var reply: ((Comment) -> Void)?
+    var setState: ((Comment, ThoughtState, Date?) -> Void)?
+    var setKind: ((Comment, ThoughtKind) -> Void)?
+    var askAI: ((Comment) -> Void)?
+    var work: ((Comment, RailRecipe) -> Void)?
+    var copyLink: ((Comment) -> Void)?
+    var pending: [String: String] = [:]
+    var cancelPending: ((String) -> Void)?
+    var linkFiles: [FileRef] = []
+    var linkRecent: [FileRef] = []
 
     public func onSaveEdit(_ handler: @escaping (Comment) async throws -> Void) -> CommentsRail {
         var rail = self; rail.saveEdit = handler; return rail
@@ -32,6 +42,46 @@ public struct CommentsRail: View {
     }
     public func onSaveRestore(_ handler: @escaping (Comment) async throws -> Void) -> CommentsRail {
         var rail = self; rail.saveRestore = handler; return rail
+    }
+    /// `r`, or Reply in the menu: the shell turns its composer into a reply to this thought
+    /// (`comment.replying(toUID:)` on what it saves).
+    public func onReply(_ handler: @escaping (Comment) -> Void) -> CommentsRail {
+        var rail = self; rail.reply = handler; return rail
+    }
+    /// `e` (done, or open again) and `s` (snooze until tomorrow 09:00), and their menu items.
+    /// The date is when a snoozed thought returns. Save with `Comment.settingState(_:snoozeUntil:)`.
+    public func onSetState(_ handler: @escaping (Comment, ThoughtState, Date?) -> Void) -> CommentsRail {
+        var rail = self; rail.setState = handler; return rail
+    }
+    /// Kind ▸ in the menu. Save with `Comment.settingKind(_:)`, which sets `kindBy: user`.
+    public func onSetKind(_ handler: @escaping (Comment, ThoughtKind) -> Void) -> CommentsRail {
+        var rail = self; rail.setKind = handler; return rail
+    }
+    /// Ask AI in the menu: answer this thought the way `@ai` would.
+    public func onAskAI(_ handler: @escaping (Comment) -> Void) -> CommentsRail {
+        var rail = self; rail.askAI = handler; return rail
+    }
+    /// Work on This Now ▸ in the menu.
+    public func onWork(_ handler: @escaping (Comment, RailRecipe) -> Void) -> CommentsRail {
+        var rail = self; rail.work = handler; return rail
+    }
+    /// Copy Link to Thought in the menu. Without it the rail copies `[[<file>#^<uid>]]`
+    /// when it knows the file (`recoveryContext`).
+    public func onCopyLink(_ handler: @escaping (Comment) -> Void) -> CommentsRail {
+        var rail = self; rail.copyLink = handler; return rail
+    }
+    /// AI answers still streaming, by the uid of the thought they answer. Each shows under its
+    /// thread as grey text over a pulsing hairline. Empty text shows the hairline alone.
+    public func pendingReplies(_ replies: [String: String]) -> CommentsRail {
+        var rail = self; rail.pending = replies; return rail
+    }
+    /// Esc while an answer streams: the uid it answers.
+    public func onCancelPending(_ handler: @escaping (String) -> Void) -> CommentsRail {
+        var rail = self; rail.cancelPending = handler; return rail
+    }
+    /// Files `[[` offers while a thought is edited in place.
+    public func linkCandidates(_ files: [FileRef], recent: [FileRef] = []) -> CommentsRail {
+        var rail = self; rail.linkFiles = files; rail.linkRecent = recent; return rail
     }
     public func focusComment(_ id: UUID?) -> CommentsRail {
         var rail = self; rail.focusedComment = id; return rail
@@ -75,28 +125,33 @@ public struct CommentsRail: View {
     @State private var failedEdit: Comment?
     @State private var savingIDs: Set<UUID> = []
     @FocusState private var railFocused: Bool
-    @FocusState private var editorFocused: Bool
+    @State private var editorFocused = false
+    @State private var editorFocusRequest = 0
     @Environment(\.undoManager) private var undoManager
 
     /// Scroll target below the last row, so the bottom padding shows too.
     private static let end = "rail.end"
 
-    private var rows: [Comment] {
-        comments.enumerated()
-            .filter { !hidden.contains($0.element.id) }
-            .sorted { ($0.element.timestamp, $0.offset) < ($1.element.timestamp, $1.offset) }
-            .map { pair in
-                var c = pair.element
+    private var visible: [Comment] {
+        comments
+            .filter { !hidden.contains($0.id) }
+            .map { c in
+                var c = c
                 if let t = pendingText[c.id] { c.text = t }
                 return c
             }
     }
 
+    private var threads: [RailThread] { RailThreads.build(visible, pending: pending) }
+
+    /// The rows top to bottom: each thought, then its replies.
+    private var rows: [Comment] { threads.flatMap(\.comments) }
+
     public var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(rows) { c in row(c).id(c.id) }
+                    ForEach(threads) { thread in threadView(thread) }
                 }
                 .padding(Theme.Space.s)
                 Color.clear.frame(height: 0).id(Self.end)
@@ -139,6 +194,18 @@ public struct CommentsRail: View {
         .onKeyPress(keys: RailKeys.delete) { _ in deleteSelected() }
         .onKeyPress(.return) { editSelected() }
         .onKeyPress(.escape) { escape() }
+        .onKeyPress(keys: ["r"]) { press in
+            guard press.modifiers.isEmpty, editing == nil, reply != nil, let c = selectedComment else { return .ignored }
+            reply?(c); return .handled
+        }
+        .onKeyPress(keys: ["e"]) { press in
+            guard press.modifiers.isEmpty, editing == nil, setState != nil, let c = selectedComment else { return .ignored }
+            toggleDone(c); return .handled
+        }
+        .onKeyPress(keys: ["s"]) { press in
+            guard press.modifiers.isEmpty, editing == nil, setState != nil, selectedComment != nil else { return .ignored }
+            snoozeSelected(); return .handled
+        }
         .onChange(of: comments) { pendingText = [:] }
         .onChange(of: sharedUndo) { _, enabled in if enabled { endDeletion() } }
         .onChange(of: editorFocused) { _, focused in if !focused, editing != nil { commitEdit() } }
@@ -155,19 +222,93 @@ public struct CommentsRail: View {
 
     // MARK: Rows
 
-    private func row(_ c: Comment) -> some View {
+    private func threadView(_ t: RailThread) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            row(t.root, reply: false).id(t.root.id)
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(t.replies) { c in row(c, reply: true).id(c.id) }
+                ForEach(t.pending) { p in
+                    PendingReplyRow(text: p.text).padding(.leading, Theme.Space.l)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                // The thread rule hangs from the root's text down past the last reply.
+                if !t.replies.isEmpty || !t.pending.isEmpty {
+                    VHairline().padding(.leading, Theme.Space.s).padding(.bottom, Theme.Space.xs)
+                }
+            }
+        }
+    }
+
+    private func row(_ c: Comment, reply: Bool) -> some View {
         let isEditing = editing == c.id
-        return RailRow(comment: c, selected: selection == c.id, active: railFocused || editorFocused,
+        let reading = RailReading.of(c)
+        return RailRow(comment: c, kind: reading.kind, due: reading.due, selected: selection == c.id,
+                       active: railFocused || editorFocused,
                        editing: isEditing, draft: Binding(get: { draft }, set: {
                            draft = $0; backupEditingDraft($0)
-                       }), editorFocus: $editorFocused,
+                       }), editorFocused: $editorFocused, focusRequest: editorFocusRequest,
+                       candidates: linkFiles, recent: linkRecent,
                        onJump: { a in select(c); onJump(a) }, onSubmit: commitEdit, onCancel: cancelEdit,
                        onSelect: { select(c) }, onEdit: { beginEdit(c) }, onLink: { openLink?($0) })
+            .padding(.leading, reply ? Theme.Space.l : 0)
             .contextMenu {
+                if self.reply != nil { Button("Reply") { self.reply?(c) } }
+                if setState != nil {
+                    Button(c.state == .done ? "Not Done" : "Done") { toggleDone(c) }
+                    Menu("Snooze") {
+                        ForEach(RailSnooze.allCases) { option in
+                            Button(option.title) { setState?(c, .snoozed, option.date()) }
+                        }
+                    }
+                }
+                if setKind != nil {
+                    Menu("Kind") {
+                        ForEach(ThoughtKind.allCases, id: \.self) { kind in
+                            Button(kind.menuTitle) { setKind?(c, kind) }
+                        }
+                    }
+                }
+                if askAI != nil { Button("Ask AI") { askAI?(c) } }
+                if work != nil {
+                    Menu("Work on This Now") {
+                        ForEach(RailRecipe.allCases) { recipe in
+                            Button(recipe.title) { work?(c, recipe) }
+                        }
+                    }
+                }
+                Button("Copy Link to Thought") { copyLinkToThought(c) }
+                Divider()
                 Button("Edit") { beginEdit(c) }
                 Button("Delete") { delete(c) }
             }
             .disabled(savingIDs.contains(c.id))
+    }
+
+    private func toggleDone(_ c: Comment) {
+        if c.state == .done { setState?(c, .open, nil) } else {
+            setState?(c, .done, nil)
+            Chime.tick(level: 1)
+        }
+    }
+
+    private func snoozeSelected() {
+        guard let c = selectedComment else { return }
+        setState?(c, .snoozed, RailSnooze.tomorrow.date())
+    }
+
+    private var selectedComment: Comment? {
+        guard let s = selection else { return nil }
+        return rows.first { $0.id == s }
+    }
+
+    private func copyLinkToThought(_ c: Comment) {
+        if let copyLink { return copyLink(c) }
+        var link = "[[" + (recoveryFile?.relativePath ?? "")
+        if let uid = c.uid { link += "#^" + uid }
+        link += "]]"
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(link, forType: .string)
     }
 
     private func select(_ c: Comment) {
@@ -190,7 +331,8 @@ public struct CommentsRail: View {
         let added = newSet.subtracting(oldSet)
         if oldSet.isDisjoint(with: newSet) {
             proxy.scrollTo(Self.end, anchor: .bottom)
-        } else if let last = rows.last?.id, added.contains(last) {
+        } else if let last = rows.last?.id, added.contains(last)
+                    || comments.max(by: { $0.timestamp < $1.timestamp }).map({ added.contains($0.id) }) == true {
             // A new thought landed. A restored older one scrolls itself into view via selection.
             withAnimation(Theme.Motion.normal) { proxy.scrollTo(Self.end, anchor: .bottom) }
         }
@@ -224,8 +366,11 @@ public struct CommentsRail: View {
 
     private func escape() -> KeyPress.Result {
         if editing != nil { cancelEdit(); return .handled }
-        guard selection != nil else { return .ignored }
-        selection = nil
+        // An answer streaming under the selected thought stops first; with nothing selected, any answer does.
+        if let uid = selectedComment?.uid, pending[uid] != nil { cancelPending?(uid); return .handled }
+        if selection != nil { selection = nil; return .handled }
+        guard !pending.isEmpty, let cancelPending else { return .ignored }
+        for uid in pending.keys.sorted() { cancelPending(uid) }
         return .handled
     }
 
@@ -236,8 +381,8 @@ public struct CommentsRail: View {
         draft = c.text
         editing = c.id
         DispatchQueue.main.async {
-            editorFocused = true
-            // The field editor selects everything on focus; a thought is appended to, not replaced.
+            editorFocusRequest += 1
+            // A thought is appended to, not replaced: the cursor goes to the end.
             DispatchQueue.main.async {
                 guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.string == draft else { return }
                 editor.moveToEndOfDocument(nil)
@@ -458,15 +603,51 @@ private struct RailDeletion: Equatable {
 
 private final class RailUndoToken {}
 
-/// One thought: timestamp and anchor chip on top, text below.
+/// An AI answer still being written: its words so far in `textSecondary`, a pulsing hairline under them.
+private struct PendingReplyRow: View {
+    let text: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            if !text.isEmpty {
+                Text(text)
+                    .font(Theme.Font.body)
+                    .foregroundStyle(Theme.Color.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .transition(.opacity)
+            }
+            ProgressHairline(value: nil)
+        }
+        .padding(Theme.Space.s)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+extension ThoughtKind {
+    /// The Kind submenu item.
+    var menuTitle: String {
+        switch self {
+        case .idea: "Idea"
+        case .question: "Question"
+        case .todo: "To Do"
+        case .intent: "Intent"
+        }
+    }
+}
+
+/// One thought: kind glyph, timestamp, anchor and due chips on top, text below.
 private struct RailRow: View {
     let comment: Comment
+    let kind: ThoughtKind
+    let due: Date?
     let selected: Bool
     /// The rail has keyboard focus; selection draws in accent instead of grey.
     let active: Bool
     let editing: Bool
     @Binding var draft: String
-    var editorFocus: FocusState<Bool>.Binding
+    @Binding var editorFocused: Bool
+    let focusRequest: Int
+    let candidates: [FileRef]
+    let recent: [FileRef]
     let onJump: (FileAnchor) -> Void
     let onSubmit: () -> Void
     let onCancel: () -> Void
@@ -475,15 +656,19 @@ private struct RailRow: View {
     let onLink: (String) -> Void
     @State private var hovering = false
 
+    private var done: Bool { comment.state == .done }
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             HStack(spacing: Theme.Space.s) {
+                KindGlyph(kind: kind, state: comment.state)
                 Text(RailText.timestamp(comment.timestamp))
                     .font(Theme.Font.monoSmall)
                     .foregroundStyle(Theme.Color.textTertiary)
                     .onTapGesture(count: 2, perform: onEdit)
                     .simultaneousGesture(TapGesture().onEnded { onSelect() })
                 if let a = comment.anchor { Chip(RailText.anchorLabel(a)) { onJump(a) } }
+                if let due, !done { Chip(RailReading.dueLabel(due)) }
                 Spacer(minLength: 0)
                 // Where it came from, only when it wasn't typed here: an AI sparkle, or the app.
                 if let provenance = comment.provenance, provenance.origin == .ai {
@@ -503,20 +688,15 @@ private struct RailRow: View {
                     .frame(height: 16)
             }
             if editing {
-                TextField("", text: $draft, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(Theme.Font.body)
-                    .foregroundStyle(Theme.Color.text)
-                    .focused(editorFocus)
-                    .onSubmit(onSubmit)
-                    .onExitCommand(perform: onCancel)
+                ThoughtField(text: $draft, focused: $editorFocused, placeholder: "", candidates: candidates, recent: recent,
+                             focusRequest: focusRequest, onSubmit: onSubmit, onCancel: onCancel)
                     .padding(Theme.Space.xs)
                     // The editor sits `s − xs` inside the row: its corners are the row's, offset.
                     .background(Theme.Color.bgRaised, in: Self.editorShape)
                     .overlay(Self.editorShape.strokeBorder(Theme.Color.accent, lineWidth: Theme.Size.hairline))
                     .padding(-Theme.Space.xs)
             } else {
-                RailRichText(text: comment.text, onLink: onLink)
+                RailRichText(text: comment.text, onLink: onLink, dimmed: done)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -526,6 +706,7 @@ private struct RailRow: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
+        .animation(Theme.Motion.fast, value: done)
     }
 
     private static let radius = Theme.Radius.m

@@ -18,6 +18,15 @@ public struct CommentPanel: View {
 
     /// Replaces the footer's file name, e.g. for the daily inbox note.
     var label: String?
+    /// The target is a folder's note: its glyph is the folder's.
+    var isFolder = false
+    /// Selected text from another app, `> ` lines, shown above the field and saved with the thought.
+    var quote: String?
+    var replyParent: String?
+    /// Earlier thoughts like the draft (see `CaptureController.similarThoughts`).
+    var similar: ((String) async -> [EchoHit])?
+    var onJumpEcho: ((EchoHit) -> Void)?
+    var onReplyEcho: ((EchoHit) -> Void)?
     /// Reports the panel's natural height so a hosting window can grow with the text.
     var onHeightChange: ((CGFloat) -> Void)?
     var initialText = ""
@@ -29,6 +38,7 @@ public struct CommentPanel: View {
     var onDiscard: (() -> Void)?
 
     @StateObject private var model = ThoughtEditorModel()
+    @StateObject private var echo = ThoughtEchoModel()
 
     public init(target: FileRef, anchor: FileAnchor? = nil, onSubmit: @escaping (Comment) -> Void, onCancel: @escaping () -> Void) {
         self.target = target; self.anchor = anchor; self.onSubmit = onSubmit; self.onCancel = onCancel
@@ -58,9 +68,22 @@ public struct CommentPanel: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let quote {
+                Text(quote)
+                    .font(Theme.Font.small)
+                    .foregroundStyle(Theme.Color.textTertiary)
+                    .lineLimit(3)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, Theme.Space.m)
+                    .padding(.horizontal, Theme.Space.l)
+            }
+            ThoughtEcho(model: echo, onJump: { onJumpEcho?($0) }, onReplyTo: { onReplyEcho?($0) })
+                .padding(.top, quote == nil ? Theme.Space.xs : 0)
+                .padding(.horizontal, Theme.Space.s)
             ThoughtTextView(model: model, editable: !saving, onSubmit: submit, onCancel: onCancel)
                 .frame(height: model.textHeight)
-                .padding(.top, Theme.Space.m)
+                .padding(.top, quote == nil && echo.hits.isEmpty ? Theme.Space.m : Theme.Space.s)
                 .padding(.horizontal, Theme.Space.l)
 
             if saving && showsSaving { Text("Saving…").font(Theme.Font.small).foregroundStyle(Theme.Color.textSecondary).padding(.horizontal, Theme.Space.l) }
@@ -78,7 +101,7 @@ public struct CommentPanel: View {
             }
 
             HStack(spacing: Theme.Space.xs) {
-                FileGlyph(ext: label == nil ? target.ext : "md", size: 13)
+                if isFolder { FolderGlyph(size: 13) } else { FileGlyph(ext: label == nil ? target.ext : "md", size: 13) }
                 Text(footer).lineLimit(1).truncationMode(.middle)
                 if !linkedExts.isEmpty {
                     HStack(spacing: Theme.Space.xs) {
@@ -114,7 +137,8 @@ public struct CommentPanel: View {
         .onPreferenceChange(PanelHeightKey.self) { h in onHeightChange?(h) }
         .frame(maxHeight: .infinity, alignment: .top)
         .onAppear {
-            model.onTextChange = onTextChange
+            echo.similar = similar
+            model.onTextChange = { text in onTextChange?(text); echo.update(draft: text) }
             model.text = initialText
             model.setCandidates(candidates, recent: recent)
         }
@@ -126,6 +150,7 @@ public struct CommentPanel: View {
         guard !saving else { return }
         let text = model.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return onCancel() }
+        echo.reset()
         onSubmit(Comment(anchor: anchor, text: text))
     }
 }

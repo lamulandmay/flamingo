@@ -19,6 +19,19 @@ public final class CaptureController {
     public var availableFiles: ((Vault) -> [FileRef])?
     /// The shell keeps this current so the panel knows what to attach to.
     public var currentTarget: (() -> (FileRef, FileAnchor?)?)?
+    /// The folder selected in the shell when no file is: `show()` then leaves the thought on that
+    /// folder's note (`.flamingo/notes/<folder>.md`, `subject: folder`) instead of the inbox.
+    public var currentFolder: (() -> FileRef?)?
+    /// Like `onSaveComment`, for a thought on a note with no file behind it that may not exist
+    /// yet (a folder, a web page). Receives the front matter a new note starts with. Without it
+    /// such thoughts are written straight through `SidecarStore`.
+    public var onSaveNoteComment: ((FileRef, Comment, [String: String]) async throws -> Void)?
+    /// Earlier thoughts like a draft, best first, for the echo rows above the field. Nil turns
+    /// the rows off. The shell backs it with `IndexStore.similarThoughts`.
+    public var similarThoughts: ((String) async -> [EchoHit])?
+    /// An echo row was clicked: the shell brings Flamingo forward and shows the thought. The
+    /// panel closes first, keeping its draft.
+    public var onJumpToThought: ((EchoHit) -> Void)?
     /// Open vaults, the current one first. Global capture only lands in these; `[[`
     /// completion and the inbox fallback use the first. Falls back to the shell's
     /// `lastVault` default when unset.
@@ -123,12 +136,22 @@ public final class CaptureController {
     /// Leaves a thought on the shell's current file and anchor. With no file selected the
     /// thought goes to today's inbox note in the current vault. With the panel already up this
     /// only brings it forward, so a menu item can call it alongside the ⌘⇧C monitor.
-    public func show() {
+    public func show() { showTarget(folder: nil) }
+
+    /// Leaves a thought on a folder's note (`.flamingo/notes/<folder>.md`), for a folder
+    /// selected with no file. `folder` is relative to the vault root.
+    public func show(folder: FileRef) { showTarget(folder: folder) }
+
+    private func showTarget(folder explicit: FileRef?) {
         if host.isVisible { return host.refocus() }
         let vault = knownVaults().first
         let target: Target
-        if let (file, anchor) = currentTarget?() {
+        if let explicit, let vault, let note = ThoughtNote.folder(explicit) {
+            target = Target(vault: vault, note: note)
+        } else if let (file, anchor) = currentTarget?() {
             target = Target(vault: vault, file: file, anchor: anchor)
+        } else if let vault, let note = currentFolder?().flatMap(ThoughtNote.folder) {
+            target = Target(vault: vault, note: note)
         } else if let vault {
             target = .inbox(in: vault)
         } else {
@@ -152,16 +175,7 @@ public final class CaptureController {
         let ctx = FrontmostContext.current(in: vaults, candidates: candidates)
         if ctx?.isFlamingo == true { return show() }
 
-        var target: Target
-        if let v = ctx?.vault, let f = ctx?.file {
-            target = Target(vault: v, file: f, anchor: ctx?.anchor)
-        } else if let v = vaults.first {
-            target = .inbox(in: v)
-        } else {
-            NSSound.beep(); return
-        }
-        target.provenance = CommentProvenance(origin: .human, appBundleID: ctx?.appBundleID,
-            appName: ctx?.appName, windowTitle: ctx?.windowTitle, sourceURL: ctx?.sourceURL?.absoluteString ?? ctx?.documentURL?.absoluteString)
+        guard let target = Target.forFrontmost(ctx, vaults: vaults) else { NSSound.beep(); return }
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
         let over = ctx?.windowFrame ?? screen?.visibleFrame ?? .zero
@@ -212,6 +226,45 @@ public final class CaptureController {
         var anchor: FileAnchor?
         var label: String?
         var provenance: CommentProvenance?
+        /// Front matter for a note that may not exist yet (folder, web page).
+        var frontmatter: [String: String] = [:]
+        var isFolder = false
+        /// Selected text from another app, as `> ` lines. Shown above the field and saved with the thought.
+        var quote: String?
+        /// The uid of the thought the draft answers.
+        var replyParent: String?
+
+        init(vault: Vault?, file: FileRef, anchor: FileAnchor? = nil, label: String? = nil, provenance: CommentProvenance? = nil) {
+            self.vault = vault; self.file = file; self.anchor = anchor; self.label = label; self.provenance = provenance
+        }
+
+        init(vault: Vault?, note: ThoughtNote) {
+            self.init(vault: vault, file: note.file, label: note.name)
+            frontmatter = note.frontmatter; isFolder = note.isFolder
+        }
+
+        /// What a capture from another app lands on. A document in a vault gets its anchor; a web
+        /// page no vault file stands behind gets a `_web/` note; anything else, today's inbox. The
+        /// selected text becomes the quote in each case. Nil with no vault to write to.
+        static func forFrontmost(_ ctx: FrontmostContext?, vaults: [Vault], date: Date = Date()) -> Target? {
+            var target: Target
+            if let v = ctx?.vault, let f = ctx?.file {
+                target = Target(vault: v, file: f, anchor: ctx?.anchor)
+            } else if let v = vaults.first {
+                if let url = ctx?.sourceURL?.absoluteString, let web = ThoughtNote.web(url: url, title: ctx?.windowTitle) {
+                    target = Target(vault: v, note: web)
+                } else {
+                    target = .inbox(in: v, on: date)
+                }
+            } else {
+                return nil
+            }
+            target.quote = ThoughtQuote.lines(from: ctx?.selectedText)
+            target.provenance = CommentProvenance(origin: .human, appBundleID: ctx?.appBundleID,
+                appName: ctx?.appName, windowTitle: ctx?.windowTitle,
+                sourceURL: ctx?.sourceURL?.absoluteString ?? ctx?.documentURL?.absoluteString)
+            return target
+        }
 
         static let inboxFolder = "_inbox"
 
@@ -242,7 +295,13 @@ public final class CaptureController {
     func present(_ target: Target, over frame: NSRect, level: NSWindow.Level, returnTo app: NSRunningApplication?) {
         var target = target
         let restored = target.vault.flatMap { CaptureDraftStore.drafts(in: $0).last { $0.file == target.file } }
-        if let restored { target.anchor = restored.anchor; target.provenance = restored.provenance }
+        if let restored {
+            target.anchor = restored.anchor; target.provenance = restored.provenance
+            // The draft already holds what was quoted when it was written.
+            target.quote = nil; target.replyParent = restored.replyParent
+            if let fm = restored.frontmatter { target.frontmatter = fm; target.isFolder = restored.isFolder ?? false
+                target.label = target.label ?? fm["title"] ?? fm["url"].flatMap { URL(string: $0)?.host } ?? restored.file.name }
+        }
         draftText = restored?.text ?? ""
         hasDraftSnapshot = restored != nil
         saveError = nil
@@ -260,6 +319,12 @@ public final class CaptureController {
                                  onSubmit: { [weak self] c in self?.submit(c) },
                                  onCancel: { [weak self] in self?.cancel() })
         panel.label = target.label
+        panel.isFolder = target.isFolder
+        panel.quote = target.quote
+        panel.replyParent = target.replyParent
+        panel.similar = similarThoughts
+        panel.onJumpEcho = { [weak self] hit in self?.jumpToThought(hit) }
+        panel.onReplyEcho = { [weak self] hit in self?.replyTo(hit) }
         panel.initialText = draftText
         panel.saving = saving
         panel.showsSaving = savingShown
@@ -273,7 +338,9 @@ public final class CaptureController {
     public func recoverDraft() {
         guard !host.isVisible, let vault = knownVaults().first,
               let draft = CaptureDraftStore.drafts(in: vault).max(by: { $0.updatedAt < $1.updatedAt }) else { return }
-        present(Target(vault: vault, file: draft.file, anchor: draft.anchor, provenance: draft.provenance),
+        var target = Target(vault: vault, file: draft.file, anchor: draft.anchor, provenance: draft.provenance)
+        if let fm = draft.frontmatter { target.frontmatter = fm; target.isFolder = draft.isFolder ?? false; target.label = fm["title"] ?? fm["url"].flatMap { URL(string: $0)?.host } ?? draft.file.name }
+        present(target,
                 over: (NSApp.keyWindow ?? NSApp.mainWindow)?.frame ?? NSScreen.main?.visibleFrame ?? .zero,
                 level: .floating, returnTo: nil)
     }
@@ -283,7 +350,9 @@ public final class CaptureController {
         guard hasDraftSnapshot || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         hasDraftSnapshot = true
         guard let target = presentation?.target, let vault = target.vault else { return }
-        let draft = CaptureDraft(file: target.file, anchor: target.anchor, text: text, provenance: target.provenance)
+        var draft = CaptureDraft(file: target.file, anchor: target.anchor, text: text, provenance: target.provenance)
+        draft.replyParent = target.replyParent
+        if !target.frontmatter.isEmpty { draft.frontmatter = target.frontmatter; draft.isFolder = target.isFolder }
         CaptureDraftStore.checkpoint(draft, in: vault) { [weak self] failure in
             guard let failure else { return }
             Task { @MainActor in
@@ -318,6 +387,9 @@ public final class CaptureController {
         saveError = nil
         var comment = comment
         comment.provenance = p.target.provenance
+        comment.text = ThoughtQuote.compose(quote: p.target.quote, text: comment.text)
+        comment = comment.stamped()
+        if let parent = p.target.replyParent { comment = comment.replying(toUID: parent) }
         host.update(panel(for: p.target))
         draftChanged(comment.text)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -357,18 +429,57 @@ public final class CaptureController {
     /// the trail). Thoughts for another open vault, or before the shell is wired, go
     /// straight through that vault's `SidecarStore` and `TrailStore`.
     private func save(_ comment: Comment, to target: Target) async throws {
+        let comment = comment.stamped()
         let current = knownVaults().first
-        if let onSaveComment, target.vault == nil || target.vault == current {
-            try await onSaveComment(target.file, comment)
-            return
+        if target.vault == nil || target.vault == current {
+            if !target.frontmatter.isEmpty, let onSaveNoteComment {
+                try await onSaveNoteComment(target.file, comment, target.frontmatter)
+                return
+            }
+            if target.frontmatter.isEmpty, let onSaveComment {
+                try await onSaveComment(target.file, comment)
+                return
+            }
         }
         // Legacy callbacks cannot acknowledge writes. Commit here when no acknowledged
         // callback is installed; the watcher refreshes the shell from the actual write.
         guard let vault = target.vault else { throw CocoaError(.fileNoSuchFile) }
         try await Task.detached {
-            try SidecarStore(vault: vault).append(comment, to: target.file)
+            let store = SidecarStore(vault: vault)
+            if target.frontmatter.isEmpty { try store.append(comment, to: target.file) }
+            else { try store.append(comment, to: target.file, frontmatter: target.frontmatter) }
             TrailStore(vault: vault).recordComment(comment, on: target.file)
         }.value
+    }
+
+    // MARK: Echo
+
+    /// An echo row was clicked: close the panel, keeping the draft, and let the shell show the thought.
+    private func jumpToThought(_ hit: EchoHit) {
+        cancel()
+        onJumpToThought?(hit)
+    }
+
+    /// An echo row was ⌥-clicked: the draft now answers that thought, in its note.
+    private func replyTo(_ hit: EchoHit) {
+        guard var p = presentation, !saving, let uid = hit.uid, let vault = p.target.vault else { return }
+        let old = p.target
+        guard old.file != hit.file else {
+            presentation?.target.replyParent = uid
+            presentation?.target.quote = old.quote
+            host.update(panel(for: presentation!.target)); return
+        }
+        var target = Target(vault: vault, file: hit.file, label: hit.file.name)
+        target.replyParent = uid
+        target.quote = old.quote
+        target.provenance = old.provenance
+        p.target = target
+        presentation = p
+        // The draft belongs to the new note now; the old note keeps no stray copy.
+        let oldKey = CaptureDraftStore.recoveryKey(for: old.file, in: vault)
+        ThoughtDraftCheckpoint.enqueue(key: oldKey, required: false, operation: { try CaptureDraftStore.remove(old.file, in: vault) })
+        draftChanged(draftText)
+        host.update(panel(for: target))
     }
 
     /// A non-activating panel hands key focus back to the frontmost app on its own; this is
