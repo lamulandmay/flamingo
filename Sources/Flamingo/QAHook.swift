@@ -74,6 +74,12 @@ enum QAHook {
             state.jump(to: FileRef(relativePath: parts[1]), anchor: nil)
             return
         }
+        // Thoughts v2 QA verbs
+        // `reply <text>`, `ai <question>`, `nightshift now|plan`, `clock <ISO>|reset` (AppState+Thoughts.swift).
+        if ["reply", "ai", "nightshift", "clock"].contains(parts[0]) {
+            (NSApp.delegate as? AppDelegate)?.state.runThoughtsQA(parts[0], parts[1])
+            return
+        }
         // `workspace undo|redo`: the workspace's own undo, whatever has keyboard focus.
         if parts[0] == "workspace" {
             guard let state = (NSApp.delegate as? AppDelegate)?.state else { return }

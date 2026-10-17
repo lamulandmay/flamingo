@@ -81,7 +81,7 @@ private struct InspectorHeader: View {
             switch state.inspectorTab {
             case .thoughts:
                 IconButton("square.and.pencil", help: "Leave a Thought…") { state.leaveThought() }
-                    .disabled(state.selected == nil)
+                    .disabled(state.selected == nil && (state.selectedFolder ?? "").isEmpty)
             case .connections:
                 IconButton("dice", help: "Wander Suggestions") { state.startWander() }
                 IconButton("plus", help: "Connect to…") { connecting = true }
@@ -107,110 +107,6 @@ private struct InspectorHeader: View {
         if tab == .thoughts, state.inspectorTab != .thoughts, !state.comments.isEmpty {
             Circle().fill(Theme.Color.accent).frame(width: 5, height: 5).offset(x: -3, y: 3)
                 .accessibilityHidden(true)
-        }
-    }
-}
-
-// MARK: - Thoughts
-
-/// The open file's thoughts, oldest first, and a field at the foot for the next one,
-/// left at the place you're looking at.
-struct ThoughtsTab: View {
-    @EnvironmentObject var state: AppState
-    let file: FileRef?
-
-    var body: some View {
-        if let file {
-            VStack(spacing: 0) {
-                CommentsRail(
-                    comments: state.comments,
-                    onJump: { state.jumpToAnchor($0) },
-                    onEdit: { c in state.updateComment(c, in: file) },
-                    onDelete: { c in state.deleteComment(c, from: file) }
-                )
-                .usesSharedUndo()
-                .onOpenLink { state.openLink($0) }
-                .onRestore { c in state.restoreComment(c, to: file) }
-                .onSaveEdit { c in try await state.saveEditedComment(c, in: file) }
-                .onSaveDelete { c in try await state.saveDeletedComment(c, from: file) }
-                .onSaveRestore { c in try await state.saveComment(c, to: file) }
-                .focusComment(state.selectedCommentID)
-                .recoveryContext(file: file, vault: state.vault)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                ThoughtComposer(file: file)
-            }
-            .id(file)
-        } else {
-            Color.clear
-        }
-    }
-}
-
-/// Type, Return. The thought lands on the open file at the current slide, page or line.
-private struct ThoughtComposer: View {
-    @EnvironmentObject var state: AppState
-    let file: FileRef
-    @State private var draft = ""
-    @State private var saving = false
-    @State private var failure: String?
-    @State private var focused = false
-    @State private var focusRequest = 0
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.xs) {
-            if let failure {
-                Text(failure).font(Theme.Font.small).foregroundStyle(Theme.Color.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            VStack(alignment: .leading, spacing: Theme.Space.s) {
-                // Names where the thought lands, so the box reads as a place to write
-                // (DESIGN.md principle 1's one exception). `[[` completes file names.
-                ThoughtField(text: $draft, focused: $focused, placeholder: "Thought on " + file.name,
-                             candidates: state.files, recent: recent, editable: !saving,
-                             focusRequest: focusRequest, onSubmit: save,
-                             onCancel: { NSApp.keyWindow?.makeFirstResponder(nil) })
-                    .accessibilityLabel("New thought")
-                if let anchor = state.anchor {
-                    Text(anchor.displayLabel)
-                        .font(Theme.Font.monoSmall)
-                        .foregroundStyle(Theme.Color.textTertiary)
-                        .lineLimit(1)
-                }
-            }
-            .padding(Theme.Space.m)
-            .background(Squircle(radius: Theme.Radius.l).fill(Theme.Color.fill))
-            .focusRing(focused, radius: Theme.Radius.l)
-            .contentShape(Rectangle())
-            .onTapGesture { focusRequest += 1 }
-        }
-        .padding(Theme.Space.m)
-    }
-
-    /// Open tabs, then where you've been, newest first: what `[[` offers before you type.
-    private var recent: [FileRef] {
-        var seen = Set<FileRef>(), out: [FileRef] = []
-        for f in state.openFiles.reversed() + state.history.entries.reversed().compactMap(\.file) where out.count < 30 {
-            if f != file, seen.insert(f).inserted { out.append(f) }
-        }
-        return out
-    }
-
-    private func save() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !saving else { return }
-        saving = true
-        failure = nil
-        let comment = Comment(anchor: state.anchor, text: text)
-        Task {
-            do {
-                try await state.saveComment(comment, to: file)
-                state.celebrate(comment, on: file)
-                draft = ""
-            } catch {
-                failure = "Not saved · " + error.localizedDescription
-            }
-            saving = false
-            focusRequest += 1
         }
     }
 }

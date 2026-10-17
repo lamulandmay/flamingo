@@ -167,3 +167,12 @@ session's scratchpad only; commit before the next big change.
   `Package.swift` and `CONTRACT.md`.
 - Before any view: DESIGN.md. If a label can be removed, remove it. No placeholder text, no emoji.
 - User's hardware: M5 Pro, 64 GB. Ollama has gemma3:4b, llama3.2:1b, qwen2.5:1.5b.
+
+## Thoughts v2 in the shell (feature/shell-thoughts)
+
+Glue only; the engines are in FlamingoCore/Index/Ask/Thoughts. Privacy: thoughts only reach local models (`ThoughtReader`, `askStreamingLocally`, `NightShiftService`).
+- `AppState+Thoughts.swift`: saving (`saveComment` stamps uids, edits go by uid with `modified`), state/kind/reply by uid, understanding 2 s after a save plus idle backfill (50/day, `Defaults.thoughtBackfill`), `@ai`/`@flamingo` and rail Ask AI (streams into `ThoughtJobsModel.pending`), night shift service+scheduler per vault, echo/recall, `[[file#^uid]]` links (`openLink`), resurface near visible files, Capture wiring, palette commands.
+- `ThoughtsTab.swift`: Inspector Thoughts tab (rail modifiers, reply mode, echo, folder notes). `ThoughtWorkflow.swift`: pure helpers (`ThoughtLink`, `ThoughtTriggers`, `DailyBudget`, `QAClock`) and `ThoughtsRuntime`.
+- For the briefing: `AppState.nightShiftCatchUp(onEvent:)`, `AppState.qaNow` / `AppState.now` (QA clock).
+- QA: `reply`, `ai`, `nightshift now|plan`, `clock <ISO>|reset` verbs; `scripts/thoughts-qa.sh <scratch> [dark|light]`. `FLAMINGO_QA_STREAM_DELAY=<s>` paces canned answers word by word.
+- Known: the fake review-conflict memo fails the engine's "supporting passages" check on the fixture vault; the `answer` recipe works end to end.

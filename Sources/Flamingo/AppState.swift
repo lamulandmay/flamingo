@@ -211,6 +211,8 @@ final class AppState: ObservableObject {
     /// objects, so their updates redraw only the ring, not the window.
     let recents = RecentFilesModel()
     let radial = RadialMenuModel()
+    /// Thoughts v2: jobs, understanding, night shift (AppState+Thoughts.swift).
+    let thoughts = ThoughtsRuntime()
     @Published var isNewFilePresented = false
     /// Connect mode (⌘J): the grid of files you click to connect, over the content.
     @Published var connectGridShown = false
@@ -320,6 +322,7 @@ final class AppState: ObservableObject {
         workspaceRestorationPending = true
         workspaceIndexCompleted = false
         session?.stop()
+        stopThoughts()
         analysisTasks.values.forEach { $0.cancel() }; analysisTasks = [:]
         trackedEditorFiles = []; analyzedStamps = [:]; analysisMessage = nil
         continuityError = nil
@@ -354,6 +357,7 @@ final class AppState: ObservableObject {
         hostWindow?.title = v.name
         hostWindow?.representedURL = v.root
         wireCapture()
+        startThoughts(for: s)
 
         s.onIndexingError = { [weak self, weak s] message in
             guard let self, let s, self.session === s else { return }
@@ -1380,6 +1384,7 @@ final class AppState: ObservableObject {
             try await self.saveComment(comment, to: file)
             self.celebrate(comment, on: file)
         }
+        wireThoughtCapture()
     }
 
     // MARK: Document panes
@@ -1511,6 +1516,7 @@ final class AppState: ObservableObject {
     /// A clicked wikilink from the rail: `q3.pptx#slide 2` → that file at that anchor.
     func openLink(_ raw: String, from source: FileRef? = nil) {
         guard let v = vault else { return }
+        if openThoughtLink(raw, from: source) { return }
         let target = Wikilink.components(of: raw).target
         let anchor = Wikilink.anchor(in: raw)
         let file = (source ?? selected).flatMap { Wikilink.resolve(target, from: $0, in: v, candidates: files) }
@@ -1647,22 +1653,6 @@ final class AppState: ObservableObject {
         graphReplayRequest &+= 1
     }
 
-    /// Opens a thought left a while ago, at its place, with the thought selected.
-    func resurfaceThought() {
-        guard let s = session else { return }
-        Task { [weak self] in
-            guard let found = await s.resurfaceableThought(), let self, self.session === s else {
-                self?.showToast(ToastMessage(text: "No thoughts yet"))
-                return
-            }
-            self.jump(to: found.0, anchor: found.1.anchor)
-            self.showInspector(.thoughts)
-            // Ids are derived from the sidecar; select it once the rail has the file's comments.
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            self.selectedCommentID = self.comments.first { $0.text == found.1.text && $0.timestamp == found.1.timestamp }?.id ?? found.1.id
-        }
-    }
-
     /// The chat, from anywhere: opens the right sidebar on it and puts the keys in its field.
     func focusChat() {
         // Request first: opening the sidebar can mount the chat synchronously, and it reads
@@ -1695,8 +1685,10 @@ final class AppState: ObservableObject {
 
     func saveComment(_ comment: Comment, to file: FileRef) async throws {
         guard let s = session else { throw CocoaError(.fileWriteUnknown) }
+        let comment = comment.stamped()
         try changeComments(in: s, files: [file], name: "Add Thought") { try s.sidecar.append(comment, to: file) }
         s.trail.recordComment(comment, on: file)
+        thoughtDidSave(comment, in: file, session: s)   // the save is done; the index may still be busy
         await commentsDidChange(for: file, in: s)
     }
 
@@ -1772,9 +1764,7 @@ final class AppState: ObservableObject {
     }
 
     func saveEditedComment(_ comment: Comment, in file: FileRef) async throws {
-        guard let s = session else { throw CocoaError(.fileWriteUnknown) }
-        try changeComments(in: s, files: [file], name: "Edit Thought") { try s.sidecar.update(comment, in: file) }
-        await commentsDidChange(for: file, in: s)
+        try await saveEditedThought(comment, in: file)
     }
 
     func saveDeletedComment(_ comment: Comment, from file: FileRef) async throws {
@@ -1797,7 +1787,7 @@ final class AppState: ObservableObject {
         Task { do { try await saveDeletedComment(comment, from: file) } catch { report(error) } }
     }
 
-    private func changeComments(in session: VaultSession, files: [FileRef], name: String, change: () throws -> Void) throws {
+    func changeComments(in session: VaultSession, files: [FileRef], name: String, change: () throws -> Void) throws {
         let before = try files.map { try session.sidecar.document(for: $0) }
         try change()
         let after = try files.map { try session.sidecar.document(for: $0) }
@@ -1836,7 +1826,7 @@ final class AppState: ObservableObject {
     func commentsDidChange(for file: FileRef, in s: VaultSession) async {
         guard session === s else { return }
         if file == selected { await refreshComments() }
-        await s.update([file])          // re-ingests the sidecar into the index
+        if isFolderNote(file) { await s.reloadNotes() } else { await s.update([file]) }   // re-ingests the sidecar into the index
         guard session === s else { return }
         await refreshCounts()
         markGraphStale(urgent: true)
@@ -2112,6 +2102,7 @@ final class AppState: ObservableObject {
             list.append(PaletteCommand(id: "go-" + place.url.path, title: "Go to " + place.name, keys: nil, symbol: "folder", enabled: hasVault) { [weak self] in self?.openFavorite(place.url) })
         }
         list += paneCommands
+        list += thoughtCommands
         list += [
             PaletteCommand(id: "split", title: splitVisible ? "Close Split View" : "Split View", keys: "⌘\\", symbol: "rectangle.split.2x1", enabled: hasVault) { [weak self] in self?.toggleSplit() },
             PaletteCommand(id: "open-beside", title: "Open Beside", keys: nil, symbol: "rectangle.split.2x1", enabled: hasFile) { [weak self] in if let self, let file = self.selected { self.openBeside(file, anchor: self.anchor) } },

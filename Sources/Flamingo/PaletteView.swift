@@ -3,6 +3,7 @@ import SwiftUI
 import FlamingoCore
 import FlamingoDesign
 import FlamingoIndex
+import FlamingoCapture
 
 /// The palette's content: one field, then rows. No header, no footer, no empty state.
 /// Plan 01 owns.
@@ -110,6 +111,7 @@ private struct PaletteRow: View {
         case .command(let command): CommandRowContent(command: command)
         case .hit(let hit): HitRowContent(hit: hit)
         case .result(let result): UnifiedSearchRow(result: result, selected: highlighted)
+        case .thought(let hit): ThoughtRowContent(hit: hit)
         }
     }
 }
@@ -150,6 +152,34 @@ private struct CommandRowContent: View {
                 .layoutPriority(1)
             Spacer(minLength: Theme.Space.s)
             if let keys = command.keys { KeyHint(keys) }
+        }
+        .frame(height: 28)
+    }
+}
+
+/// A thought found by ⌘K: its kind, its first line, the file it is on and when.
+private struct ThoughtRowContent: View {
+    let hit: ThoughtHit
+
+    var body: some View {
+        HStack(spacing: Theme.Space.s) {
+            KindGlyph(kind: hit.record.kind, state: hit.record.state).frame(width: 16)
+            Text(ThoughtLines.first(of: hit.record.comment.text))
+                .foregroundStyle(hit.record.state == .done ? Theme.Color.textTertiary : Theme.Color.text)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(1)
+            Spacer(minLength: Theme.Space.s)
+            Text(hit.record.file.name)
+                .font(Theme.Font.small)
+                .foregroundStyle(Theme.Color.textTertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 120, alignment: .trailing)
+            Text(hit.record.comment.timestamp.formatted(.dateTime.month(.abbreviated).day()))
+                .font(Theme.Font.monoSmall)
+                .foregroundStyle(Theme.Color.textTertiary)
+                .fixedSize()
         }
         .frame(height: 28)
     }

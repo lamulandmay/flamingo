@@ -325,7 +325,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
                 self.model.searching = false
                 var results = response.results
                 if let requested = self.requestedResult, !results.contains(where: { $0.id == requested.id }) { results.insert(requested, at: 0) }
-                self.model.setItems(results.map(PaletteItem.result))
+                self.model.setItems(PaletteItem.merged(results, response.thoughts))
                 if let requested = self.requestedResult, let index = results.firstIndex(where: { $0.id == requested.id }) { self.model.select(index) }
                 self.requestedResult = nil
                 // Meaning-based matches arrive later; the fast results remain usable and a
@@ -337,7 +337,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
                             let enhanced = try await state.unifiedSearch(query, includeSemantic: true)
                             guard !Task.isCancelled, let self, self.isVisible, self.model.query.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
                             self.model.notice = enhanced.notice
-                            self.model.setItems(enhanced.results.map(PaletteItem.result), preservingSelection: true)
+                            self.model.setItems(PaletteItem.merged(enhanced.results, enhanced.thoughts), preservingSelection: true)
                         } catch { /* Lexical results and their errors remain authoritative. */ }
                     }
                 }
@@ -366,6 +366,9 @@ final class PaletteController: NSObject, NSWindowDelegate {
             NSApp.activate(ignoringOtherApps: true)
             state.hostWindow?.makeKeyAndOrderFront(nil)
             command.run()
+        case .thought(let hit):
+            state.recordSearch(query)
+            state.revealThought(in: hit.record.file, uid: hit.record.uid, commentID: hit.record.comment.id, anchor: hit.record.comment.anchor)
         case .hit(let hit):
             if externally {
                 state.openExternally(hit.file)
@@ -388,6 +391,15 @@ enum PaletteItem: Identifiable {
     case command(PaletteCommand)
     case hit(SearchHit)
     case result(UnifiedSearchResult)
+    /// A thought the query found (kind glyph, first line, file, date). Return shows it in the rail.
+    case thought(ThoughtHit)
+
+    /// The files, with the first few thoughts of the response after the top three so they are in view.
+    static func merged(_ results: [UnifiedSearchResult], _ thoughts: [ThoughtHit]) -> [PaletteItem] {
+        let files = results.map(PaletteItem.result)
+        let rows = thoughts.prefix(4).map(PaletteItem.thought)
+        return Array(files.prefix(3)) + rows + Array(files.dropFirst(3))
+    }
 
     var id: String {
         switch self {
@@ -395,12 +407,14 @@ enum PaletteItem: Identifiable {
         case .command(let command): "command:" + command.id
         case .hit(let hit): "hit:" + hit.id
         case .result(let result): "result:" + result.id
+        case .thought(let hit): "thought:" + hit.id
         }
     }
 
     var rowHeight: CGFloat {
         if case .result = self { return 68 }
         if case .hit = self { return 44 }
+        if case .thought = self { return 32 }
         return 28
     }
 }
