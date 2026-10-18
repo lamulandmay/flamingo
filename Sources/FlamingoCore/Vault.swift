@@ -70,8 +70,37 @@ public struct Vault: Hashable, Sendable {
 public struct FileRef: Hashable, Codable, Sendable {
     public let relativePath: String
     public init(relativePath: String) { self.relativePath = relativePath }
-    public var name: String { (relativePath as NSString).lastPathComponent }
-    public var ext: String { (relativePath as NSString).pathExtension.lowercased() }
+    /// `NSString.lastPathComponent`, as a native Swift string: graphs and views compare names
+    /// byte for byte, where a bridged `NSString` compares through Unicode normalization.
+    public var name: String {
+        let utf8 = relativePath.utf8
+        guard let last = utf8.last, last != Self.slash else { return Self.native((relativePath as NSString).lastPathComponent) }
+        guard let slash = utf8.lastIndex(of: Self.slash) else { return relativePath }
+        return String(Substring(utf8[utf8.index(after: slash)...]))
+    }
+    /// `NSString.pathExtension`, lowercased. A plain ASCII extension (`pptx`, `tar-gz`) is read
+    /// straight from the bytes; anything else goes through `NSString`'s rules.
+    public var ext: String {
+        let name = name, utf8 = name.utf8
+        guard let dot = utf8.lastIndex(of: UInt8(ascii: ".")) else { return "" }
+        let tail = utf8[utf8.index(after: dot)...]
+        if dot != utf8.startIndex, !tail.isEmpty, !utf8.starts(with: "..".utf8), tail.allSatisfy(Self.isPlainExtensionByte) {
+            return String(decoding: tail.map { $0 >= 0x41 && $0 <= 0x5A ? $0 | 0x20 : $0 }, as: UTF8.self)
+        }
+        return (name as NSString).pathExtension.lowercased()
+    }
+
+    private static let slash = UInt8(ascii: "/")
+
+    private static func isPlainExtensionByte(_ b: UInt8) -> Bool {
+        (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A) || b == UInt8(ascii: "_") || b == UInt8(ascii: "-")
+    }
+
+    private static func native(_ s: String) -> String {
+        var s = s
+        s.makeContiguousUTF8()
+        return s
+    }
 
     /// `name` without its extension: `q3` for `decks/q3.pptx`.
     public var stem: String { (name as NSString).deletingPathExtension }

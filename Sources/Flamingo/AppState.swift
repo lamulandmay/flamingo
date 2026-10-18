@@ -2037,14 +2037,21 @@ final class AppState {
         graphStale = true
         // Nothing shows it: don't spend seconds rebuilding a whole-disk graph per file opened.
         guard graphShown else { graphTask?.cancel(); graphTask = nil; return }
-        let slow = !urgent && mode != .graph && files.count > Self.bigVault
-        if slow, graphTask != nil { return }
+        // A disk changes faster than its graph builds. Even in Graph mode, files changing on
+        // disk join the rebuild already waiting, and that one keeps `graphRebuildGap` (or three
+        // build times) clear of the last: never back to back. A thought stays quick.
+        let paced = !urgent && files.count > Self.bigVault
+        let slow = paced && mode != .graph
+        if paced, graphTask != nil { return }
         // Opening files only adds shared-session edges; let a run of opens settle first.
         if trailOnly, graphTask != nil { return }
         graphTask?.cancel()
         let delay: UInt64 = urgent ? 200_000_000 : trailOnly ? 5_000_000_000 : mode == .graph ? 300_000_000 : slow ? Self.slowGraphDelay : 1_500_000_000
         graphTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delay)
+            while paced, !Task.isCancelled, let wait = self?.session?.graphRebuildWait(minimum: Self.graphRebuildGap), wait > .zero {
+                try? await Task.sleep(for: wait)
+            }
             guard !Task.isCancelled, let self else { return }
             self.graphTask = nil
             await self.refreshGraph()
@@ -2054,6 +2061,9 @@ final class AppState {
     /// Above this many files the vault is a disk, not a project.
     static let bigVault = 50_000
     static let slowGraphDelay: UInt64 = 30_000_000_000
+    /// On a disk, the least time between the end of one graph build and the start of the next
+    /// one caused by files changing on disk.
+    static let graphRebuildGap: Duration = .seconds(10)
 
     private func trailChanged() {
         markGraphStale(trailOnly: true)
@@ -2063,8 +2073,11 @@ final class AppState {
         guard let s = session else { graph = Graph(); graphRevision &+= 1; return }
         let g = await s.buildGraph()
         guard session === s else { return }
-        graph = g
-        graphRevision &+= 1
+        // Unchanged (nil): nothing is published, so no view diffs or lays out the graph again.
+        if let g {
+            graph = g
+            graphRevision &+= 1
+        }
         graphStale = false
     }
 

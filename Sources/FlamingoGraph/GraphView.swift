@@ -88,6 +88,13 @@ public struct GraphView: View {
 
     public var body: some View {
         let _ = bindCallbacks()
+        // Every closure handed to SwiftUI captures the model and plain values, never `self`.
+        // SwiftUI compares closures by what they captured, and `self` holds the vault's whole
+        // graph: a binding over `self` cost a whole-graph comparison on every render.
+        let model = self.model, latest = GraphBox(graph), vaultPath = vault?.root.path ?? ""
+        let filterText = $filter, fieldOpen = $fieldShown, focus = $filterFocused
+        let scope = scope, selected = selected, celebration = celebration, onScopeChange = onScopeChange
+        let showField = { fieldOpen.wrappedValue = true; DispatchQueue.main.async { focus.wrappedValue = true } }
         ZStack(alignment: .topLeading) {
             GraphCanvas(model: model, redraw: model.redraw)
                 .overlay(GraphInputLayer(target: model))
@@ -104,9 +111,9 @@ public struct GraphView: View {
             VStack(alignment: .leading, spacing: Theme.Space.s) {
                 HStack(spacing: Theme.Space.xs) {
                     if fieldShown || !filter.isEmpty {
-                        SearchField(text: $filter, focused: $filterFocused,
+                        SearchField(text: filterText, focused: focus,
                                     onSubmit: { model.openBestMatch() },
-                                    onExit: { filter = ""; fieldShown = false; model.focusCanvas() })
+                                    onExit: { filterText.wrappedValue = ""; fieldOpen.wrappedValue = false; model.focusCanvas() })
                         // Up and down walk the matches without leaving the field.
                         .onKeyPress(.upArrow) { model.moveSelection(.up); return .handled }
                         .onKeyPress(.downArrow) { model.moveSelection(.down); return .handled }
@@ -116,10 +123,12 @@ public struct GraphView: View {
                                 .onAppear { model.occludedRect = proxy.frame(in: .named(Self.space)) }
                                 .onChange(of: proxy.frame(in: .named(Self.space))) { _, r in model.occludedRect = r }
                         })
-                        .onChange(of: filterFocused) { _, focused in if !focused && filter.isEmpty { fieldShown = false } }
+                        .onChange(of: filterFocused) { _, focused in
+                            if !focused && filterText.wrappedValue.isEmpty { fieldOpen.wrappedValue = false }
+                        }
                         .transition(.opacity)
                     } else {
-                        IconButton("magnifyingglass", help: "Filter") { showField() }
+                        IconButton("magnifyingglass", help: "Filter", action: showField)
                             .onAppear { model.occludedRect = .null }
                     }
                     arrangementMenu
@@ -133,7 +142,7 @@ public struct GraphView: View {
                 }
             }
             .padding(Theme.Space.m)
-            .popover(isPresented: $model.showsNodeList, arrowEdge: .bottom) { nodeList }
+            .popover(isPresented: $model.showsNodeList, arrowEdge: .bottom) { GraphNodeList(model: model) }
             .animation(Theme.Motion.fast, value: fieldShown || !filter.isEmpty)
         }
         .coordinateSpace(name: Self.space)
@@ -147,12 +156,12 @@ public struct GraphView: View {
         }
         .onDisappear { model.suspend() }
         .onChange(of: GraphChange(revision: revision, graph: revision == nil ? graph : nil)) { _, _ in
-            model.update(graph: graph); model.loadConnections()
+            model.update(graph: latest.graph); model.loadConnections()
         }
         .onChange(of: selected) { _, new in model.select(new) }
         .onChange(of: scope) { _, new in model.setScope(new) }
         .onChange(of: arrangement) { _, new in model.setArrangement(new, notify: false) }
-        .onChange(of: vault) { _, new in model.reset(graph: graph, vault: new) }
+        .onChange(of: vault) { _, new in model.reset(graph: latest.graph, vault: new) }
         .onChange(of: filter) { _, new in model.setFilter(new) }
         .onChange(of: replayRequest) { _, _ in model.onReplayRequested?() }
         .onChange(of: celebration?.id) { _, _ in
@@ -160,11 +169,11 @@ public struct GraphView: View {
             model.celebrate(from: c.source, to: c.targets, level: c.level, zoom: true)
         }
         .onReceive(NotificationCenter.default.publisher(for: GraphUndoNotification.layout)) { notification in
-            guard notification.object as? String == (vault?.root.path ?? "") else { return }
+            guard notification.object as? String == vaultPath else { return }
             model.reloadRestoredLayout()
         }
         .onReceive(NotificationCenter.default.publisher(for: GraphUndoNotification.camera)) { notification in
-            guard notification.object as? String == (vault?.root.path ?? ""),
+            guard notification.object as? String == vaultPath,
                   let camera = notification.userInfo?["camera"] as? GraphCamera else { return }
             model.applyRestoredCamera(camera)
         }
@@ -173,11 +182,6 @@ public struct GraphView: View {
     private static let space = "graph"
 
     private struct GraphChange: Equatable { var revision: Int?; var graph: Graph? }
-
-    private func showField() {
-        fieldShown = true
-        DispatchQueue.main.async { filterFocused = true }
-    }
 
     private func bindCallbacks() {
         model.actionHistory = history
@@ -207,7 +211,9 @@ public struct GraphView: View {
 
     /// The layouts, behind one glyph showing the current one.
     private var arrangementMenu: some View {
-        Menu {
+        // Over the model alone: see `body`.
+        let model = self.model
+        return Menu {
             Picker("Layout", selection: Binding(get: { model.arrangement }, set: { model.setArrangement($0) })) {
                 ForEach(GraphArrangement.allCases) { a in
                     Label(a.title, systemImage: a.symbol).tag(a)
@@ -230,8 +236,21 @@ public struct GraphView: View {
         .help("Layout")
         .accessibilityLabel("Layout")
     }
+}
 
-    private var nodeList: some View {
+/// A graph held by reference, for closures handed to SwiftUI: comparing two of them compares
+/// a pointer, never two graphs of the whole vault.
+final class GraphBox {
+    let graph: Graph
+    init(_ graph: Graph) { self.graph = graph }
+}
+
+/// Every node by path, for the canvas's context menu. Its own view, so its many closures
+/// capture the model and not the graph view, graph and all.
+private struct GraphNodeList: View {
+    @ObservedObject var model: GraphModel
+
+    var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(model.topology.ids.indices.filter { model.filterMask?[$0] ?? true }, id: \.self) { i in

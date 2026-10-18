@@ -278,19 +278,25 @@ extension IndexStore {
     /// How far a raw cosine sits above the current model's floor of meaningful relatedness,
     /// 0…1. Raw cosines aren't comparable across embedding models; this is.
     public func relatedness(_ cosine: Double) -> Double {
-        let floor = similarityFloor()
-        return max(0, min(1, (cosine - floor) / max(0.01, 1 - floor)))
+        Self.relatedness(cosine, floor: similarityFloor())
+    }
+
+    /// `relatedness` against a floor already looked up: `similarityFloor()` refreshes the
+    /// vector index, too much to do once per pair or per file in a list.
+    public static func relatedness(_ cosine: Double, floor: Double) -> Double {
+        max(0, min(1, (cosine - floor) / max(0.01, 1 - floor)))
     }
 
     /// Similar-content suggestions for the whole graph, drawn dashed like other suggestions:
     /// each file's `perFile` nearest neighbours clearly above the model's floor. Weight is
     /// `relatedness`, so `FileConnections.strength` ranks them like the inspector does.
-    public func similarEdges(perFile: Int = 3) throws -> [Graph.Edge] {
+    /// `reuseFor` is `similarPairs`'.
+    public func similarEdges(perFile: Int = 3, reuseFor maxAge: TimeInterval = 0) throws -> [Graph.Edge] {
         let floor = similarityFloor()
         // A third of the way from the floor to identical: related, not merely on-topic.
         let minScore = floor + (1 - floor) / 3
-        return try similarPairs(minScore: minScore, perFile: perFile).map {
-            Graph.Edge(source: $0.a, target: $0.b, kind: .related, weight: relatedness($0.score))
+        return try similarPairs(minScore: minScore, perFile: perFile, reuseFor: maxAge).map {
+            Graph.Edge(source: $0.a, target: $0.b, kind: .related, weight: Self.relatedness($0.score, floor: floor))
         }
     }
 }

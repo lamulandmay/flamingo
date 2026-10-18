@@ -64,6 +64,34 @@ final class GraphFolderCatalogTests: XCTestCase {
         XCTAssertEqual(graph.edges.map(\.target), ["Empty/", "Empty/Deep/"])
     }
 
+    @MainActor
+    func testAnUnchangedRebuildIsNotPublished() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("flamingo-graph-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let vault = Vault(root: root)
+        let a = FileRef(relativePath: "notes/a.txt"), b = FileRef(relativePath: "b.txt")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("notes"), withIntermediateDirectories: true)
+        try Data("alpha words".utf8).write(to: vault.url(for: a))
+        try Data("beta words".utf8).write(to: vault.url(for: b))
+        let session = VaultSession(vault: vault)
+        defer { session.stop() }
+        _ = await session.update([a, b])
+
+        let built = await session.buildGraph()
+        let first = try XCTUnwrap(built)
+        XCTAssertTrue(first.nodes.contains { $0.id == "notes/" })
+        let again = await session.buildGraph()
+        XCTAssertNil(again, "the same graph again is not published")
+
+        _ = try session.connections.setConnections(between: [a, b], connected: true)
+        let rebuilt = await session.buildGraph()
+        let connected = try XCTUnwrap(rebuilt)
+        XCTAssertTrue(connected.edges.contains { $0.kind == .manual })
+        let unchanged = await session.buildGraph()
+        XCTAssertNil(unchanged)
+    }
+
     func testSyntheticAndUnsafePathsDoNotInventFolders() {
         let invalid = ["_inbox/2026-10-15", "_inbox/deeper/note", ".flamingo/notes/source.md", "/outside/file.txt",
                        "../outside/file.txt", "safe/../outside/file.txt", "safe/./file.txt", "safe//file.txt",

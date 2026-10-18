@@ -479,8 +479,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
                                         including required: Set<String> = [], neighborBudget: Int = 120) -> (graph: Graph, truncated: Bool) {
         let byID = Dictionary(g.nodes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         func fileNode(_ p: String) -> Graph.Node {
-            byID[p] ?? Graph.Node(id: p, name: (p as NSString).lastPathComponent,
-                                  ext: (p as NSString).pathExtension.lowercased())
+            byID[p] ?? Graph.Node(id: p, name: FileRef(relativePath: p).name, ext: FileRef(relativePath: p).ext)
         }
         guard let scope, let vault else {
             var all = g
@@ -496,7 +495,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         let ignore = VaultScanner.ignoreRules(in: vault)
         func folderID(_ p: String) -> String { p.isEmpty ? "/" : p + "/" }
         func folderNode(_ p: String) -> Graph.Node {
-            Graph.Node(id: folderID(p), name: p.isEmpty ? vault.root.lastPathComponent : (p as NSString).lastPathComponent, ext: "")
+            Graph.Node(id: folderID(p), name: p.isEmpty ? vault.root.lastPathComponent : FileRef(relativePath: p).name, ext: "")
         }
         var nodes: [Graph.Node] = [folderNode(scope)], edges: [Graph.Edge] = []
         var seen: Set<String> = [folderID(scope)]

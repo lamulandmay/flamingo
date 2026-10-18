@@ -21,10 +21,12 @@ public struct LocalGraphView: View {
 
     public var body: some View {
         let _ = model.onSelect = onSelect
+        // The action captures the model and a box, not `self` and its graph (see `GraphView.body`).
+        let model = self.model, latest = GraphBox(graph)
         GraphCanvas(model: model, redraw: model.redraw)
             .overlay(GraphInputLayer(target: model, claimsFocus: false))
             .onChange(of: LocalKey(graph: revision == nil ? graph : nil, revision: revision, center: center, depth: depth)) { _, key in
-                let local = RadialLayout.local(graph: graph, center: key.center, depth: key.depth)
+                let local = RadialLayout.local(graph: latest.graph, center: key.center, depth: key.depth)
                 model.setFixed(graph: local.graph, positions: local.positions, selected: local.center)
             }
     }

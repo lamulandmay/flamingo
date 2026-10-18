@@ -104,8 +104,30 @@ extension IndexStore {
     /// Cost is quadratic, done as blocked matrix products on Accelerate: about a second for
     /// 20k files on an M-series Mac. Above `similarPairsFileCap` (50,000) files only the most
     /// recently modified 50,000 take part. Call off the main thread. Empty when nothing is embedded.
-    public func similarPairs(minScore: Double, perFile: Int) throws -> [(a: String, b: String, score: Double)] {
-        guard perFile > 0, let (index, _) = similarityIndex(), let files = fileVectors(index), files.count > 1 else { return [] }
+    ///
+    /// The answer is kept until the file vectors change. With `reuseFor` it is kept that many
+    /// seconds even then: on a whole disk the vectors change every few seconds while embedding
+    /// runs, and this is the most expensive part of a graph build.
+    public func similarPairs(minScore: Double, perFile: Int, reuseFor maxAge: TimeInterval = 0) throws -> [(a: String, b: String, score: Double)] {
+        guard perFile > 0 else { return [] }
+        let last = embedding.lock.withLock { embedding.pairs }
+        if maxAge > 0, let last, last.answers(minScore: minScore, perFile: perFile),
+           Date().timeIntervalSince(last.made) < maxAge, last.model == largestSemanticModel() { return last.pairs }
+        guard let (index, _) = similarityIndex(), let files = fileVectors(index), files.count > 1 else { return [] }
+        if let last, last.vectors === files, last.model == index.model, last.answers(minScore: minScore, perFile: perFile) { return last.pairs }
+        let pairs = computeSimilarPairs(files, minScore: minScore, perFile: perFile)
+        embedding.lock.withLock {
+            embedding.pairs = SimilarPairsMemo(model: index.model, vectors: files, minScore: minScore, perFile: perFile, pairs: pairs)
+        }
+        return pairs
+    }
+
+    /// The model `similarityIndex` would pick, from the indexes already loaded: no refresh.
+    private func largestSemanticModel() -> String? {
+        embedding.lock.withLock { embedding.indexes }.max { $0.value.count < $1.value.count }?.key
+    }
+
+    private func computeSimilarPairs(_ files: FileVectors, minScore: Double, perFile: Int) -> [(a: String, b: String, score: Double)] {
         var chosen = Array(0..<files.count)
         if files.count > Self.similarPairsFileCap {
             let mtimes = Dictionary((try? read { db in try db.query("SELECT path, mtime FROM files") { ($0.string(0), $0.double(1)) } }) ?? [],
