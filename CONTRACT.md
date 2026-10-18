@@ -4,7 +4,9 @@ Flamingo is Obsidian for every file on your Mac. Open a folder, preview anything
 (pptx, docx, xlsx, pdf, usdz, images, video, code, markdown) with Quick Look, press a
 key to leave a thought on it, link thoughts with `[[wikilinks]]`, and see the graph of
 how your real work connects. Flamingo never writes into your files. Everything it
-knows lives in `<vault>/.flamingo/` as plain text you could read with `cat`.
+knows lives in `<vault>/.flamingo/` as plain text you could read with `cat`. The one
+exception is a project (plan 18): after you choose Make Project, Flamingo writes that
+folder's fixed structure and keeps it in place.
 
 What makes it better than Obsidian: it sees all your files, not just markdown, and it
 builds thought chains from what you actually did (trails) instead of only from links
@@ -54,6 +56,10 @@ on localhost, and Apple's on-device models. Never Claude, Claude Code, an API ke
   conversation turn that quoted or drew on one (`ConversationTurn.thoughtDerived`). Files are
   still read; thoughts stay home.
 - `LocalOnlyTests` run each thought path through a network that refuses every host but loopback.
+- Repo mode (plan 18, decided 2026-10-18): agents working in a structured project may read the
+  thoughts on that project's own files, through a read-only copy in `<project>/scratch/thoughts/`,
+  which git ignores. Thoughts on anything outside the project are never copied, and no thought
+  goes into a tracked file. Everything above still holds for Flamingo's own AI.
 
 ## Module map
 
@@ -69,6 +75,7 @@ on localhost, and Apple's on-device models. Never Claude, Claude Code, an API ke
 | `FlamingoDesign` | `Sources/FlamingoDesign` | 08 | — |
 | `FlamingoAsk` | `Sources/FlamingoAsk` | 09 | Core, Index, Design |
 | `FlamingoThoughts` | `Sources/FlamingoThoughts` | 16, 17 | Core, Index, Ask, Trail |
+| `FlamingoAgents` | `Sources/FlamingoAgents` | 18 | Core |
 | build, fixtures, QA | `scripts/`, `Resources/`, `fixtures/`, `README.md`, `ISSUES.md` | 10 | — |
 
 Tests live in `Tests/<Module>Tests` and belong to the module's session.
@@ -90,7 +97,19 @@ Tests live in `Tests/<Module>Tests` and belong to the module's session.
 
 ## On-disk formats
 
-Everything under `<vault>/.flamingo/`. Never anywhere else. Never inside user files.
+Everything under `<vault>/.flamingo/`. Never anywhere else. Never inside user files, except a
+project's structure (below).
+
+### Project structure (plan 18) — inside a project folder, only after Make Project
+
+`ProjectStructure.v1` (FlamingoCore) is the single source of every name and fixed byte:
+`AGENTS.md` (headings Rules, Commands, Memory, Structure; the Structure text is fixed; a marker
+line `<!-- flamingo: {"project":"<UUID>","structure":1} -->`), `CLAUDE.md` (exactly
+`@AGENTS.md`), `README.md`, `HANDOVER.md`, a `.gitignore` block between
+`# flamingo structure 1: do not edit between these lines` and `# flamingo end`, `plans/.gitkeep`,
+`docs/.gitkeep`, and `scratch/` (ignored by git; Flamingo writes `NOW.md` and `thoughts/` there).
+Flamingo creates what is missing and never overwrites. Folders the user declined are listed in
+`.flamingo/projects.json` as `{"declined": ["<vault-relative path>", …]}`.
 
 ### Sidecar notes — `.flamingo/notes/<relative/path/file.ext>.md`
 

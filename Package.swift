@@ -16,7 +16,7 @@ let package = Package(
         .executableTarget(
             name: "Flamingo",
             dependencies: ["FlamingoCore", "FlamingoDesign", "FlamingoCapture", "FlamingoExtract",
-                           "FlamingoIndex", "FlamingoGraph", "FlamingoTrail", "FlamingoAsk", "FlamingoThoughts"],
+                           "FlamingoIndex", "FlamingoGraph", "FlamingoTrail", "FlamingoAsk", "FlamingoThoughts", "FlamingoAgents"],
             path: "Sources/Flamingo"
         ),
         // Pure model layer: vault, file identity, sidecar notes, wikilinks, graph model.
@@ -29,7 +29,7 @@ let package = Package(
         .target(name: "FlamingoExtract", dependencies: ["FlamingoCore"], path: "Sources/FlamingoExtract"),
         // SQLite FTS5 index, file watching, search, graph building.
         .target(name: "FlamingoIndex", dependencies: ["FlamingoCore", "FlamingoExtract"], path: "Sources/FlamingoIndex"),
-        .executableTarget(name: "FlamingoIndexCLI", dependencies: ["FlamingoIndex", "FlamingoCore"], path: "Sources/FlamingoIndexCLI"),
+        .executableTarget(name: "FlamingoIndexCLI", dependencies: ["FlamingoIndex", "FlamingoCore", "FlamingoAgents"], path: "Sources/FlamingoIndexCLI"),
         // Graph view.
         .target(name: "FlamingoGraph", dependencies: ["FlamingoCore", "FlamingoDesign"], path: "Sources/FlamingoGraph"),
         // Trails: session recording and thought chains.
@@ -39,6 +39,8 @@ let package = Package(
         // Thoughts that act: night shift, attention ranking, the daily briefing engine. No views.
         // Local models only: thoughts never leave this Mac.
         .target(name: "FlamingoThoughts", dependencies: ["FlamingoCore", "FlamingoIndex", "FlamingoAsk", "FlamingoTrail"], path: "Sources/FlamingoThoughts"),
+        // Agent projects (plan 18): which harness works where, from processes and session logs.
+        .target(name: "FlamingoAgents", dependencies: ["FlamingoCore"], path: "Sources/FlamingoAgents"),
 
         .testTarget(name: "FlamingoCoreTests", dependencies: ["FlamingoCore"], path: "Tests/FlamingoCoreTests"),
         .testTarget(name: "FlamingoExtractTests", dependencies: ["FlamingoExtract"], path: "Tests/FlamingoExtractTests"),
@@ -48,6 +50,7 @@ let package = Package(
         .testTarget(name: "FlamingoThoughtsTests", dependencies: ["FlamingoThoughts", "FlamingoCore", "FlamingoIndex", "FlamingoAsk", "FlamingoTrail"], path: "Tests/FlamingoThoughtsTests"),
         .testTarget(name: "FlamingoCaptureTests", dependencies: ["FlamingoCapture", "FlamingoCore"], path: "Tests/FlamingoCaptureTests"),
         .testTarget(name: "FlamingoGraphTests", dependencies: ["FlamingoGraph", "FlamingoCore"], path: "Tests/FlamingoGraphTests"),
+        .testTarget(name: "FlamingoAgentsTests", dependencies: ["FlamingoAgents", "FlamingoCore"], path: "Tests/FlamingoAgentsTests"),
         .testTarget(name: "FlamingoAppTests", dependencies: ["Flamingo"], path: "Tests/FlamingoAppTests"),
     ]
 )

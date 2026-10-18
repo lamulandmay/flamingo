@@ -1,6 +1,7 @@
 import Foundation
 import FlamingoCore
 import FlamingoIndex
+import FlamingoAgents
 
 // flamingo-index — build and query a vault's index without the app. Plan 05 owns.
 
@@ -32,6 +33,10 @@ usage: flamingo-index <vault> [options]
   --catalog-indexed   benchmark unified filename fallback using indexed paths as catalog
   --force             re-extract every file, changed or not
   --limit N           cap results (default 20)
+  --structure check   how <vault> differs from the project structure (plan 18)
+  --structure plan    what making <vault> a project would do
+  --structure apply   make <vault> a project: git init and the missing items, never overwriting
+  --agents            which agents work where in <vault>, and the folders Flamingo would offer
 
 """
 
@@ -65,7 +70,7 @@ var actions: [(String, String?)] = []
 var watch = false, reindexFirst = true, bench = false, force = false, catalogIndexed = false
 var limit = 20
 let takesValue: Set<String> = ["--search", "--sections", "--comments", "--files", "--backlinks", "--text", "--unified", "--family",
-                                "--semantic", "--hybrid", "--similar", "--eval", "--vector-bench", "--mode"]
+                                "--semantic", "--hybrid", "--similar", "--eval", "--vector-bench", "--mode", "--structure"]
 var i = 0
 while i < args.count {
     let a = args[i]
@@ -79,7 +84,7 @@ while i < args.count {
     case "--catalog-indexed": catalogIndexed = true
     case "--force": force = true
     case "--bench": bench = true
-    case "--recent", "--graph", "--embed": actions.append((a, nil))
+    case "--recent", "--graph", "--embed", "--agents": actions.append((a, nil))
     case "--pairs":
         if i + 1 < args.count, Double(args[i + 1]) != nil { actions.append((a, args[i + 1])); i += 1 } else { actions.append((a, nil)) }
     case "--limit":
@@ -96,6 +101,52 @@ guard let vaultPath else { fail(usage) }
 var isDir: ObjCBool = false
 guard FileManager.default.fileExists(atPath: vaultPath, isDirectory: &isDir), isDir.boolValue else {
     fail("not a folder: \(vaultPath)")
+}
+
+// MARK: - Project structure (no index involved)
+
+if let (_, verb) = actions.first(where: { $0.0 == "--structure" }) {
+    let root = URL(fileURLWithPath: vaultPath).standardizedFileURL
+    switch verb {
+    case "check":
+        let report = ProjectChecker.check(root: root)
+        print(report.marker.map { "project \($0.project.uuidString), structure \($0.structure)" } ?? "not a project")
+        for issue in report.issues { print((issue.isRestorable ? "  restorable  " : "  ") + issue.description) }
+        exit(report.isStructured && report.issues.isEmpty ? 0 : 1)
+    case "plan", "apply":
+        let plan = ProjectScaffolder.plan(root: root)
+        for change in plan.changes { print(change.description) }
+        for conflict in plan.conflicts { print("! " + conflict.description) }
+        guard verb == "apply" else { exit(plan.conflicts.isEmpty ? 0 : 1) }
+        do {
+            let created = try ProjectScaffolder.apply(plan)
+            print("created \(created.count): " + created.joined(separator: ", "))
+            exit(0)
+        } catch {
+            fail(error.localizedDescription)
+        }
+    default:
+        fail("--structure takes check, plan or apply")
+    }
+}
+
+if actions.contains(where: { $0.0 == "--agents" }) {
+    let root = URL(fileURLWithPath: vaultPath)
+    let presence = AgentPresence(vaultRoot: root)
+    let start = DispatchTime.now()
+    let activity = presence.activity()
+    let elapsed = ms(since: start)
+    let time = DateFormatter()
+    time.dateFormat = "HH:mm"
+    for item in activity {
+        let state = item.isLive ? "live" : "log " + time.string(from: item.lastActive)
+        print("\(item.harness.name)  \(state)  \(item.project.path)" + (item.title.map { "  \"\($0)\"" } ?? ""))
+    }
+    let declined = ProjectsStore(vault: Vault(root: root)).declined()
+    let offers = presence.offers(declined: declined)
+    print(offers.isEmpty ? "no folders to offer" : "offer: " + offers.map(\.root.path).joined(separator: ", "))
+    err("(\(fmt(elapsed)) ms)")
+    exit(0)
 }
 
 let vault = Vault(root: URL(fileURLWithPath: vaultPath))
