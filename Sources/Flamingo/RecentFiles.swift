@@ -148,7 +148,8 @@ final class RecentFilesModel: ObservableObject {
             thumbnailStamps[path] = stamp
             thumbnailTasks[path]?.cancel()
             let mine = generation
-            thumbnailTasks[path] = Task { [weak self] in
+            // Ahead of the ring being opened, so nobody is waiting yet: utility.
+            thumbnailTasks[path] = Task(priority: .utility) { [weak self] in
                 let side = Self.thumbnailSide
                 let image = await Thumbnails.thumbnail(for: vault.url(for: item.file), in: vault, size: CGSize(width: side, height: side), scale: 2)
                 guard let self, mine == self.generation, let image else { return }

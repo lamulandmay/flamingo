@@ -25,9 +25,11 @@ struct SearchResultsSurface: View {
             bar
             Hairline()
                 .overlay(alignment: .top) {
-                    ProgressHairline(value: nil)
-                        .opacity(model.searching ? 1 : 0)
-                        .animation(Theme.Motion.fast, value: model.searching)
+                    // Inserted while searching, not hidden: the pulse would run on unseen.
+                    ZStack {
+                        if model.searching { ProgressHairline(value: nil).transition(.opacity) }
+                    }
+                    .animation(Theme.Motion.fast, value: model.searching)
                 }
             ZStack {
                 SearchResultsTable(state: state, model: model)

@@ -16,9 +16,48 @@ public struct ModelExtractor: Extractor {
         case "obj": try OBJScanner.scan(url, into: &scene)
         case "stl": header = try STLScanner.scan(url, into: &scene)
         // PLY has no material names; ModelIO invents "PLY Material".
-        case let ext: try autoreleasepool { try Self.load(url, materials: ext != "ply", into: &scene) }
+        case let ext:
+            if let helper = Self.helper, let read = try Self.readInHelper(url, executable: helper) { return read }
+            try autoreleasepool { try Self.load(url, materials: ext != "ply", into: &scene) }
         }
         return scene.extracted(header: header)
+    }
+
+    // MARK: Helper process
+
+    /// The app's own executable, set once at launch, to read ModelIO formats in a short-lived
+    /// copy of itself (`helperFlag`). ModelIO loads Pixar's USD into whatever process opens an
+    /// asset, and USD keeps a thread per core and one that wakes about 20 times a second for
+    /// the rest of that process's life: an idle Flamingo that had indexed one `.usdz` never
+    /// slept. A helper also keeps a file ModelIO crashes on from taking the app with it. Nil
+    /// (tests, the CLI) reads in this process.
+    nonisolated(unsafe) public static var helper: String?
+    /// `<executable> --extract-model <file>` prints the file's `Extracted` as JSON and exits.
+    public static let helperFlag = "--extract-model"
+
+    /// The helper's side, called first thing in `main`: does nothing unless the arguments ask
+    /// for a model read, in which case it reads, prints and exits without starting the app.
+    public static func runHelperIfAsked(_ arguments: [String] = CommandLine.arguments) {
+        guard let i = arguments.firstIndex(of: helperFlag), i + 1 < arguments.count else { return }
+        let url = URL(fileURLWithPath: arguments[i + 1])
+        do {
+            var scene = ModelScene()
+            try autoreleasepool { try load(url, materials: url.pathExtension.lowercased() != "ply", into: &scene) }
+            FileHandle.standardOutput.write(try JSONEncoder().encode(scene.extracted(header: [])))
+            exit(0)
+        } catch {
+            FileHandle.standardError.write(Data("\(error)\n".utf8))
+            exit(2)
+        }
+    }
+
+    /// Nil when the helper couldn't be started, so the caller reads in-process instead.
+    static func readInHelper(_ url: URL, executable: String) throws -> Extracted? {
+        guard let out = Subprocess.run(executable, [helperFlag, url.path], timeout: 60, maxOutput: 32 << 20) else { return nil }
+        guard out.succeeded, let read = try? JSONDecoder().decode(Extracted.self, from: out.stdout) else {
+            throw ExtractError.malformed(url.path)
+        }
+        return read
     }
 
     /// Textures are never loaded: ModelIO only reads them on `loadTextures()`.

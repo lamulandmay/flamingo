@@ -1,6 +1,7 @@
 import AppKit
 import QuartzCore
 import SwiftUI
+import FlamingoDesign
 
 /// Transparent AppKit layer laid over the graph `Canvas` (`.overlay(GraphInputLayer(target:))`).
 /// SwiftUI gestures can't see scroll wheels or trackpad phases on macOS, so pointer, scroll,
@@ -211,6 +212,8 @@ final class GraphInputNSView: NSView {
             return
         }
         let link = displayLink(target: self, selector: #selector(animationFrame(_:)))
+        // Every frame a ProMotion panel draws, as the canvas's own timeline does.
+        link.preferredFrameRateRange = FrameTicker.fullRate
         link.add(to: .main, forMode: .common)
         animationLink = link
     }

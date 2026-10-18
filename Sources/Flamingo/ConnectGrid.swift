@@ -245,28 +245,26 @@ private struct Thread: Shape {
 }
 
 /// One file in the grid. Waiting tiles quiver, each out of step with the next; a picked one
-/// holds still and breathes in the accent.
+/// holds still and breathes in the accent. Core Animation runs the motion on the render server
+/// at the display's rate (120 Hz on ProMotion), so a grid of quivering tiles costs the main
+/// thread nothing per frame.
 private struct ConnectTile: View {
     let file: FileRef
     let url: URL?
     let picked: Bool
     let moving: Bool
-    @State private var phase = Double.random(in: 0..<(2 * .pi))
+    /// Where in its cycle this tile's quiver starts, 0..<1.
+    @State private var phase = Double.random(in: 0..<1)
     @State private var thumbnail: NSImage?
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !moving)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let quiver = moving && !picked
-            TileFace(file: file, thumbnail: thumbnail, picked: picked)
-                .rotationEffect(.degrees(quiver ? 1.4 * sin(t * 2 * .pi / 0.28 + phase) : 0))
-                .offset(y: quiver ? 0.6 * cos(t * 2 * .pi / 0.34 + phase) : 0)
-                .scaleEffect(picked ? 1.04 + (moving ? 0.025 * sin(t * 2 * .pi / 1.1) : 0) : 1)
-                .shadow(color: picked ? Theme.Color.thought(1).opacity(0.45) : .clear, radius: picked ? 10 : 0)
-        }
-        .contentShape(Rectangle())
-        .help(file.relativePath)
-        .task(id: file) { await loadThumbnail() }
+        QuiverHost(face: TileFace(file: file, thumbnail: thumbnail, picked: picked, still: !moving),
+                   motion: !moving ? .none : picked ? .breathe : .quiver, phase: phase)
+            // Clicks and hover land on SwiftUI; the hosted face lets every event through.
+            .overlay(Color.clear.contentShape(Rectangle()))
+            .contentShape(Rectangle())
+            .help(file.relativePath)
+            .task(id: file) { await loadThumbnail() }
     }
 
     private func loadThumbnail() async {
@@ -282,11 +280,13 @@ private struct ConnectTile: View {
     }
 }
 
-/// The still part of a tile, kept apart so the quiver redraws only a transform.
+/// What a tile shows. The quiver moves it whole, shadow and all, without redrawing it.
 private struct TileFace: View {
     let file: FileRef
     let thumbnail: NSImage?
     let picked: Bool
+    /// Reduce Motion: a picked tile sits a little larger instead of breathing.
+    let still: Bool
 
     var body: some View {
         VStack(spacing: Theme.Space.s) {
@@ -317,5 +317,154 @@ private struct TileFace: View {
             Squircle(radius: Theme.Radius.m).fill(picked ? Theme.Color.selection : .clear)
         })
         .overlay(Squircle(radius: Theme.Radius.m).strokeBorder(Theme.Color.thought(1), lineWidth: picked ? 1.5 : 0))
+        .scaleEffect(picked && still ? 1.04 : 1)
+        .shadow(color: picked ? Theme.Color.thought(1).opacity(0.45) : .clear, radius: picked ? 10 : 0)
+    }
+}
+
+// MARK: - Quiver
+
+/// A tile's face in layers Core Animation moves: the outer one bobs, the inner one tilts (or,
+/// picked, breathes) about its centre. Set once per state change; in between, SwiftUI and the
+/// main thread do nothing and the render server draws every frame.
+private struct QuiverHost: NSViewRepresentable {
+    enum Motion: Equatable { case none, quiver, breathe }
+
+    let face: TileFace
+    let motion: Motion
+    let phase: Double
+
+    func makeNSView(context: Context) -> QuiverView { QuiverView(face) }
+
+    func updateNSView(_ view: QuiverView, context: Context) {
+        view.host.rootView = face
+        view.set(motion, phase: phase)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: QuiverView, context: Context) -> CGSize? {
+        nsView.host.intrinsicContentSize
+    }
+}
+
+private final class QuiverView: NSView {
+    let host: NSHostingView<TileFace>
+    /// Carries the bob; `host` inside it carries the tilt or the breath.
+    private let lift = NSView()
+    private var motion: QuiverHost.Motion = .none
+    private var phase = 0.0
+    private var installedFor: CGSize?
+
+    /// 1.4° either way every 0.28 s and 0.6 pt up and down every 0.34 s, so the two never line
+    /// up; picked, 1.015× to 1.065× and back every 1.1 s, every picked tile together.
+    static let tilt = 1.4 * Double.pi / 180, tiltPeriod = 0.28
+    static let bob: CGFloat = 0.6, bobPeriod = 0.34
+    static let breath: (low: CGFloat, high: CGFloat) = (1.015, 1.065), breathPeriod = 1.1
+    private static let key = "flamingo.quiver"
+
+    init(_ face: TileFace) {
+        host = NSHostingView(rootView: face)
+        // Sized by the tile's own layout through `sizeThatFits`; no min/max constraints to fight
+        // the frame set here.
+        host.sizingOptions = [.intrinsicContentSize]
+        super.init(frame: .zero)
+        wantsLayer = true
+        lift.wantsLayer = true
+        host.wantsLayer = true
+        addSubview(lift)
+        lift.addSubview(host)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override var isFlipped: Bool { true }
+    /// Clicks, hover and tooltips belong to the SwiftUI tile around it.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func layout() {
+        super.layout()
+        lift.frame = bounds
+        host.frame = lift.bounds
+        if installedFor != bounds.size { install() }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        install()
+    }
+
+    func set(_ motion: QuiverHost.Motion, phase: Double) {
+        guard motion != self.motion || phase != self.phase else { return }
+        self.motion = motion
+        self.phase = phase
+        install()
+    }
+
+    /// The tilt in degrees and the bob in points as drawn this frame. QA.
+    var shown: (degrees: Double, bob: Double)? {
+        guard let t = host.layer?.presentation()?.transform, let b = lift.layer?.presentation()?.transform else { return nil }
+        return (atan2(Double(t.m12), Double(t.m11)) * 180 / .pi, Double(b.m42))
+    }
+
+    /// A layer-backed view's anchor is its corner, so tilt and scale are composed about the
+    /// centre. Within ±1.4° that composition's translation is linear to a hundredth of a point,
+    /// so interpolating between the two ends is the true rotation.
+    private func install() {
+        guard let inner = host.layer, let outer = lift.layer else { return }
+        inner.removeAnimation(forKey: Self.key)
+        outer.removeAnimation(forKey: Self.key)
+        installedFor = nil
+        guard window != nil, bounds.width > 0, bounds.height > 0 else { return }
+        installedFor = bounds.size
+        let c = CGPoint(x: host.bounds.midX, y: host.bounds.midY)
+        func aboutCentre(_ t: CATransform3D) -> NSValue {
+            let there = CATransform3DConcat(CATransform3DMakeTranslation(-c.x, -c.y, 0), t)
+            return NSValue(caTransform3D: CATransform3DConcat(there, CATransform3DMakeTranslation(c.x, c.y, 0)))
+        }
+        switch motion {
+        case .none:
+            break
+        case .quiver:
+            inner.add(Self.swing("transform", aboutCentre(CATransform3DMakeRotation(-Self.tilt, 0, 0, 1)),
+                                 aboutCentre(CATransform3DMakeRotation(Self.tilt, 0, 0, 1)),
+                                 period: Self.tiltPeriod, offset: phase * Self.tiltPeriod), forKey: Self.key)
+            outer.add(Self.swing("transform.translation.y", -Self.bob, Self.bob,
+                                 period: Self.bobPeriod, offset: phase * Self.bobPeriod), forKey: Self.key)
+        case .breathe:
+            let (low, high) = Self.breath
+            // Offset by the media clock, so tiles picked at different moments breathe as one.
+            inner.add(Self.swing("transform", aboutCentre(CATransform3DMakeScale(low, low, 1)),
+                                 aboutCentre(CATransform3DMakeScale(high, high, 1)),
+                                 period: Self.breathPeriod, offset: CACurrentMediaTime()), forKey: Self.key)
+        }
+    }
+
+    /// From `from` to `to` and back once per `period`, eased like a sine, forever.
+    private static func swing(_ keyPath: String, _ from: Any, _ to: Any, period: Double, offset: Double) -> CABasicAnimation {
+        let a = CABasicAnimation(keyPath: keyPath)
+        a.fromValue = from
+        a.toValue = to
+        a.duration = period / 2
+        a.autoreverses = true
+        a.repeatCount = .infinity
+        a.timeOffset = offset.truncatingRemainder(dividingBy: period)
+        a.timingFunction = CAMediaTimingFunction(controlPoints: 0.37, 0, 0.63, 1)
+        a.isRemovedOnCompletion = false
+        return a
+    }
+}
+
+/// `connect quiver`: how many tiles move on their own, and a few of their tilts and bobs as
+/// drawn now. Two reports a moment apart show whether the render server is moving them.
+@MainActor
+enum ConnectGridQA {
+    static func report() -> String {
+        var views: [QuiverView] = []
+        func collect(_ view: NSView) {
+            if let q = view as? QuiverView { views.append(q) } else { view.subviews.forEach(collect) }
+        }
+        NSApp.windows.compactMap { $0.contentView }.forEach(collect)
+        let shown = views.prefix(4).compactMap { $0.shown }.map { String(format: "%.2f°/%.2fpt", $0.degrees, $0.bob) }
+        return "tiles=\(views.count) animated=\(views.filter { $0.host.layer?.animationKeys()?.isEmpty == false }.count) " + shown.joined(separator: " ")
     }
 }

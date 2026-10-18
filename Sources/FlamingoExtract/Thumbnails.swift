@@ -132,7 +132,9 @@ public enum Thumbnails {
         let task = inFlight.withLock { tasks in
             if let t = tasks[key] { return t }
             // Inserted under the lock the task takes to remove itself, so removal can't come first.
-            let t = Task.detached {
+            // At the first caller's priority: a prefetch stays on the efficiency cores, and a
+            // more urgent caller awaiting the same task raises it.
+            let t = Task.detached(priority: Task.currentPriority) {
                 let image = await work()
                 inFlight.withLock { $0[key] = nil }
                 return image

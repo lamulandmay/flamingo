@@ -123,10 +123,11 @@ extension IndexStore {
 
     /// Loads this index's vectors into memory and, given a query, its embedding, on a
     /// background queue. Returns at once. Calling it when a search field opens makes the
-    /// first semantic result as fast as the rest.
+    /// first semantic result as fast as the rest. User-initiated: someone is typing and the
+    /// semantic results they wait for start from this.
     public func warmSemanticSearch(query: String? = nil) {
         let q = query?.trimmingCharacters(in: .whitespacesAndNewlines)
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let embedder = self.embedding.lock.withLock { self.embedding.embedder }
             for (_, profile) in self.semanticIndexes() {

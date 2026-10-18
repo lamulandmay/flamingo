@@ -10,7 +10,8 @@ extension AskEngine {
     public func askStreamingLocally(_ question: String, history: [ConversationTurn] = [], files: [FileRef],
                                     context: AskContext = .empty) -> AsyncThrowingStream<Delta, Error> {
         AsyncThrowingStream { continuation in
-            let task = Task.detached { [self] in
+            // The reply streams into the rail as it is written; someone is reading it.
+            let task = Task.detached(priority: .userInitiated) { [self] in
                 do {
                     try await self.runThoughtQuestion(question, history: history, files: files, context: context) { continuation.yield($0) }
                     continuation.finish()

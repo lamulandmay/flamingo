@@ -159,7 +159,9 @@ public enum Extract {
 
     private static let registry = Locked<[any Extractor.Type]>([])
     private static let registeredOnce: Void = registerDefaults()
-    private static let queue = DispatchQueue(label: "flamingo.extract", qos: .utility, attributes: .concurrent)
+    /// `extractInBackground`'s, for text someone is waiting to read (a document's text view, a
+    /// search preview), so user-initiated. The indexer extracts on its own threads at its own QoS.
+    private static let queue = DispatchQueue(label: "flamingo.extract", qos: .userInitiated, attributes: .concurrent)
 
     private static func isPackageExtension(_ url: URL) -> Bool {
         IWorkExtractor.extensions.contains(url.pathExtension.lowercased())
