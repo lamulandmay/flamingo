@@ -2022,7 +2022,8 @@ final class AppState {
     /// The graph feeds Graph mode and the local graph under the rail, so it is rebuilt
     /// whenever it goes stale, coalescing bursts; at once when Graph mode is on screen. A
     /// whole disk changes every few seconds, so there files changing on disk rebuild it at
-    /// most every `slowGraphDelay`; a thought (`urgent`) still shows within a second or two.
+    /// most every `slowGraphDelay` (`graphRebuildGap` in Graph mode), and a rebuild that draws
+    /// the same graph publishes nothing; a thought (`urgent`) still shows within a second or two.
     /// Something on screen draws from the graph: Graph mode, the Connections tab (its local
     /// graph and discovered evidence) or Wander. Otherwise a stale graph waits.
     var graphShown: Bool { mode == .graph || (railShown && inspectorTab == .connections) || wander != nil }
