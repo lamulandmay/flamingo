@@ -165,6 +165,7 @@ private struct GeneralSettings: View {
     @EnvironmentObject var state: AppState
     @State private var appearance = Defaults.appearance
     @State private var inboxEachDay = Defaults.briefingAutoOpen
+    @State private var offerProjects = Defaults.offerAgentProjects
     @State private var holdDelay = Defaults.radialHoldDelay
     @State private var writingFont = Defaults.writingFont
     @State private var writingSize = Defaults.writingSize
@@ -189,6 +190,7 @@ private struct GeneralSettings: View {
 
             Toggle("Reveal the open file in the sidebar", isOn: $state.autoReveal)
             Toggle("Open the inbox the first time each day", isOn: $inboxEachDay)
+            Toggle("Offer to make folders agents work in into projects", isOn: $offerProjects)
 
             Divider().padding(.vertical, Theme.Space.s)
 
@@ -219,6 +221,7 @@ private struct GeneralSettings: View {
         .onChange(of: writingSize) { Defaults.writingSize = writingSize; NotificationCenter.default.post(name: .writingFontChanged, object: nil) }
         .onChange(of: appearance) { Defaults.appearance = appearance; appearance.apply() }
         .onChange(of: inboxEachDay) { Defaults.briefingAutoOpen = inboxEachDay }
+        .onChange(of: offerProjects) { Defaults.offerAgentProjects = offerProjects; state.agentProjects.settingChanged() }
         .onChange(of: holdDelay) {
             Defaults.radialHoldDelay = holdDelay
             RadialRecentsController.shared?.reloadHoldDelay()

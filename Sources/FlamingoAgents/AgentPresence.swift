@@ -11,6 +11,11 @@ public struct AgentActivity: Equatable, Sendable {
     public var lastActive: Date
     /// A harness process is running there now.
     public var isLive: Bool
+
+    public init(project: URL, harness: AgentHarness, session: String?, title: String?, lastActive: Date, isLive: Bool) {
+        self.project = project; self.harness = harness; self.session = session
+        self.title = title; self.lastActive = lastActive; self.isLive = isLive
+    }
 }
 
 /// A folder an agent works in that isn't a project yet: the dot and the unresolved issue.
@@ -18,6 +23,8 @@ public struct ProjectOffer: Equatable, Sendable, Identifiable {
     public var root: URL
     public var activity: [AgentActivity]
     public var id: String { root.path }
+
+    public init(root: URL, activity: [AgentActivity]) { self.root = root; self.activity = activity }
 }
 
 /// Who is working where, from live processes and recent logs (plan 18).

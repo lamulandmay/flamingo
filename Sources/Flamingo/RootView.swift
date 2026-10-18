@@ -79,6 +79,7 @@ private struct RootLayout: View {
         .animation(Theme.Motion.normal, value: state.connectGridShown)
         .sheet(isPresented: $state.isNewFilePresented) { NewFileSheet().environmentObject(state) }
         .sheet(isPresented: $state.isHealthPresented) { IndexHealthSheet(indexing: state.indexing).environmentObject(state) }
+        .background(MakeProjectHost(model: state.agentProjects))
         .overlay {
             Rectangle()
                 .strokeBorder(Theme.Color.accent, lineWidth: 1)

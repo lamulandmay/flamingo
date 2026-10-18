@@ -230,6 +230,8 @@ final class AppState: ObservableObject {
     let radial = RadialMenuModel()
     /// Thoughts v2: jobs, understanding, night shift (AppState+Thoughts.swift).
     let thoughts = ThoughtsRuntime()
+    /// Plan 18: which agents work where, the dot, and Make Project.
+    let agentProjects = AgentProjectsModel()
     @Published var isNewFilePresented = false
     /// Connect mode (⌘J): the grid of files you click to connect, over the content.
     @Published var connectGridShown = false
@@ -304,6 +306,7 @@ final class AppState: ObservableObject {
         // Layout changes are rare, so the whole shell may redraw for them (menus, the top bar).
         tilingObserver = tiling.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         launcher.attach(self)
+        agentProjects.state = self
         sidebarSearch.runUnified = { [weak self] query in
             guard let self else { throw CancellationError() }
             return try await self.unifiedSearch(query, limit: 150)
@@ -352,6 +355,7 @@ final class AppState: ObservableObject {
         session = s
         vault = v
         attachRecents(to: s)
+        agentProjects.attach(v)
         VaultScanner.writeDefaultIgnoreFile(in: v)
         do { bookmarks = try Bookmarks.loadOrCreateChecked(in: v); bookmarksError = nil }
         catch { bookmarks = Bookmarks(); bookmarksError = error.localizedDescription; report(error) }

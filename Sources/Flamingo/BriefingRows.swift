@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import FlamingoCore
+import FlamingoAgents
 import FlamingoDesign
 import FlamingoCapture
 import FlamingoExtract
@@ -233,6 +234,7 @@ struct BriefingAttentionRow: View {
         case .loose: symbol("tray")
         case .draft: symbol("pencil.line")
         case .problems: symbol("exclamationmark.triangle")
+        case .project: FolderGlyph()
         default: EmptyView()
         }
     }
@@ -248,6 +250,7 @@ struct BriefingAttentionRow: View {
         case .loose(let r): BriefingFormat.plain(r.comment.firstLine)
         case .draft(_, let text): text
         case .problems: ""
+        case .project(let o): o.root.lastPathComponent
         default: ""
         }
     }
@@ -267,6 +270,8 @@ struct BriefingAttentionRow: View {
             .help(s.passage ?? "")
         case .problems(let p):
             mono("\(p.total)")
+        case .project(let o):
+            mono(Set(o.activity.map(\.harness.name)).sorted().joined(separator: ", "))
         default:
             EmptyView()
         }

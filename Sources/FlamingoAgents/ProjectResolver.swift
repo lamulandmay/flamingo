@@ -79,7 +79,7 @@ public struct ProjectResolver: Sendable {
     }
 
     /// `realpath`, so `/tmp` and `/private/tmp` (and any symlinked folder) compare equal.
-    static func canonical(_ path: String) -> String {
+    public static func canonical(_ path: String) -> String {
         guard let resolved = realpath(path, nil) else { return (path as NSString).standardizingPath }
         defer { free(resolved) }
         return String(cString: resolved)

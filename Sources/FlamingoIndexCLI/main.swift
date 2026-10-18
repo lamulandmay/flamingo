@@ -34,8 +34,8 @@ usage: flamingo-index <vault> [options]
   --force             re-extract every file, changed or not
   --limit N           cap results (default 20)
   --structure check   how <vault> differs from the project structure (plan 18)
-  --structure plan    what making <vault> a project would do
-  --structure apply   make <vault> a project: git init and the missing items, never overwriting
+  --structure plan    what making <vault> a project would do: creations, moves, link rewrites
+  --structure apply   make <vault> a project (plan 18 conversion), never overwriting
   --agents            which agents work where in <vault>, and the folders Flamingo would offer
 
 """
@@ -114,13 +114,14 @@ if let (_, verb) = actions.first(where: { $0.0 == "--structure" }) {
         for issue in report.issues { print((issue.isRestorable ? "  restorable  " : "  ") + issue.description) }
         exit(report.isStructured && report.issues.isEmpty ? 0 : 1)
     case "plan", "apply":
-        let plan = ProjectScaffolder.plan(root: root)
-        for change in plan.changes { print(change.description) }
-        for conflict in plan.conflicts { print("! " + conflict.description) }
-        guard verb == "apply" else { exit(plan.conflicts.isEmpty ? 0 : 1) }
+        let plan = ProjectConverter.plan(root: root)
+        for step in plan.steps { print(step.description) }
+        for mention in plan.mentions { print("  mention  \(mention.file):\(mention.line)  \(mention.name)") }
+        for issue in plan.blocked { print("! " + issue.description) }
+        guard verb == "apply" else { exit(plan.blocked.isEmpty ? 0 : 1) }
         do {
-            let created = try ProjectScaffolder.apply(plan)
-            print("created \(created.count): " + created.joined(separator: ", "))
+            let journal = try ProjectConverter.apply(plan)
+            print("done: \(journal.entries.count) changes")
             exit(0)
         } catch {
             fail(error.localizedDescription)

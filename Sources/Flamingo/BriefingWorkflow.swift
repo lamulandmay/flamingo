@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import FlamingoCore
+import FlamingoAgents
 import FlamingoDesign
 import FlamingoIndex
 import FlamingoThoughts
@@ -143,6 +144,8 @@ enum BriefingItem: Identifiable, Equatable {
     case draft(Int, String)
     case problems(IndexProblems)
     case resume(Int, TrailLocation)
+    /// Plan 18: an agent works in a folder that isn't a project yet.
+    case project(ProjectOffer)
 
     var id: String {
         switch self {
@@ -154,6 +157,7 @@ enum BriefingItem: Identifiable, Equatable {
         case .draft(let i, _): "d:\(i)"
         case .problems: "p"
         case .resume(let i, _): "r:\(i)"
+        case .project(let o): "j:" + o.root.path
         }
     }
 
@@ -505,6 +509,7 @@ final class BriefingModel: ObservableObject {
         out += s.suggestions.map { .suggestion($0) }
         out += s.recoveredDrafts.enumerated().map { .draft($0.offset, $0.element) }
         if s.problems.total > 0 { out.append(.problems(s.problems)) }
+        out += (state?.agentProjects.offers ?? []).map { .project($0) }
         return out.filter { !removed.contains($0.id) }
     }
 
@@ -596,6 +601,8 @@ final class BriefingModel: ObservableObject {
             close(); state.isHealthPresented = true
         case .resume(_, let location):
             close(); state.jump(to: location.file, anchor: location.anchor)
+        case .project(let o):
+            close(); state.agentProjects.present(o.root)
         }
     }
 
@@ -629,7 +636,7 @@ final class BriefingModel: ObservableObject {
             remove(item)
             state?.connect(s.source, s.other)
             markPairSeen(s)
-        case .memo, .edited, .draft, .problems, .resume:
+        case .memo, .edited, .draft, .problems, .resume, .project:
             break
         }
     }
@@ -649,7 +656,7 @@ final class BriefingModel: ObservableObject {
             remove(item)
             state?.dismissSuggestion(s.source, s.other)
             markPairSeen(s)
-        case .edited, .draft, .problems:
+        case .edited, .draft, .problems, .project:
             remove(item)
         case .memo, .resume:
             break

@@ -1,6 +1,7 @@
 import AppKit
 import UniformTypeIdentifiers
 import FlamingoCore
+import FlamingoAgents
 
 /// The context menu for a file or folder, the same in the file explorer and the columns, so
 /// either can do what the other can. `url` can be anywhere on the Mac; what needs the vault
@@ -28,6 +29,9 @@ enum FileMenu {
             if let rel { addNewItems(to: menu, folder: rel, state: state) }
             if let rel {
                 menu.addItem(ActionItem("Search in Folder") { state.showSidebarSearch(SidebarSearchModel.scopedQuery(folder: rel)) })
+            }
+            if rel != nil, !AgentPresence.isProject(url) {
+                menu.addItem(ActionItem("Make Project…") { state.agentProjects.present(url) })
             }
         } else {
             if let ref { menu.addItem(ActionItem("Open Beside") { state.openBeside(ref) }) }

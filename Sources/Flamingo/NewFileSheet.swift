@@ -14,6 +14,8 @@ struct NewFileSheet: View {
     @State private var name = ""
     @State private var highlight = 0
     @State private var chosen: DocumentFactory.Format?
+    /// Plan 18: the Project kind was picked; the field takes its folder's name.
+    @State private var projectChosen = false
     @State private var error: String?
     /// Each kind's app, looked up once per sheet: the row says where it opens, and kinds
     /// whose app isn't on this Mac are left out.
@@ -22,8 +24,18 @@ struct NewFileSheet: View {
     private enum Kind: Identifiable, Equatable {
         case file(DocumentFactory.Format)
         case folder
-        var id: String { if case .file(let f) = self { f.ext } else { "/folder" } }
+        /// A folder with the project structure (plan 18) and a git repo.
+        case project
+        var id: String {
+            switch self {
+            case .file(let f): f.ext
+            case .folder: "/folder"
+            case .project: "/project"
+            }
+        }
     }
+
+    private var naming: Bool { chosen != nil || projectChosen }
 
     /// `plan.pptx`: a name and a kind in one.
     private var typed: (stem: String, format: DocumentFactory.Format)? {
@@ -38,6 +50,7 @@ struct NewFileSheet: View {
         var found = DocumentFactory.search(query).filter(available).map(Kind.file)
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         if q.isEmpty || ["folder", "directory"].contains(where: { $0.hasPrefix(q) }) { found.append(.folder) }
+        if q.isEmpty || ["project", "repo", "repository", "code", "git"].contains(where: { $0.hasPrefix(q) }) { found.append(.project) }
         return found
     }
 
@@ -67,11 +80,14 @@ struct NewFileSheet: View {
                 if let chosen {
                     Button { back() } label: { FileGlyph(ext: chosen.ext, size: 18) }
                         .buttonStyle(.press).focusable(false).help(chosen.title)
+                } else if projectChosen {
+                    Button { back() } label: { glyph(.project, size: 18) }
+                        .buttonStyle(.press).focusable(false).help("Project")
                 } else {
                     glyph(kinds.indices.contains(highlight) ? kinds[highlight] : nil, size: 18)
                 }
-                CommandField(text: chosen == nil ? $query : $name, placeholder: chosen == nil ? "" : "Untitled",
-                             label: chosen == nil ? "Kind of file" : "Name") { command($0, kinds: kinds) }
+                CommandField(text: naming ? $name : $query, placeholder: naming ? "Untitled" : "",
+                             label: naming ? "Name" : "Kind of file") { command($0, kinds: kinds) }
                 if let chosen {
                     Text("." + chosen.ext)
                         .font(Theme.Font.mono)
@@ -80,7 +96,7 @@ struct NewFileSheet: View {
             }
             .padding(.horizontal, Theme.Space.l)
             .padding(.vertical, Theme.Space.m)
-            if chosen == nil, !kinds.isEmpty {
+            if !naming, !kinds.isEmpty {
                 Hairline()
                 list(kinds)
             }
@@ -138,6 +154,13 @@ struct NewFileSheet: View {
             case .folder:
                 Text("Folder")
                 Spacer(minLength: Theme.Space.s)
+            case .project:
+                Text("Project")
+                Spacer(minLength: Theme.Space.s)
+                Text("AGENTS.md, plans, docs, git")
+                    .font(Theme.Font.small)
+                    .foregroundStyle(Theme.Color.textTertiary)
+                    .lineLimit(1)
             }
         }
         .frame(height: 28)
@@ -148,6 +171,10 @@ struct NewFileSheet: View {
         case .file(let format): FileGlyph(ext: format.ext, size: size)
         case .folder:
             Image(systemName: "folder").font(.system(size: size))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: (size * 1.35).rounded())
+        case .project:
+            Image(systemName: "folder.badge.gearshape").font(.system(size: size))
                 .foregroundStyle(Theme.Color.textSecondary)
                 .frame(width: (size * 1.35).rounded())
         case nil:
@@ -164,13 +191,13 @@ struct NewFileSheet: View {
         case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.insertTab(_:)): return step(1, in: kinds)
         case #selector(NSResponder.moveUp(_:)), #selector(NSResponder.insertBacktab(_:)): return step(-1, in: kinds)
         case #selector(NSResponder.insertNewline(_:)):
-            if chosen == nil { pick(kinds) } else { create() }
+            if naming { create() } else { pick(kinds) }
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             state.isNewFilePresented = false
             return true
         case #selector(NSResponder.deleteBackward(_:)):
-            guard chosen != nil, name.isEmpty else { return false }
+            guard naming, name.isEmpty else { return false }
             back()
             return true
         default:
@@ -179,7 +206,7 @@ struct NewFileSheet: View {
     }
 
     private func step(_ by: Int, in kinds: [Kind]) -> Bool {
-        guard chosen == nil else { return false }
+        guard !naming else { return false }
         if !kinds.isEmpty { highlight = (highlight + by + kinds.count) % kinds.count }
         return true
     }
@@ -197,6 +224,9 @@ struct NewFileSheet: View {
             guard let folder = url.standardizedFileURL.path == root ? "" : v.relativePath(of: url) else { NSSound.beep(); return }
             state.isNewFilePresented = false
             state.newFolder(in: folder)
+        case .project:
+            projectChosen = true
+            name = ""
         case .file(let format) where !format.isFile:
             make(format, named: "")
         case .file(let format):
@@ -207,10 +237,17 @@ struct NewFileSheet: View {
 
     private func back() {
         chosen = nil
+        projectChosen = false
         error = nil
     }
 
     private func create() {
+        if projectChosen {
+            guard let directory = state.newFileDirectory else { return }
+            do { try state.agentProjects.createProject(named: name, in: directory) }
+            catch { self.error = error.localizedDescription }
+            return
+        }
         guard let chosen else { return }
         make(chosen, named: name)
     }

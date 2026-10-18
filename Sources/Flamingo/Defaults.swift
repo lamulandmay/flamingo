@@ -186,6 +186,12 @@ enum Defaults {
         set { d.set(newValue, forKey: "briefingAutoOpen") }
     }
 
+    /// Plan 18: put a dot on folders an agent works in and offer to make them projects.
+    static var offerAgentProjects: Bool {
+        get { d.object(forKey: "offerAgentProjects") as? Bool ?? true }
+        set { d.set(newValue, forKey: "offerAgentProjects") }
+    }
+
     /// Memo paths (`vault|path`) and the briefing day each was first shown: new that day, seen after.
     static var briefingMemoDays: [String: String] {
         get { d.dictionary(forKey: "briefingMemoDays") as? [String: String] ?? [:] }

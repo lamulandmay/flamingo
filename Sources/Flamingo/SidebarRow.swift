@@ -1,5 +1,6 @@
 import SwiftUI
 import FlamingoCore
+import FlamingoAgents
 import FlamingoDesign
 
 /// One row of the sidebar tree: glyph, name, and the comment count that shows on hover.
@@ -31,6 +32,7 @@ struct SidebarRow: View {
                     .opacity(hovering || selected ? 0.9 : 0.55)
                     .accessibilityLabel("Pinned folder")
             }
+            if node.isFolder, !node.id.isEmpty { AgentDot(model: state.agentProjects, path: node.id) }
             if let ref = node.ref, let count = state.commentCounts[ref], count > 0 {
                 Text(String(count))
                     .font(Theme.Font.small)
@@ -60,5 +62,28 @@ struct SidebarRowHost: View {
             .environmentObject(state)
             .environment(\.flamingoRowSelected, selected)
             .id(ObjectIdentifier(node))   // a reused cell starts its hover state afresh
+    }
+}
+
+/// Plan 18: the dot on a folder an agent works in that isn't a project yet, and on every
+/// folder above it. A click opens Make Project for that folder (or the first one inside).
+struct AgentDot: View {
+    @ObservedObject var model: AgentProjectsModel
+    let path: String
+
+    var body: some View {
+        if model.dotted.contains(path), let offer = model.offer(under: path) {
+            Button { model.present(offer.root) } label: {
+                Squircle(radius: 3)
+                    .fill(Theme.Color.textSecondary)
+                    .frame(width: 6, height: 6)
+                    .padding(4)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(Set(offer.activity.map(\.harness.name)).sorted().joined(separator: ", ") + " · " + offer.root.lastPathComponent)
+            .accessibilityLabel("Make \(offer.root.lastPathComponent) a project")
+            .transition(.opacity)
+        }
     }
 }

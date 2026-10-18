@@ -15,7 +15,7 @@ struct FolderSurface: View {
         if state.shownResults != nil {
             SearchResultsSurface(model: state.searchResults)
         } else {
-            FolderSurfaceContent(browser: state.browser)
+            FolderSurfaceContent(browser: state.browser, agents: state.agentProjects)
         }
     }
 }
@@ -23,13 +23,14 @@ struct FolderSurface: View {
 private struct FolderSurfaceContent: View {
     @EnvironmentObject var state: AppState
     @ObservedObject var browser: ColumnBrowserModel
+    @ObservedObject var agents: AgentProjectsModel
 
     private var followKey: String { (state.vault?.root.path ?? "") + "|" + (state.selectedFolder ?? "") }
 
     var body: some View {
         Group {
             switch browser.style {
-            case .columns: ColumnBrowser(state: state, model: browser, counts: state.commentCounts)
+            case .columns: ColumnBrowser(state: state, model: browser, counts: state.commentCounts, dotted: agents.dotted)
             case .icons: IconSurface(browser: browser)
             }
         }

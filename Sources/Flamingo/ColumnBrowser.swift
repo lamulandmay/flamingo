@@ -379,10 +379,12 @@ struct ColumnBrowser: NSViewRepresentable {
     let state: AppState
     @ObservedObject var model: ColumnBrowserModel
     let counts: [FileRef: Int]
+    /// Folders with plan 18's dot.
+    var dotted: Set<String> = []
 
     func makeNSView(context: Context) -> ColumnBrowserView { ColumnBrowserView(state: state, model: model) }
 
-    func updateNSView(_ view: ColumnBrowserView, context: Context) { view.apply(counts: counts) }
+    func updateNSView(_ view: ColumnBrowserView, context: Context) { view.apply(counts: counts, dotted: dotted) }
 
     /// Takes the space it is offered. Left to measure it, SwiftUI asks Auto Layout, which
     /// walks every column and row on each update.
@@ -424,6 +426,7 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     private var showHidden: Bool
     private var sort: ColumnSort
     private var counts: [FileRef: Int] = [:]
+    private var dotted: Set<String> = []
     /// Above zero while the code, not the user, moves a selection.
     private var suppress = 0
     /// A column the keyboard should land in once it has listed its folder.
@@ -470,7 +473,7 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     }
 
     /// Every SwiftUI update lands here; it does work only when something moved.
-    func apply(counts newCounts: [FileRef: Int]) {
+    func apply(counts newCounts: [FileRef: Int], dotted newDotted: Set<String>? = nil) {
         updating += 1
         defer {
             updating -= 1
@@ -497,8 +500,9 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
             }
             renamePending()
         }
-        if newCounts != counts {
+        if newCounts != counts || (newDotted != nil && newDotted != dotted) {
             counts = newCounts
+            if let newDotted { dotted = newDotted }
             for c in columns where c.loaded {
                 let visible = c.table.rows(in: c.table.visibleRect)
                 guard visible.length > 0 else { continue }
@@ -910,8 +914,10 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
         guard let i = index(of: tableView), row < columns[i].entries.count else { return nil }
         let entry = columns[i].entries[row]
         let cell = (tableView.makeView(withIdentifier: ColumnCellView.id, owner: nil) as? ColumnCellView) ?? ColumnCellView()
-        let thoughts = vaultPath(entry.url).flatMap { counts[FileRef(relativePath: $0)] } ?? 0
-        cell.configure(entry, icon: ColumnIcons.icon(for: entry.url), thoughts: thoughts)
+        let path = vaultPath(entry.url)
+        let thoughts = path.flatMap { counts[FileRef(relativePath: $0)] } ?? 0
+        cell.configure(entry, icon: ColumnIcons.icon(for: entry.url), thoughts: thoughts,
+                       dotted: entry.isFolder && path.map(dotted.contains) == true)
         return cell
     }
 
@@ -1414,6 +1420,8 @@ private final class ColumnCellView: NSTableCellView {
     private let name = NSTextField(labelWithString: "")
     private let chevron = NSImageView()
     private let badge = NSTextField(labelWithString: "")
+    /// Plan 18's dot: an agent works in this folder (or one inside it) and it isn't a project.
+    private let dot = NSView()
 
     var iconFrame: NSRect { icon.frame }
     /// The name's text, as far as it runs, in the cell's coordinates.
@@ -1437,14 +1445,17 @@ private final class ColumnCellView: NSTableCellView {
         badge.font = Theme.NS.small
         badge.textColor = Theme.NS.textTertiary
         badge.alignment = .right
-        for v in [icon, name, chevron, badge] as [NSView] { addSubview(v) }
+        dot.wantsLayer = true
+        dot.isHidden = true
+        for v in [icon, name, chevron, badge, dot] as [NSView] { addSubview(v) }
         textField = name
         imageView = icon
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    func configure(_ entry: ColumnEntry, icon image: NSImage, thoughts: Int) {
+    func configure(_ entry: ColumnEntry, icon image: NSImage, thoughts: Int, dotted: Bool = false) {
+        dot.isHidden = !dotted
         icon.image = image
         name.stringValue = entry.name
         name.alphaValue = entry.isHidden ? 0.5 : 1
@@ -1466,6 +1477,13 @@ private final class ColumnCellView: NSTableCellView {
         if !chevron.isHidden {
             chevron.frame = NSRect(x: right - 8, y: ((h - 12) / 2).rounded(), width: 8, height: 12)
             right -= 8 + Theme.Space.xs
+        }
+        if !dot.isHidden {
+            dot.frame = NSRect(x: right - 6, y: ((h - 6) / 2).rounded(), width: 6, height: 6)
+            dot.layer?.backgroundColor = Theme.NS.textSecondary.cgColor
+            dot.layer?.cornerRadius = 3
+            dot.layer?.cornerCurve = .continuous
+            right -= 6 + Theme.Space.xs
         }
         if !badge.isHidden {
             badge.sizeToFit()

@@ -347,6 +347,8 @@ public enum ProjectStructureError: Error, Equatable, LocalizedError {
     case needsConversion([ProjectIssue])
     case newerStructure(Int)
     case gitFailed(String)
+    /// Something Flamingo wrote or moved changed since, so it won't be taken back.
+    case changed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -354,6 +356,7 @@ public enum ProjectStructureError: Error, Equatable, LocalizedError {
         case .needsConversion(let issues): "Needs converting first: " + issues.map(\.description).joined(separator: "; ") + "."
         case .newerStructure(let v): "This project uses structure version \(v), newer than this build."
         case .gitFailed(let message): "git init failed: \(message)"
+        case .changed(let p): "\(p) changed since Flamingo touched it. Nothing was undone."
         }
     }
 }

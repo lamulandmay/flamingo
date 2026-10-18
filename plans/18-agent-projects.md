@@ -353,8 +353,36 @@ Where chains appear:
     (`~/.local/share/claude/versions/…`).
   - **On this Mac.** `--agents` on `~` finds this session live in `~/claude/flamingo` (37 ms)
     and offers the repo.
-- **Next: M3**, the dot, briefing item, sheet, No and ⌘N kind. It touches files with uncommitted
-  changes on `main`, so it needs main's current state first.
+- **M3 and M4 done (2026-10-18), uncommitted in the worktree.** M4 was pulled forward: without
+  conversion, almost every real folder (this repo included) could only show a disabled button.
+  The worktree index holds `main`'s uncommitted tree as a baseline, so `git diff` is M3 and M4 only.
+  - **Model.** `AgentProjectsModel` (`AgentProjects.swift`) polls every 5 s in front and 30 s
+    behind. Refreshes queue behind a running scan; they never drop.
+  - **The dot.** Sidebar rows (`AgentDot`) and column cells, on the offered folder and every
+    folder above it.
+  - **The rest of the offer.** A briefing item `.project`, the context menu's Make Project…, and
+    `MakeProjectSheet`.
+  - **Answers.** No is saved in `projects.json`. Settings ▸ General has the toggle. ⌘N has a
+    Project kind (`createProject`), which opens `AGENTS.md`.
+  - **Conversion.** `ProjectConverter` (FlamingoCore, `ProjectConversion.swift`):
+    - merges `CLAUDE.md` or an unmarked `AGENTS.md` under Rules, with headings two levels down;
+    - moves root Markdown to `docs/`, or to `plans/NN-slug.md` when it looks like a plan;
+    - merges `doc/` into `docs/` and renames bad plan names;
+    - rewrites Markdown and wiki links, and lists plain mentions.
+
+    `ProjectJournal.undo()` is all or nothing. One "Make Project" undo restores the folder byte
+    for byte, and redo converts it again.
+  - **Paths.** Folders are compared through `ProjectResolver.canonical`, because `Vault`
+    standardizes `/private/var` to `/var`.
+  - **Tests.** 9 conversion tests and 5 app tests. The app tests include offscreen renders of the
+    sheet and the dot (`FLAMINGO_SNAPSHOT_DIR`, `FLAMINGO_SNAPSHOT_PROJECT`).
+  - **On a copy of this repo.** 5 moves; 99 plain mentions in 23 files stay as written; `check`
+    passes after.
+  - **QA hook.** `agents status|refresh|present <folder>|make|no`.
+- **Not done yet.**
+  - A real-app run: launching the debug app puts a window on the user's screen.
+  - Merging into `main` and installing need the user's OK.
+- **Next: M5**, the keeper.
 
 ## Milestones
 

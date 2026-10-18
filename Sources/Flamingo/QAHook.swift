@@ -22,6 +22,7 @@ import FlamingoCore
 ///     postnote com.flamingo.qa "results sort size"      the search results list: a header click; also status, menu, kind, query, field
 ///     postnote com.flamingo.qa "rclick 300 20 Rename…"  right-click at a point (as click), then pick that menu item
 ///     postnote com.flamingo.qa "dclick 300 20"          double-click at a point, as click
+///     postnote com.flamingo.qa "agents present code/lamp"  plan 18: open Make Project; also status, refresh, make, no
 @MainActor
 enum QAHook {
     /// `FLAMINGO_QA_CHANNEL` picks another name, so concurrent test builds don't hear each other.
@@ -42,6 +43,8 @@ enum QAHook {
         let parts = command.split(separator: " ", maxSplits: 1).map(String.init)
         // Briefing QA verbs
         if parts.first == "briefing" { return runBriefing(parts.count > 1 ? parts[1] : "") }
+        // Plan 18: `agents status|refresh|make|no`, `agents present <vault-relative folder>`
+        if parts.first == "agents" { return runAgents(parts.count > 1 ? parts[1] : "status") }
         guard parts.count == 2 else { return }
         if parts[0] == "type" {
             for ch in parts[1] { send(code: 0, chars: String(ch), flags: []) }
@@ -260,6 +263,22 @@ enum QAHook {
     //     briefing select 3        the nth item the arrows walk (1-based)
     //     briefing reply text      replies to the selected thought; briefing attach q3 attaches a loose capture
     //     briefing status          logs the selection, the items and the window frame
+    private static func runAgents(_ command: String) {
+        guard let state = (NSApp.delegate as? AppDelegate)?.state else { return }
+        let model = state.agentProjects
+        let parts = command.split(separator: " ", maxSplits: 1).map(String.init)
+        switch parts.first ?? "" {
+        case "refresh": model.refresh()
+        case "present":
+            guard parts.count == 2, let v = state.vault else { return }
+            model.present(v.root.appendingPathComponent(parts[1], isDirectory: true))
+        case "make": if let root = model.sheet?.root { model.make(root) }
+        case "no": if let root = model.sheet?.root { model.decline(root) }
+        default: break
+        }
+        Log.debug("qa: agents offers=\(model.offers.map { model.relativePath($0.root) ?? $0.root.path }) dotted=\(model.dotted.sorted()) sheet=\(model.sheet?.root.path ?? "none")")
+    }
+
     private static func runBriefing(_ rest: String) {
         guard let state = (NSApp.delegate as? AppDelegate)?.state else { return }
         let model = state.briefing
