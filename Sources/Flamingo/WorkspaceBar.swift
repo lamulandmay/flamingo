@@ -5,6 +5,7 @@ import FlamingoIndex
 
 /// Open files as quiet tabs: the current one in full text with an accent underline, the
 /// rest secondary. One open file needs no tab bar; the title bar already names it.
+/// Right-click ▸ Rename… edits a tab's name in place.
 struct WorkingFilesBar: View {
     @EnvironmentObject var state: AppState
     var body: some View {
@@ -34,6 +35,7 @@ private struct WorkingFileTab: View {
     let file: FileRef
     let selected: Bool
     @State private var hovering = false
+    @State private var renaming = false
     /// Showing in a pane that isn't the active one.
     private var elsewhere: Bool {
         !selected && state.visiblePanes.contains { $0.id != state.activePaneID && $0.file == file }
@@ -42,12 +44,18 @@ private struct WorkingFileTab: View {
     var body: some View {
         HStack(spacing: Theme.Space.s) {
             FileGlyph(ext: file.ext, size: 12, selected: selected)
-            Text(file.name)
-                .font(Theme.Font.small)
-                .foregroundStyle(selected ? Theme.Color.text : Theme.Color.textSecondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: 180, alignment: .leading)
+            if renaming {
+                RenameField(name: file.name, font: Theme.NS.small, maxWidth: 180) { new in
+                    state.rename(file.relativePath, to: new)
+                } end: { renaming = false }
+            } else {
+                Text(file.name)
+                    .font(Theme.Font.small)
+                    .foregroundStyle(selected ? Theme.Color.text : Theme.Color.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 180, alignment: .leading)
+            }
             Button { state.closeTab(file) } label: {
                 Image(systemName: "xmark").font(.system(size: 8, weight: .semibold))
                     .foregroundStyle(Theme.Color.textTertiary)
@@ -55,7 +63,7 @@ private struct WorkingFileTab: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.press)
-            .opacity(hovering ? 1 : 0)
+            .opacity(hovering && !renaming ? 1 : 0)
             .help("Close Tab")
         }
         .padding(.horizontal, Theme.Space.m)
@@ -67,7 +75,7 @@ private struct WorkingFileTab: View {
         }
         .contentShape(Rectangle())
         .pressFeedback(shade: nil)
-        .onTapGesture { state.reveal(file) }
+        .onTapGesture { if !renaming { state.reveal(file) } }
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
         .help(file.relativePath)
@@ -80,6 +88,8 @@ private struct WorkingFileTab: View {
             if let empty = state.visiblePanes.first(where: { $0.file == nil }) {
                 Button("Open in Empty Pane") { state.open(file, inPane: empty.id) }
             }
+            Divider()
+            Button("Rename…") { renaming = true }
             Button("Copy File") { state.copyFiles([file]) }
             Button("Copy Path") { state.copyPath(file) }
             Button("Reveal in Finder") { state.revealInFinder(file) }

@@ -394,6 +394,14 @@ private final class BookmarksCoordinator: NSObject, NSOutlineViewDataSource, NSO
         case .search, .group, nil:
             break
         }
+        // The file or folder itself; the vault's own folder ("/") keeps its name.
+        if let path = node.bookmark.path, !path.isEmpty {
+            switch node.bookmark.kind {
+            case .file: add("Rename File…", #selector(renameItem(_:)))
+            case .folder: add("Rename Folder…", #selector(renameItem(_:)))
+            case .search, .group, nil: break
+            }
+        }
         add(node.isGroup ? "Rename…" : "Edit Title…", #selector(rename(_:)))
         add(node.isGroup ? "Remove Group" : "Remove Bookmark", #selector(remove(_:)))
     }
@@ -442,6 +450,18 @@ private final class BookmarksCoordinator: NSObject, NSOutlineViewDataSource, NSO
     @objc private func rename(_ sender: NSMenuItem) {
         guard let n = node(sender) else { return }
         beginRename(n)
+    }
+
+    /// The file or folder itself, not the bookmark's title: its name in place of the row's.
+    @objc private func renameItem(_ sender: NSMenuItem) {
+        guard let n = node(sender), let path = n.bookmark.path else { return }
+        let row = outline.row(forItem: n)
+        guard row >= 0 else { return }
+        let name = (path as NSString).lastPathComponent
+        outline.beginEditing(row: row, text: name, selecting: RenameField.stem(of: name, isFolder: n.bookmark.kind == .folder)) { [weak self] new in
+            guard let self, new != name else { return }
+            self.state.rename(path, to: new)
+        }
     }
 
     @objc private func remove(_ sender: NSMenuItem) {

@@ -196,18 +196,33 @@ struct TopBar: View {
 }
 
 /// File name and anchor, centred, like a window title that only shows the user's own data.
+/// ↩ (when nothing else takes it) or right-click ▸ Rename… edits the name here.
 struct CurrentFileTitle: View {
     @EnvironmentObject var state: AppState
 
     var body: some View {
         if let f = state.selected {
+            let renaming = state.renamingTitle == f
             HStack(spacing: Theme.Space.s) {
-                Text(f.name)
-                    .font(Theme.Font.body)
-                    .foregroundStyle(Theme.Color.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if let a = state.anchor {
+                if renaming {
+                    RenameField(name: f.name, alignment: .center, maxWidth: 420) { new in
+                        state.rename(f.relativePath, to: new)
+                    } end: {
+                        if state.renamingTitle == f { state.renamingTitle = nil }
+                    }
+                } else {
+                    Text(f.name)
+                        .font(Theme.Font.body)
+                        .foregroundStyle(Theme.Color.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .contextMenu {
+                            Button("Rename…") { state.renameInTitle() }
+                            Button("Reveal in Finder") { state.revealInFinder(f) }
+                            Button("Copy Path") { state.copyPath(f) }
+                        }
+                }
+                if let a = state.anchor, !renaming {
                     Text(a.displayLabel)
                         .font(Theme.Font.mono)
                         .foregroundStyle(Theme.Color.textTertiary)
@@ -216,6 +231,8 @@ struct CurrentFileTitle: View {
                 }
             }
             .animation(Theme.Motion.fast, value: state.anchor)
+            // Another file came up some other way than a click (which would have kept the name).
+            .onChange(of: f) { state.renamingTitle = nil }
         } else if state.vault != nil, state.mode == .files, state.shownResults == nil {
             BrowsedFolderTitle(browser: state.browser)
         }

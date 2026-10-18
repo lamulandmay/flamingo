@@ -140,6 +140,8 @@ final class AppState: ObservableObject {
     @Published private(set) var collapseRequest: (tab: SidebarTab, id: UUID)?
     /// A row the file explorer or the bookmarks should start renaming in place.
     @Published private(set) var renameRequest: RenameRequest?
+    /// The current file, while its name in the title is being edited (`renameInTitle`).
+    @Published var renamingTitle: FileRef?
     /// The search tab's query and results; kept here so they survive switching tabs.
     let sidebarSearch = SidebarSearchModel()
     /// The search results list in the content area (SearchResults.swift).
@@ -1075,6 +1077,15 @@ final class AppState: ObservableObject {
         return true
     }
 
+    /// Puts the current file's name in the title up for editing, as ↩ renames in Finder: ↩
+    /// that nothing on screen took (`MainWindow`), or File ▸ Rename….
+    @discardableResult
+    func renameInTitle() -> Bool {
+        guard let file = selected, vault != nil else { return false }
+        renamingTitle = file
+        return true
+    }
+
     /// Renames a file or folder in place (same folder, new name).
     @discardableResult
     func rename(_ path: String, to newName: String) -> Bool {
@@ -1156,6 +1167,7 @@ final class AppState: ObservableObject {
         do { try PathAliases(vault: v).reconcile(oldPath: old, newPath: new) } catch { report(error) }
         for pane in allPanes where pane.id != activePaneID { pane.relocate(old, to: new) }
         history.relocate(old, to: new)
+        searchResults.relocate(old, to: new)
         func relocatedPath(_ path: String) -> String { FileTree.contains(old, path) ? new + path.dropFirst(old.count) : path }
         openFiles = openFiles.map { FileRef(relativePath: relocatedPath($0.relativePath)) }
         savedAnchors = Dictionary(savedAnchors.map { (relocatedPath($0.key), $0.value) }, uniquingKeysWith: { _, new in new })

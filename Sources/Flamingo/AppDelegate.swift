@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         QAHook.install()
         MainWindow.isGraphMode = { [weak self] in self?.state.mode == .graph }
+        MainWindow.unclaimedReturn = { [weak self] in self?.state.renameInTitle() ?? false }
         let w = MainWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                          backing: .buffered, defer: false)
@@ -162,6 +163,8 @@ enum AppIcon {
 /// keyboard after one arrow press. Outside Graph mode the canvas gets focus only by a click.
 final class MainWindow: NSWindow {
     static var isGraphMode: () -> Bool = { false }
+    /// ↩ that nothing on screen took: true when it started a rename (`AppState.renameInTitle`).
+    static var unclaimedReturn: () -> Bool = { false }
     /// Set around a `setFrame(animate: true)` that should take this long (the briefing's zoom).
     static var animationDuration: TimeInterval?
 
@@ -175,6 +178,19 @@ final class MainWindow: NSWindow {
             return false
         }
         return super.makeFirstResponder(responder)
+    }
+
+    // ↩ reaches the window only when no text, list or preview used it: a key a view passed
+    // on, or the command a view's key bindings made of it. Either renames the current file.
+    override func keyDown(with event: NSEvent) {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .shift, .control])
+        if [36, 76].contains(event.keyCode), modifiers.isEmpty, attachedSheet == nil, Self.unclaimedReturn() { return }
+        super.keyDown(with: event)
+    }
+
+    override func insertNewline(_ sender: Any?) {
+        guard let event = NSApp.currentEvent, event.type == .keyDown, [36, 76].contains(event.keyCode),
+              attachedSheet == nil, Self.unclaimedReturn() else { NSSound.beep(); return }
     }
 
     private static func isClick(in view: NSView) -> Bool {

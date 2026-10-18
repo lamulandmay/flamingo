@@ -139,6 +139,7 @@ private struct ConnectionRow: View {
     let from: FileRef
     let suggested: Bool
     @State private var hovering = false
+    @State private var renaming = false
 
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Space.s) {
@@ -147,11 +148,17 @@ private struct ConnectionRow: View {
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: Theme.Space.s) {
-                    Text(connection.file.name)
-                        .font(Theme.Font.body)
-                        .foregroundStyle(suggested ? Theme.Color.textSecondary : Theme.Color.text)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    if renaming {
+                        RenameField(name: connection.file.name) { new in
+                            state.rename(connection.file.relativePath, to: new)
+                        } end: { renaming = false }
+                    } else {
+                        Text(connection.file.name)
+                            .font(Theme.Font.body)
+                            .foregroundStyle(suggested ? Theme.Color.textSecondary : Theme.Color.text)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                     Spacer(minLength: 0)
                     if !hovering, let anchor = connection.anchor {
                         Text(anchor.displayLabel)
@@ -195,7 +202,7 @@ private struct ConnectionRow: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
-        .onTapGesture { state.jump(to: connection.file, anchor: connection.anchor) }
+        .onTapGesture { if !renaming { state.jump(to: connection.file, anchor: connection.anchor) } }
         .onDrag {
             guard let url = state.url(for: connection.file) else { return NSItemProvider() }
             return FileHandoff.itemProvider(url: url, relativePath: connection.file.relativePath)
@@ -243,6 +250,7 @@ private struct ConnectionRow: View {
             Button("Remove Connection") { state.disconnect(from, connection.file) }
         }
         Divider()
+        Button("Rename…") { renaming = true }
         Button("Copy File") { state.copyFiles([connection.file]) }
         Button("Reveal in Finder") { state.revealInFinder(connection.file) }
     }

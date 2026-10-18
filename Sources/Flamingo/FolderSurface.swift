@@ -56,6 +56,8 @@ private struct IconSurface: View {
     /// When the listing last arrived: tiles drawn within moments of it rise in one after
     /// another; tiles scrolled to later are simply there.
     @State private var loadedAt = Date.distantPast
+    /// Bumped to list the folder again: a rename outside the vault changes no tree revision.
+    @State private var listing = 0
     @FocusState private var filterFocused: Bool
     private var directory: URL? { browser.folder ?? browser.root }
     /// The folder's vault-relative path, nil outside the vault.
@@ -93,11 +95,11 @@ private struct IconSurface: View {
                 EmptyState("Empty folder")
             } else {
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 118, maximum: 150), spacing: Theme.Space.m)],
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 118, maximum: 150), spacing: Theme.Space.m, alignment: .top)],
                               alignment: .leading, spacing: Theme.Space.l) {
                         let arriving = Date().timeIntervalSince(loadedAt) < 0.5
                         ForEach(Array(visible.enumerated()), id: \.element.id) { i, item in
-                            FolderTile(item: item, arrival: arriving && i < 24 ? i : nil)
+                            FolderTile(item: item, arrival: arriving && i < 24 ? i : nil) { listing += 1 }
                         }
                     }
                     .animation(Theme.Motion.normal, value: filter)
@@ -120,7 +122,7 @@ private struct IconSurface: View {
                 Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([directory]) }
             }
         }
-        .task(id: (directory?.path ?? "") + "@" + String(state.treeRevision)) { await load() }
+        .task(id: (directory?.path ?? "") + "@" + String(state.treeRevision) + "#" + String(listing)) { await load() }
         .onChange(of: directory) { filter = "" }
     }
 
@@ -150,18 +152,23 @@ private struct IconSurface: View {
 }
 
 /// One item: a thumbnail (or the family glyph while it renders), the name under it.
+/// Right-click ▸ Rename… edits the name in place, as in Finder's icon view.
 private struct FolderTile: View {
     @EnvironmentObject var state: AppState
     let item: IconSurface.Item
     @State private var thumbnail: NSImage?
     @State private var hovering = false
+    @State private var renaming = false
     /// Its place in the run of tiles rising in as the folder opens; nil when it's simply there.
     private let arrival: Int?
     @State private var shown: Bool
+    /// After a rename, so the folder is listed again.
+    private let renamed: () -> Void
 
-    init(item: IconSurface.Item, arrival: Int? = nil) {
+    init(item: IconSurface.Item, arrival: Int? = nil, renamed: @escaping () -> Void = {}) {
         self.item = item
         self.arrival = arrival
+        self.renamed = renamed
         _shown = State(initialValue: arrival == nil)
     }
 
@@ -184,13 +191,20 @@ private struct FolderTile: View {
                 }
             }
             .frame(width: 96, height: 76)
-            Text(item.name)
-                .font(Theme.Font.small)
-                .foregroundStyle(Theme.Color.text)
-                .multilineTextAlignment(.center)
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .frame(maxWidth: .infinity)
+            if renaming {
+                RenameField(name: item.url.lastPathComponent, isFolder: item.folder, font: Theme.NS.small,
+                            alignment: .center, maxWidth: 110, lines: 3) { new in
+                    if state.renameItem(at: item.url, to: new) != nil { renamed() }
+                } end: { renaming = false }
+            } else {
+                Text(item.name)
+                    .font(Theme.Font.small)
+                    .foregroundStyle(Theme.Color.text)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity)
+            }
         }
         .padding(Theme.Space.s)
         .background(Squircle(radius: Theme.Radius.m)
@@ -200,13 +214,17 @@ private struct FolderTile: View {
         .animation(Theme.Motion.fast, value: hovering)
         .animation(Theme.Motion.normal, value: thumbnail != nil)
         .pressFeedback(shade: Theme.Radius.m)
-        .onTapGesture { open() }
+        .onTapGesture { if !renaming { open() } }
         .help(item.path ?? item.url.path)
         .onDrag { FileHandoff.itemProvider(url: item.url, relativePath: item.path) }
         .contextMenu {
             if !item.folder {
                 if let ref { Button("Open Beside") { state.openBeside(ref) } }
                 Button("Open in Default App") { NSWorkspace.shared.open(item.url) }
+            }
+            if state.canRename(item.url) {
+                if !item.folder { Divider() }
+                Button("Rename…") { renaming = true }
             }
             Button(item.folder ? "Copy Folder" : "Copy File") { FileHandoff.copy(urls: [item.url]) }
             Button("Copy Path") {

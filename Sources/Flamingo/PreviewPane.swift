@@ -53,6 +53,8 @@ private struct DocumentPaneColumn: View {
     let count: Int
     var width: CGFloat = 1000
     @State private var hovering = false
+    /// The header's name is being edited (right-click ▸ Rename…).
+    @State private var renaming = false
 
     private var active: Bool { state.activePaneID == pane.id }
     private var tiled: Bool { count > 1 }
@@ -87,30 +89,52 @@ private struct DocumentPaneColumn: View {
 
     private var header: some View {
         HStack(spacing: Theme.Space.s) {
-            Button { state.activatePane(pane.id); pane.focusWhenReady() } label: {
+            if renaming, let file = pane.file {
                 HStack(spacing: Theme.Space.s) {
-                    if let file = pane.file { FileGlyph(ext: file.ext, selected: active) }
-                    Text(pane.file?.name ?? "")
-                        .font(Theme.Font.bodyMedium)
-                        .foregroundStyle(active ? Theme.Color.text : Theme.Color.textSecondary)
-                        .lineLimit(1).truncationMode(.middle)
+                    FileGlyph(ext: file.ext, selected: active)
+                    RenameField(name: file.name, font: Theme.NS.bodyMedium) { new in
+                        state.rename(file.relativePath, to: new)
+                    } end: { renaming = false }
                     Spacer(minLength: 0)
-                    if !narrow, let anchor = pane.anchor {
-                        Text(anchor.label).font(Theme.Font.monoSmall)
-                            .foregroundStyle(Theme.Color.textTertiary).lineLimit(1)
-                    }
-                }.contentShape(Rectangle())
-            }.buttonStyle(.press)
-                .help(pane.file?.relativePath ?? "")
+                }
+            } else {
+                name
+            }
             if narrow { TileHandle(paneID: pane.id, paneHovering: hovering) }
             IconButton("xmark", help: "Close Pane") { state.closePane(pane.id) }
         }
-        .overlay(alignment: .center) { if !narrow { TileHandle(paneID: pane.id, paneHovering: hovering) } }
+        .overlay(alignment: .center) { if !narrow, !renaming { TileHandle(paneID: pane.id, paneHovering: hovering) } }
         .padding(.horizontal, Theme.Space.m)
         .frame(height: 36)
         .background(active ? Theme.Color.bgRaised : Theme.Color.bg)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Pane \(slot + 1) of \(count)" + (active ? ", active" : "") + (pane.file.map { ": " + $0.name } ?? ""))
+        .onChange(of: pane.file) { renaming = false }
+    }
+
+    private var name: some View {
+        Button { state.activatePane(pane.id); pane.focusWhenReady() } label: {
+            HStack(spacing: Theme.Space.s) {
+                if let file = pane.file { FileGlyph(ext: file.ext, selected: active) }
+                Text(pane.file?.name ?? "")
+                    .font(Theme.Font.bodyMedium)
+                    .foregroundStyle(active ? Theme.Color.text : Theme.Color.textSecondary)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
+                if !narrow, let anchor = pane.anchor {
+                    Text(anchor.label).font(Theme.Font.monoSmall)
+                        .foregroundStyle(Theme.Color.textTertiary).lineLimit(1)
+                }
+            }.contentShape(Rectangle())
+        }.buttonStyle(.press)
+            .help(pane.file?.relativePath ?? "")
+            .contextMenu {
+                if let file = pane.file {
+                    Button("Rename…") { renaming = true }
+                    Button("Reveal in Finder") { state.revealInFinder(file) }
+                    Button("Copy Path") { state.copyPath(file) }
+                }
+            }
     }
 }
 

@@ -213,6 +213,24 @@ final class SearchResultsTests: XCTestCase {
         }
     }
 
+    func testARenamedRowKeepsItsPlaceAndSelection() throws {
+        try withVault(["school/homework.pdf", "work/homework.docx"]) { state in
+            state.showSearchResults("homework", seed: [result("school/homework.pdf"), result("work/homework.docx")])
+            let place = try XCTUnwrap(state.shownResults)
+            state.searchResults.select("file:school/homework.pdf")
+
+            XCTAssertTrue(state.rename("school/homework.pdf", to: "essay.pdf"))
+            XCTAssertEqual(state.searchResults.rows.map(\.result.file.relativePath), ["school/essay.pdf", "work/homework.docx"])
+            XCTAssertEqual(state.searchResults.selection, "file:school/essay.pdf")
+
+            XCTAssertTrue(state.rename("school", to: "college"), "A folder above a row")
+            XCTAssertEqual(state.searchResults.rows.first?.result.file.relativePath, "college/essay.pdf")
+            XCTAssertEqual(state.searchResults.selection, "file:college/essay.pdf")
+            XCTAssertEqual(place.seed(for: "homework").map(\.file.relativePath), ["college/essay.pdf", "work/homework.docx"],
+                           "Coming back to the list shows the new names")
+        }
+    }
+
     func testSidebarReturnShowsTheListOrTheOnlyFile() throws {
         try withVault(["a/homework.pdf"]) { state in
             state.sidebarSearch.query = ""

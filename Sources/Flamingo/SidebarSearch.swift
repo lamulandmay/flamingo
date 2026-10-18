@@ -166,6 +166,8 @@ struct SidebarSearchPane: View {
     @EnvironmentObject var state: AppState
     @ObservedObject var model: SidebarSearchModel
     @FocusState private var focused: Bool
+    /// The result whose name is being edited (right-click ▸ Rename…).
+    @State private var renaming: FileRef?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -219,7 +221,8 @@ struct SidebarSearchPane: View {
                     ForEach(model.groups) { group in
                         ResultFile(group: group, open: model.isOpen(group.file),
                                    toggle: { withAnimation(Theme.Motion.fast) { model.toggle(group.file) } },
-                                   select: { state.openSearchResult(group.result, query: model.query) })
+                                   select: { state.openSearchResult(group.result, query: model.query) },
+                                   renaming: renaming == group.file, endRename: { if renaming == group.file { renaming = nil } })
                             .onDrag {
                                 guard let vault = state.vault else { return NSItemProvider() }
                                 return FileHandoff.itemProvider(url: vault.url(for: group.file), relativePath: group.file.relativePath)
@@ -227,6 +230,8 @@ struct SidebarSearchPane: View {
                             .contextMenu {
                                 Button("Preview") { PaletteController.shared.showResult(group.result, query: model.query, state: state) }
                                 Button("Open in Default App") { state.openSearchResult(group.result, externally: true) }
+                                Divider()
+                                Button("Rename…") { renaming = group.file }
                                 Button("Copy File") { _ = state.copyFiles([group.file]) }
                             }
                         if model.isOpen(group.file) {
@@ -361,6 +366,8 @@ private struct ResultFile: View {
     let open: Bool
     let toggle: () -> Void
     let select: () -> Void
+    var renaming = false
+    var endRename: () -> Void = {}
     @State private var hovering = false
 
     var body: some View {
@@ -378,11 +385,16 @@ private struct ResultFile: View {
                 Image(systemName: "text.bubble.fill").font(.system(size: 9)).foregroundStyle(Theme.Color.textTertiary)
                     .help("Matching thoughts attached")
             }
-            Text(group.file.name)
-                .font(Theme.Font.bodyMedium)
-                .foregroundStyle(Theme.Color.text)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            if renaming {
+                RenameField(name: group.file.name, isFolder: group.isDirectory, font: Theme.NS.bodyMedium,
+                            commit: { state.rename(group.file.relativePath, to: $0) }, end: endRename)
+            } else {
+                Text(group.file.name)
+                    .font(Theme.Font.bodyMedium)
+                    .foregroundStyle(Theme.Color.text)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
             Spacer(minLength: Theme.Space.xs)
             Text(group.isDirectory || group.hits.isEmpty ? "" : String(group.hits.count))
                 .font(Theme.Font.small)
@@ -395,7 +407,7 @@ private struct ResultFile: View {
             .fill(selected ? Theme.Color.selection : Theme.Color.hover)
             .opacity(selected || hovering ? 1 : 0))
         .contentShape(Rectangle())
-        .onTapGesture(perform: select)
+        .onTapGesture { if !renaming { select() } }
         .onHover { hovering = $0 }
         .help(group.file.relativePath)
     }

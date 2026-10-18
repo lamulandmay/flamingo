@@ -433,6 +433,23 @@ final class SearchResultsModel: ObservableObject {
         state.openSearchResult(row.result, query: query, externally: externally)
     }
 
+    /// `old` was renamed or moved to `new`: rows at or under it keep their place, renamed.
+    func relocate(_ old: String, to new: String) {
+        func moved(_ result: UnifiedSearchResult) -> UnifiedSearchResult {
+            guard FileTree.contains(old, result.file.relativePath) else { return result }
+            var result = result
+            result.file = FileRef(relativePath: new + result.file.relativePath.dropFirst(old.count))
+            return result
+        }
+        guard let place, ranked.contains(where: { FileTree.contains(old, $0.result.file.relativePath) }) else { return }
+        let selected = place.selection.flatMap { id in ranked.first { $0.id == id } }
+        ranked = ranked.map { ResultRow(result: moved($0.result), rank: $0.rank, meta: $0.meta) }
+        place.results = place.results?.map(moved)
+        place.seed = place.seed.map(moved)
+        if let selected { place.selection = moved(selected.result).id }
+        arrange(reveal: false)
+    }
+
     /// The disk changed: read every row's metadata again; vanished items drop out.
     func refreshMeta() {
         guard !ranked.isEmpty else { return }

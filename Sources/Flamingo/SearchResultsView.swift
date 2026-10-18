@@ -448,6 +448,26 @@ final class SearchResultsView: NSView, NSTableViewDataSource, NSTableViewDelegat
         return true
     }
 
+    /// A field over the row's name, the name without its extension selected, as in Finder.
+    private func beginRename(_ item: ResultRow) {
+        guard let row = rows.firstIndex(where: { $0.id == item.id }), let url = url(ofRow: row),
+              let column = table.tableColumns.firstIndex(where: { Self.column(of: $0.identifier) == .name }) else { return }
+        table.selectRowIndexes([row], byExtendingSelection: false)
+        table.scrollRowToVisible(row)
+        window?.makeFirstResponder(table)
+        guard let cell = table.view(atColumn: column, row: row, makeIfNecessary: true) as? ResultsCellView else { return }
+        let rowRect = table.rect(ofRow: row), cellRect = cell.convert(cell.bounds, to: table)
+        // The field insets its text as the label does: at the label's x, the name stays put.
+        let x = cell.convert(cell.labelFrame, to: table).minX
+        // The field draws its text at its top; this puts it on the label's line.
+        let frame = NSRect(x: x, y: rowRect.minY + 4.5, width: max(60, cellRect.maxX - Theme.Space.s - x), height: rowRect.height - 9)
+        let name = url.lastPathComponent, path = item.result.file.relativePath
+        table.renamer.begin(frame: frame, text: name, selecting: RenameField.stem(of: name, isFolder: item.result.isDirectory)) { [weak self] new in
+            guard let self, new != name else { return }
+            self.state.rename(path, to: new)
+        }
+    }
+
     private func url(ofRow row: Int) -> URL? {
         guard rows.indices.contains(row), let vault = state.vault else { return nil }
         return vault.url(for: rows[row].result.file)
@@ -551,7 +571,7 @@ final class SearchResultsView: NSView, NSTableViewDataSource, NSTableViewDelegat
         let item = rows[row]
         FileMenu.build(menu, url: url, isFolder: item.result.isDirectory, state: state, host: FileMenu.Host(
             open: { [weak self] in self?.model.open(item, externally: false) },
-            rename: nil,
+            rename: state.canRename(url) ? { [weak self] in self?.beginRename(item) } : nil,
             quickLook: { [weak self] in
                 guard let self, let index = self.rows.firstIndex(where: { $0.id == item.id }) else { return }
                 self.table.selectRowIndexes([index], byExtendingSelection: false)
@@ -592,6 +612,7 @@ final class SearchResultsView: NSView, NSTableViewDataSource, NSTableViewDelegat
 /// Finder's keys on top of the table's own (↑ ↓, type-select).
 final class ResultsTableView: NSTableView {
     weak var host: SearchResultsView?
+    lazy var renamer = RowRenamer(table: self)
 
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection([.command, .option, .shift, .control])
@@ -741,6 +762,7 @@ final class ResultsCellView: NSTableCellView {
     private var showsIcon = false
 
     var iconFrame: NSRect { icon.frame }
+    var labelFrame: NSRect { label.frame }
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)

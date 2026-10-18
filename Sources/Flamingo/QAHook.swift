@@ -20,6 +20,7 @@ import FlamingoCore
 ///     postnote com.flamingo.qa "window 1000 600"       content size in points; "window full" fills the screen
 ///     postnote com.flamingo.qa "launch 2 #0"            the launcher in slot 2 opens its pick 0; "launch 2 q3" types q3 into it
 ///     postnote com.flamingo.qa "results sort size"      the search results list: a header click; also status, menu, kind, query, field
+///     postnote com.flamingo.qa "rclick 300 20 Rename…"  right-click at a point (as click), then pick that menu item
 @MainActor
 enum QAHook {
     /// `FLAMINGO_QA_CHANNEL` picks another name, so concurrent test builds don't hear each other.
@@ -160,6 +161,55 @@ enum QAHook {
             default:
                 post(.mouseMoved); post(.leftMouseDown)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { post(.leftMouseUp) }
+            }
+            return
+        }
+        // `rclick 120 80 Rename…`: a right-click there, then that item of the menu it opens
+        // (none: the menu just closes). Logs the menu's items.
+        if parts[0] == "rclick" {
+            let args = parts[1].split(separator: " ", maxSplits: 2).map(String.init)
+            guard args.count >= 2, let x = Double(args[0]), let y = Double(args[1]),
+                  let window = (NSApp.delegate as? AppDelegate)?.window, let content = window.contentView else { return }
+            let title = args.count > 2 ? args[2] : nil
+            // The menu on screen is drawn by another process and tracks a stand-in, so the real
+            // menu is the one the click fills. A timer in the common modes fires while it shows.
+            nonisolated(unsafe) var opened: [NSMenu] = [], showing: [NSMenu] = []
+            let filled = NotificationCenter.default.addObserver(forName: NSMenu.didAddItemNotification, object: nil, queue: nil) { note in
+                if let menu = note.object as? NSMenu, !opened.contains(menu) { opened.append(menu) }
+            }
+            let tracking = NotificationCenter.default.addObserver(forName: NSMenu.didBeginTrackingNotification, object: nil, queue: nil) { note in
+                if let menu = note.object as? NSMenu { showing.append(menu) }
+            }
+            let timer = Timer(timeInterval: 0.4, repeats: false) { _ in
+                MainActor.assumeIsolated {
+                    NotificationCenter.default.removeObserver(filled)
+                    NotificationCenter.default.removeObserver(tracking)
+                    func describe(_ item: NSMenuItem) -> String {
+                        item.isSeparatorItem ? "—" : item.title + (item.submenu.map { " [" + $0.items.map(describe).joined(separator: " | ") + "]" } ?? "")
+                    }
+                    func find(_ menu: NSMenu) -> (NSMenu, Int)? {
+                        for (i, item) in menu.items.enumerated() {
+                            if item.title == title { return (menu, i) }
+                            if let sub = item.submenu, let hit = find(sub) { return hit }
+                        }
+                        return nil
+                    }
+                    opened.removeAll { $0.supermenu != nil || $0.items.allSatisfy(\.isSeparatorItem) }
+                    for menu in opened { Log.debug("qa: menu " + menu.items.map(describe).joined(separator: " | ")) }
+                    let hit = title == nil ? nil : opened.lazy.compactMap(find).first
+                    for menu in showing.reversed() + opened { menu.cancelTracking() }
+                    if let (menu, index) = hit { menu.performActionForItem(at: index) }
+                    else if let title { Log.debug("qa: no menu item \(title)") }
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            let point = content.convert(NSPoint(x: x, y: y), to: nil)
+            for type in [NSEvent.EventType.rightMouseDown, .rightMouseUp] {
+                guard let e = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                 context: nil, eventNumber: 0, clickCount: 1, pressure: type == .rightMouseDown ? 1 : 0)
+                else { continue }
+                NSApp.postEvent(e, atStart: false)
             }
             return
         }

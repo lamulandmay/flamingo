@@ -54,6 +54,7 @@ enum MainMenu {
         reveal.keyEquivalentModifierMask = [.command, .shift]
         fileMenu.addItem(withTitle: "Copy Path", action: #selector(AppDelegate.copyPath(_:)), keyEquivalent: "")
         fileMenu.addItem(withTitle: "Copy File", action: #selector(AppDelegate.copyFile(_:)), keyEquivalent: "")
+        fileMenu.addItem(withTitle: "Rename…", action: #selector(AppDelegate.renameFile(_:)), keyEquivalent: "")
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Reindex Vault", action: #selector(AppDelegate.reindex(_:)), keyEquivalent: "")
         fileMenu.addItem(.separator())
@@ -247,6 +248,8 @@ extension AppDelegate: NSMenuItemValidation {
     @objc func revealInFinder(_ sender: Any?) { state.revealInFinder() }
     @objc func copyPath(_ sender: Any?) { state.copyPath() }
     @objc func copyFile(_ sender: Any?) { state.copyFiles() }
+    /// The current file's name, in the title. ↩ does the same wherever nothing else takes it.
+    @objc func renameFile(_ sender: Any?) { state.renameInTitle() }
     @objc func toggleGlobalSearch(_ sender: Any?) {
         if globalSearchShortcut?.toggle() == false {
             state.showToast(ToastMessage(text: "Control-Option-F is already used by macOS or another app."))
@@ -339,7 +342,7 @@ extension AppDelegate: NSMenuItemValidation {
         case #selector(setTileLayout(_:)):
             item.state = TileLayout.allCases[item.tag] == state.tiling.arrangement.kind ? .on : .off
             return hasVault
-        case #selector(openCurrentBeside(_:)):
+        case #selector(openCurrentBeside(_:)), #selector(renameFile(_:)):
             return hasFile
         case #selector(toggleGlobalCapture(_:)):
             item.state = state.captureGlobal ? .on : .off
