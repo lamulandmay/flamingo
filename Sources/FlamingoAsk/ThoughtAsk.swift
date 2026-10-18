@@ -51,6 +51,7 @@ extension AskEngine {
         let sources = Dictionary(uniqueKeysWithValues: passages.map { ($0.id, $0.citation) })
 
         let text: String
+        var truncated = false
         if endpoint.kind == .scripted {
             let request = LocalCompletionRequest(system: Prompt.localSystem, user: question, purpose: .interactive, label: "ask")
             let done = try await runtime.complete(request, at: endpoint) { _ in }
@@ -58,11 +59,14 @@ extension AskEngine {
             yield(.text(text))
         } else {
             let body = Prompt.localBody(endpoint.chat, question: question, passages: passages, today: Date(), history: history, context: context)
-            text = try await ChatClient(session: runtime.session, timeout: chat.timeout).send(body, to: endpoint.chat) { yield(.text($0)) }
+            let reply = try await ChatClient(session: runtime.session, timeout: chat.timeout).stream(body, to: endpoint.chat) { yield(.text($0)) }
+            text = reply.text
+            truncated = reply.truncated
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AskError.stream("No answer") }
         var answer = CitationParser.answer(text: text, sources: sources)
         answer.model = endpoint.displayName
+        answer.truncated = truncated
         yield(.answer(answer))
     }
 }

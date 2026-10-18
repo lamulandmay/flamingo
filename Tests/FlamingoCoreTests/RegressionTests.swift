@@ -307,4 +307,35 @@ final class RegressionTests: XCTestCase {
         XCTAssertEqual(FileIdentity.carriers(in: tv.vault)[id], [a, b])
         XCTAssertEqual(FileIdentity.ids(in: tv.vault)[id], a)
     }
+
+    // Audit 2026-10-18: identity lookup without reading every note; bounded lock wait.
+
+    func testAdoptionSeesANoteWrittenByAnotherStoreAfterTheLookupWasCached() throws {
+        let x = try tv.file("x.txt")
+        _ = try FileIdentity.id(for: tv.vault.url(for: x))   // carried id: the first thought looks up claimants
+        try store.append(Comment(timestamp: ts("2026-10-14 22:04"), text: "on x"), to: x)
+        let a = try tv.file("a.txt")
+        try SidecarStore(vault: tv.vault).append(Comment(timestamp: ts("2026-10-14 22:05"), text: "before rename"), to: a)
+        try tv.rename("a.txt", to: "b.txt")
+        let b = FileRef(relativePath: "b.txt")
+        try store.append(Comment(timestamp: ts("2026-10-14 22:06"), text: "after rename"), to: b)
+        XCTAssertEqual(try store.comments(for: b).map(\.text), ["before rename", "after rename"])
+        XCTAssertFalse(store.hasSidecar(for: a))
+    }
+
+    func testProcessLockGivesUpInsteadOfWaitingForever() throws {
+        try FileManager.default.createDirectory(at: tv.vault.stateDir, withIntermediateDirectories: true)
+        let path = tv.vault.stateDir.appendingPathComponent(".notes.lock").path
+        // Held through a second open file description, as another process would hold it.
+        let holder = open(path, O_RDONLY | O_CREAT | O_CLOEXEC, 0o644)
+        XCTAssertGreaterThanOrEqual(holder, 0)
+        defer { close(holder) }
+        XCTAssertEqual(flock(holder, LOCK_EX), 0)
+        let lock = ProcessLock(path: path, timeout: 0.2)
+        let start = Date()
+        XCTAssertThrowsError(try lock.withLock { }) { XCTAssertEqual($0 as? SidecarError, .busy(path: path)) }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 3)
+        flock(holder, LOCK_UN)
+        XCTAssertNoThrow(try lock.withLock { })
+    }
 }

@@ -42,6 +42,10 @@
 	<string>Flamingo asks the frontmost app which document is open so your thought is attached to it.</string>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>Flamingo listens for its capture shortcut while you work in other apps.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Flamingo shows your calendar events next to your deadlines. They stay on this Mac.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Flamingo shows reminders with due dates as deadlines. They stay on this Mac.</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

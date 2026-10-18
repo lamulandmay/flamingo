@@ -22,4 +22,4 @@ fixtures:
 	scripts/make-fixtures.sh
 
 clean:
-	rm -rf .build build
+	rm -rf .build build fixtures/vault/.flamingo/index.sqlite*

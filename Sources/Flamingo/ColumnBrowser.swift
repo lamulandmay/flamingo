@@ -1481,8 +1481,7 @@ private final class ColumnCellView: NSTableCellView {
         if !dot.isHidden {
             dot.frame = NSRect(x: right - 6, y: ((h - 6) / 2).rounded(), width: 6, height: 6)
             dot.layer?.backgroundColor = Theme.NS.textSecondary.cgColor
-            dot.layer?.cornerRadius = 3
-            dot.layer?.cornerCurve = .continuous
+            dot.layer?.applySquircle(radius: 3)
             right -= 6 + Theme.Space.xs
         }
         if !badge.isHidden {

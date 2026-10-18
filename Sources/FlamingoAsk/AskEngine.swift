@@ -24,7 +24,11 @@ public struct Answer: Sendable, Equatable, Codable {
     /// What each `[n]` in `text` points at, for the numbers that resolve to a passage.
     public var sources: [Int: Citation] = [:]
     public var model: String?
+    /// The model hit its length limit: `text` stands but stops mid-answer. Not stored.
+    public var truncated = false
     public init(text: String, citations: [Citation]) { self.text = text; self.citations = citations }
+
+    enum CodingKeys: String, CodingKey { case text, citations, sources, model }
 
     /// Whether any citation is one of the person's thoughts. Mark the conversation turn with it.
     public var drewOnThoughts: Bool { citations.contains { $0.commentID != nil } }
@@ -249,10 +253,11 @@ public final class AskEngine: @unchecked Sendable {
         let sources = Dictionary(uniqueKeysWithValues: passages.map { ($0.id, $0.citation) })
         let body = Prompt.localBody(endpoint, question: question, passages: passages, today: Date(), history: history, context: context)
         let modelName = endpoint.kind == .llama ? LlamaServer.shared.displayName : endpoint.model
-        let text = try await chat.send(body, to: endpoint) { yield(.text($0)) }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AskError.stream("No answer") }
-        var answer = CitationParser.answer(text: text, sources: sources)
+        let reply = try await chat.stream(body, to: endpoint) { yield(.text($0)) }
+        guard !reply.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AskError.stream("No answer") }
+        var answer = CitationParser.answer(text: reply.text, sources: sources)
         answer.model = modelName
+        answer.truncated = reply.truncated
         yield(.answer(answer))
     }
 
@@ -263,10 +268,11 @@ public final class AskEngine: @unchecked Sendable {
         yield(.passages(passages))
         let sources = Dictionary(uniqueKeysWithValues: passages.map { ($0.id, $0.citation) })
         let user = Prompt.userText(question, passages: passages, today: Date(), history: history, context: context)
-        let text = try await claudeCode.send(system: Prompt.localSystem, user: user) { yield(.text($0)) }
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AskError.stream("No answer") }
-        var answer = CitationParser.answer(text: text, sources: sources)
-        answer.model = "claude-" + claudeCode.model
+        // The model chosen in Settings; the label is the one Claude Code reports it ran.
+        let reply = try await claudeCode.send(system: Prompt.localSystem, user: user, model: model) { yield(.text($0)) }
+        guard !reply.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AskError.stream("No answer") }
+        var answer = CitationParser.answer(text: reply.text, sources: sources)
+        answer.model = reply.model
         yield(.answer(answer))
     }
 

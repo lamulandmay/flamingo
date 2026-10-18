@@ -15,11 +15,17 @@ public struct Titler: Sendable {
 
     public init() {}
 
+    /// The model answered, but with nothing usable (an empty title, or the file's own name):
+    /// the file is marked and not asked about again.
     struct Failed: Error {}
+    /// The reply wasn't the JSON asked for. Not the file's fault, so it is skipped for now and
+    /// asked about again in a later session.
+    struct Unreadable: Error {}
 
-    /// Nil when Ollama isn't there. Throws `Failed` when it answered but not usefully, so the
-    /// file is marked and not asked about again.
-    func describe(path: String, text: String) throws -> (title: String, tags: [String])? {
+    /// Nil when Ollama isn't there, or `isCancelled` stopped the wait. Throws `Failed` or
+    /// `Unreadable` (see each). Waits up to two minutes: a cold 4B model can take most of
+    /// that to load and answer, and the index's background queue is the only one waiting.
+    func describe(path: String, text: String, isCancelled: (() -> Bool)? = nil) throws -> (title: String, tags: [String])? {
         let text = String(text.prefix(Self.maxChars))
         if let fake {
             guard let r = fake(path, text) else { return nil }
@@ -44,26 +50,13 @@ public struct Titler: Sendable {
             ],
             "messages": [["role": "user", "content": prompt]],
         ]
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 120
-        request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        let done = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var result: (Data?, Int?)
-        let task = session.dataTask(with: request) { data, response, _ in
-            result = (data, (response as? HTTPURLResponse)?.statusCode)
-            done.signal()
-        }
-        task.resume()
-        if done.wait(timeout: .now() + 125) == .timedOut { task.cancel(); return nil }
+        let request = OllamaHTTP.post(url, body: body, timeout: 120)
         // Down, or the model isn't pulled: try again another time rather than mark the file.
-        guard result.1 == 200, let data = result.0 else { return nil }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let content = (json["message"] as? [String: Any])?["content"] as? String,
-              let inner = try? JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any],
-              let title = inner["title"] as? String else { throw Failed() }
+        guard let reply = OllamaHTTP.send(request, session: session, wait: 125, isCancelled: isCancelled, transform: { $0 }),
+              let json = reply.json else { return nil }
+        guard let content = (json["message"] as? [String: Any])?["content"] as? String,
+              let inner = (try? JSONSerialization.jsonObject(with: Data(content.utf8))) as? [String: Any],
+              let title = inner["title"] as? String else { throw Unreadable() }
         return try Self.clean(title, inner["tags"] as? [String] ?? [], path: path)
     }
 
@@ -89,13 +82,14 @@ extension IndexStore {
     static let titleBatteryFloor = 30
 
     /// Files with no title from their extractor, that haven't been asked about yet.
-    func untitled(limit: Int) throws -> [(path: String, text: String)] {
+    func untitled(limit: Int, excluding skipped: Set<String> = []) throws -> [(path: String, text: String)] {
         let exts = Self.json(Array(Self.selfTitled))
         let paths = try read { db in
             try db.query("""
                 SELECT path FROM files WHERE title IS NULL AND titled_by IS NULL
-                AND ext NOT IN (SELECT value FROM json_each(?1)) ORDER BY indexed_at DESC LIMIT ?2
-                """, exts, limit) { $0.string(0) }
+                AND ext NOT IN (SELECT value FROM json_each(?1))
+                AND path NOT IN (SELECT value FROM json_each(?3)) ORDER BY indexed_at DESC LIMIT ?2
+                """, exts, limit, Self.json(Array(skipped))) { $0.string(0) }
         }
         return try paths.map { path in
             let text = try read { db in
@@ -111,14 +105,19 @@ extension IndexStore {
     public func titlePending() -> Int {
         let titler = embedding.lock.withLock { embedding.titler }
         var count = 0
-        while !embedding.lock.withLock({ embedding.cancelled }), !Self.onLowBattery(), let next = (try? untitled(limit: 1))?.first {
+        let cancelled = { self.embedding.lock.withLock { self.embedding.cancelled } }
+        while !cancelled(), !Self.onLowBattery(),
+              let next = (try? untitled(limit: 1, excluding: embedding.lock.withLock({ embedding.titleSkipped })))?.first {
             let result: (title: String, tags: [String])?
             if next.text.trimmingCharacters(in: .whitespacesAndNewlines).count < 40 {
                 result = nil
             } else {
                 do {
-                    guard let r = try titler.describe(path: next.path, text: next.text) else { break }
+                    guard let r = try titler.describe(path: next.path, text: next.text, isCancelled: cancelled) else { break }
                     result = r
+                } catch is Titler.Unreadable {
+                    embedding.lock.withLock { _ = embedding.titleSkipped.insert(next.path) }
+                    continue
                 } catch {
                     result = nil
                 }

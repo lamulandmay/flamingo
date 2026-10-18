@@ -184,7 +184,12 @@ final class Statement {
 struct Row {
     let handle: OpaquePointer
     func isNull(_ i: Int32) -> Bool { sqlite3_column_type(handle, i) == SQLITE_NULL }
-    func string(_ i: Int32) -> String { sqlite3_column_text(handle, i).map { String(cString: $0) } ?? "" }
+    /// The column's text by its byte length, so an embedded NUL doesn't cut it short.
+    /// (`sqlite3_column_text` before `_bytes`, as SQLite asks, so the length is of the UTF-8 form.)
+    func string(_ i: Int32) -> String {
+        guard let p = sqlite3_column_text(handle, i) else { return "" }
+        return String(decoding: UnsafeBufferPointer(start: p, count: Int(sqlite3_column_bytes(handle, i))), as: UTF8.self)
+    }
     func optionalString(_ i: Int32) -> String? { isNull(i) ? nil : string(i) }
     func int(_ i: Int32) -> Int { Int(sqlite3_column_int64(handle, i)) }
     func double(_ i: Int32) -> Double { sqlite3_column_double(handle, i) }

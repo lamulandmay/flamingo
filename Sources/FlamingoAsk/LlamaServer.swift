@@ -16,7 +16,7 @@ public final class LlamaServer: @unchecked Sendable {
     /// Custom model folders get a distinct server alias, so a leftover process for a
     /// previous folder cannot answer under the newly selected model's identity.
     public var modelAlias: String {
-        guard UserDefaults.standard.string(forKey: "FlamingoLlamaModelDir") != nil else { return Self.modelName }
+        guard Self.configuredDirectory != nil else { return Self.modelName }
         guard let model = try? files().0 else { return Self.alias(for: modelDirectory.path) }
         let attrs = try? FileManager.default.attributesOfItem(atPath: model.path)
         let stamp = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
@@ -24,7 +24,7 @@ public final class LlamaServer: @unchecked Sendable {
     }
 
     public var displayName: String {
-        guard UserDefaults.standard.string(forKey: "FlamingoLlamaModelDir") != nil else { return Self.modelName }
+        guard Self.configuredDirectory != nil else { return Self.modelName }
         return (try? files().0.lastPathComponent) ?? modelDirectory.lastPathComponent
     }
 
@@ -34,15 +34,56 @@ public final class LlamaServer: @unchecked Sendable {
         return "flamingo-" + String(hash, radix: 16)
     }
 
-    /// Where the GGUF and its vision projector live. `FlamingoLlamaModelDir` overrides.
+    /// Where the GGUF and its vision projector live: the folder chosen in Settings
+    /// (`FlamingoLlamaModelDir`), else `FLAMINGO_LLAMA_MODEL_DIR`, else the first standard
+    /// folder holding a model. With none, the first standard folder, so "No local model in …"
+    /// names where to put one.
     public var modelDirectory: URL {
-        if let dir = UserDefaults.standard.string(forKey: "FlamingoLlamaModelDir") {
-            return URL(fileURLWithPath: (dir as NSString).expandingTildeInPath)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("codex/cgnsa/data/models/qwen3.8-27b")
+        if let dir = Self.configuredDirectory { return dir }
+        let standard = Self.standardDirectories
+        return standard.first(where: Self.holdsModel) ?? standard[0]
     }
 
-    static let binaries = ["/opt/homebrew/bin/llama-server", "/usr/local/bin/llama-server"]
+    /// The folder someone chose, in Settings or the environment; nil means the standard places.
+    static var configuredDirectory: URL? {
+        let chosen = UserDefaults.standard.string(forKey: "FlamingoLlamaModelDir")
+            ?? ProcessInfo.processInfo.environment["FLAMINGO_LLAMA_MODEL_DIR"]
+        guard let chosen, !chosen.isEmpty else { return nil }
+        return URL(fileURLWithPath: (chosen as NSString).expandingTildeInPath)
+    }
+
+    /// Flamingo's own models folder first, then the common hand-made ones. The last is the
+    /// development Mac's checkout, kept so that Mac keeps working without a setting.
+    static var standardDirectories: [URL] {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? home.appendingPathComponent("Library/Application Support")
+        return [support.appendingPathComponent("Flamingo/Models/\(modelName)"),
+                home.appendingPathComponent("models/\(modelName)"),
+                home.appendingPathComponent(".cache/llama.cpp/\(modelName)"),
+                home.appendingPathComponent("codex/cgnsa/data/models/\(modelName)")]
+    }
+
+    static func holdsModel(_ dir: URL) -> Bool {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        return names.contains { $0.hasSuffix(".gguf") && !$0.lowercased().hasPrefix("mmproj") }
+    }
+
+    /// Homebrew's two prefixes, then the PATH (a Finder launch has only the system's, a
+    /// Terminal launch the shell's), then the usual hand-built spots.
+    static var binaries: [String] {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
+        var seen = Set<String>()
+        return (["/opt/homebrew/bin", "/usr/local/bin"] + path + ["\(home)/.local/bin", "\(home)/bin", "\(home)/llama.cpp/build/bin"])
+            .map { ($0 as NSString).appendingPathComponent("llama-server") }
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// The first `llama-server` that can run, or nil when none is installed.
+    static var binary: String? {
+        binaries.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
     static let ports = 8080...8089
     static let contextSize = 16384
 
@@ -155,7 +196,7 @@ public final class LlamaServer: @unchecked Sendable {
     }
 
     private func launch(port: Int, root: URL, alias: String) async throws -> URL {
-        guard let binary = Self.binaries.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+        guard let binary = Self.binary else {
             throw AskError.unavailable("llama-server isn't installed")
         }
         let (model, projector) = try files()

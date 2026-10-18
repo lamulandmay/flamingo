@@ -446,19 +446,58 @@ public enum ProjectScaffolder {
         return created
     }
 
+    /// Runs `git init` with a real git binary. Never `/usr/bin/git` blindly: on a Mac without
+    /// the developer tools that shim opens macOS's "Install Command Line Developer Tools" dialog.
     public static func systemGitInit(_ root: URL) throws {
+        guard let git = installedGit() else {
+            throw ProjectStructureError.gitFailed("Git isn't installed. Install the Command Line Developer Tools (xcode-select --install), then try again.")
+        }
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.executableURL = git
         process.arguments = ["init", "--quiet"]
         process.currentDirectoryURL = root
         let errors = Pipe()
         process.standardError = errors
         process.standardOutput = FileHandle.nullDevice
         do { try process.run() } catch { throw ProjectStructureError.gitFailed(error.localizedDescription) }
+        // Drain stderr while git runs (it ends at exit), so a chatty git never blocks on a full pipe.
+        let output = errors.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
-            let message = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            let message = String(decoding: output, as: UTF8.self)
             throw ProjectStructureError.gitFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
         }
+    }
+
+    /// A git that runs without prompting: the selected developer directory's (`xcode-select -p`,
+    /// which only prints and never prompts), then the usual Command Line Tools, Xcode and
+    /// Homebrew locations. Nil when there is none.
+    static func installedGit() -> URL? {
+        var candidates: [String] = []
+        if let developer = ProcessInfo.processInfo.environment["DEVELOPER_DIR"], !developer.isEmpty {
+            candidates.append(developer + "/usr/bin/git")
+        }
+        if let developer = selectedDeveloperDirectory() { candidates.append(developer + "/usr/bin/git") }
+        candidates += ["/Library/Developer/CommandLineTools/usr/bin/git",
+                       "/Applications/Xcode.app/Contents/Developer/usr/bin/git",
+                       "/opt/homebrew/bin/git", "/usr/local/bin/git"]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+    }
+
+    private static func selectedDeveloperDirectory() -> String? {
+        let tool = "/usr/bin/xcode-select"
+        guard FileManager.default.isExecutableFile(atPath: tool) else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = ["-p"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        let path = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
     }
 }

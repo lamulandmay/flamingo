@@ -124,9 +124,6 @@ struct ResultMeta: Equatable, Sendable {
     /// Finder's kind: "PDF document", "Folder".
     var kind: String?
 
-    /// Up to this many entries are counted for a package's size (a Keynote file, an app).
-    static let packageEntryLimit = 4_000
-
     static func load(_ items: [(id: String, url: URL)]) -> [String: ResultMeta] {
         let keys: Set<URLResourceKey> = [.contentModificationDateKey, .addedToDirectoryDateKey, .creationDateKey, .fileSizeKey,
                                          .localizedTypeDescriptionKey, .isDirectoryKey, .isPackageKey]
@@ -142,7 +139,7 @@ struct ResultMeta: Equatable, Sendable {
             meta.created = values.creationDate
             meta.kind = values.localizedTypeDescription.map(ResultsFormat.kind)
             if values.isDirectory == true {
-                meta.size = values.isPackage == true ? packageSize(item.url) : nil
+                meta.size = values.isPackage == true ? FolderSize.of(item.url) : nil
             } else {
                 meta.size = values.fileSize.map(Int64.init)
             }
@@ -156,13 +153,23 @@ struct ResultMeta: Equatable, Sendable {
         return out
     }
 
-    private static func packageSize(_ url: URL) -> Int64? {
-        guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey], options: []) else { return nil }
-        var total: Int64 = 0, seen = 0
+}
+
+/// A folder's or package's size, as Finder adds it up (allocated size where the disk reports
+/// it). The one rule for every view, so a folder shows the same size in columns and results.
+enum FolderSize {
+    /// Past this many entries the size is unknown (nil) rather than a partial total or a stall.
+    static let entryLimit = 20_000
+
+    static func of(_ url: URL) -> Int64? {
+        let keys: [URLResourceKey] = [.totalFileSizeKey, .fileSizeKey]
+        guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: keys) else { return nil }
+        var total: Int64 = 0, count = 0
         for case let file as URL in walker {
-            seen += 1
-            if seen > packageEntryLimit { break }
-            total += Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            count += 1
+            if count > entryLimit { return nil }
+            let v = try? file.resourceValues(forKeys: Set(keys))
+            total += Int64(v?.totalFileSize ?? v?.fileSize ?? 0)
         }
         return total
     }

@@ -9,3 +9,7 @@ fixtures/vault/.flamingo/graph.json
 fixtures/vault/.flamingo/graph-layout.json
 docs/screens/*.tmp.png
 __pycache__/
+# Agent worktrees and local Claude Code settings.
+.claude/
+# Runtime lock, written whenever the demo vault is open.
+fixtures/vault/.flamingo/.notes.lock

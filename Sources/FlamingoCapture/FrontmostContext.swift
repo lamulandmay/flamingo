@@ -50,7 +50,7 @@ public struct FrontmostContext: Sendable {
         guard var ctx = probe() else { return nil }
         guard !ctx.isFlamingo, !vaults.isEmpty else { return ctx }
         if let url = ctx.documentURL {
-            if let (v, f) = locate(url, in: vaults), isListed(v.url(for: f), relativePath: f.relativePath) {
+            if let (v, f) = locate(url, in: vaults), isListed(v.url(for: f), relativePath: f.relativePath, ignore: VaultScanner.ignoreRules(in: v)) {
                 ctx.vault = v; ctx.file = f
             }
         } else if titleFallbackApps(ctx.appBundleID), let title = ctx.windowTitle,
@@ -61,11 +61,12 @@ public struct FrontmostContext: Sendable {
         return ctx
     }
 
-    /// Only what `VaultScanner` would list: a regular file or package, nothing hidden or
-    /// ignored. Finder's folder windows and Terminal's working directory don't count.
-    static func isListed(_ url: URL, relativePath: String) -> Bool {
-        let parts = relativePath.split(separator: "/").map(String.init)
-        guard !parts.contains(where: { $0.hasPrefix(".") || VaultScanner.ignoredNames.contains($0) }) else { return false }
+    /// Only what `VaultScanner` would list: a regular file or package that `ignore` (the vault's
+    /// rules) and `VaultScanner.ignoredNames` admit. Hidden files count, as the scanner lists
+    /// them; `.flamingo` and `.git` never do. Finder's folder windows and Terminal's working
+    /// directory don't count.
+    static func isListed(_ url: URL, relativePath: String, ignore: IgnoreRules = IgnoreRules(text: "")) -> Bool {
+        guard VaultScanner.admits(relativePath, isDirectory: false, ignore: ignore) else { return false }
         let v = try? url.resourceValues(forKeys: [.isRegularFileKey, .isPackageKey])
         return v?.isRegularFile == true || v?.isPackage == true
     }
@@ -222,16 +223,35 @@ public struct FrontmostContext: Sendable {
     }
 }
 
-/// Vault file lists for the title fallback, rescanned at most every 30 seconds.
+/// Vault file lists for the title fallback, refreshed at most every 30 seconds. The walk runs
+/// outside the lock: a caller with a list in hand gets it, stale or not, while one background
+/// refresh runs. Only the first call for a vault walks while it waits.
 private enum TitleIndex {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cache: [URL: (at: Date, files: [FileRef])] = [:]
+    nonisolated(unsafe) private static var refreshing: Set<URL> = []
 
     static func files(in vault: Vault) -> [FileRef] {
-        lock.lock(); defer { lock.unlock() }
-        if let hit = cache[vault.root], Date().timeIntervalSince(hit.at) < 30 { return hit.files }
+        lock.lock()
+        let hit = cache[vault.root]
+        let stale = hit.map { Date().timeIntervalSince($0.at) >= 30 } ?? true
+        let start = stale && refreshing.insert(vault.root).inserted
+        lock.unlock()
+        if let hit {
+            if start { DispatchQueue.global(qos: .utility).async { refresh(vault) } }
+            return hit.files
+        }
+        // Nothing to serve yet: walk now, or (another caller's first walk is under way) match nothing.
+        return start ? refresh(vault) : []
+    }
+
+    @discardableResult
+    private static func refresh(_ vault: Vault) -> [FileRef] {
         let files = VaultScanner.files(in: vault)
+        lock.lock()
         cache[vault.root] = (Date(), files)
+        refreshing.remove(vault.root)
+        lock.unlock()
         return files
     }
 }

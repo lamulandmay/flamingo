@@ -83,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         state.briefing.install()
         state.briefing.catchUp = { [weak state] onEvent in _ = await state?.nightShiftCatchUp(onEvent: onEvent) }
         state.briefing.now = { AppState.now }
+        ConnectorsModel.shared.start()
         // The rail's local graph takes first responder as it appears; keys start in the sidebar.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self, let w = self.window, !(w.firstResponder is NSText) else { return }

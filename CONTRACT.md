@@ -14,6 +14,10 @@ you remembered to type.
 
 Ten sessions build this in parallel. This file is the one thing everyone reads first.
 
+> Historical: the parallel-session process below (no commits except session 10, `Package.swift`
+> changes only through `plans/REQUESTS.md`) applied to the first build. Work is committed
+> normally now; the module boundaries, frozen public API and on-disk formats still hold.
+
 ## Rules of engagement
 
 1. **Read your plan.** `plans/NN-*.md`. It tells you what you own and what is frozen.

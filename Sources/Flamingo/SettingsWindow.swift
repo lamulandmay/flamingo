@@ -11,7 +11,7 @@ import FlamingoDesign
 @MainActor
 final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
     enum Pane: String, CaseIterable {
-        case general, chat, thoughts, capture, index
+        case general, chat, thoughts, capture, connectors, index
 
         var title: String {
             switch self {
@@ -19,6 +19,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
             case .chat: "Chat"
             case .thoughts: "Thoughts"
             case .capture: "Capture"
+            case .connectors: "Connectors"
             case .index: "Index"
             }
         }
@@ -29,6 +30,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
             case .chat: "bubble.left.and.text.bubble.right"
             case .thoughts: "text.bubble"
             case .capture: "keyboard"
+            case .connectors: "antenna.radiowaves.left.and.right"
             case .index: "externaldrive"
             }
         }
@@ -113,6 +115,7 @@ private struct SettingsRoot: View {
             case .chat: AskSettingsPane()
             case .thoughts: ThoughtSettings()
             case .capture: CaptureSettings()
+            case .connectors: ConnectorSettings()
             case .index: IndexSettings()
             }
         }
@@ -125,7 +128,7 @@ private struct SettingsRoot: View {
 }
 
 /// One line of tertiary text under a control.
-private func footnote(_ text: String) -> some View {
+func footnote(_ text: String) -> some View {
     Text(text)
         .font(Theme.Font.small)
         .foregroundStyle(Theme.Color.textTertiary)

@@ -106,6 +106,8 @@ public final class IndexStore: @unchecked Sendable {
     private let cacheLock = NSLock()
     private var pathCache: [String]?
     private var directoryCache: [String]?
+    /// `indexedPaths(inFolder:)` for the last folder asked about, valid for one generation.
+    private var folderPathCache: (folder: String, generation: Int, paths: [String])?
     let readsOnly: Bool
     private var readerDataVersion: Int?
     private var generation = 0
@@ -587,6 +589,27 @@ public final class IndexStore: @unchecked Sendable {
         let paths = try read { db in try db.query("SELECT path FROM files ORDER BY path") { $0.string(0) } }
         cacheLock.lock()
         if generation == gen { pathCache = paths }   // a write landed meanwhile: don't cache what we read
+        cacheLock.unlock()
+        return paths
+    }
+
+    /// `indexedPaths()` under one folder, sorted by path. Kept for the last folder asked about
+    /// until the next write, so typing in a folder-scoped quick open filters the cached list
+    /// once instead of refetching the folder from SQLite per keystroke.
+    func indexedPaths(inFolder folder: String) throws -> [String] {
+        let trimmed = folder.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmed.isEmpty else { return try indexedPaths() }
+        let prefix = trimmed + "/"
+        cacheLock.lock()
+        if let cached = folderPathCache, cached.folder == prefix, cached.generation == generation {
+            cacheLock.unlock(); return cached.paths
+        }
+        let gen = generation
+        cacheLock.unlock()
+        // A byte-wise prefix: the same bounds as `folderPredicate` ("folder/" up to "folder0").
+        let paths = try indexedPaths().filter { $0.utf8.starts(with: prefix.utf8) }
+        cacheLock.lock()
+        if generation == gen { folderPathCache = (prefix, gen, paths) }
         cacheLock.unlock()
         return paths
     }

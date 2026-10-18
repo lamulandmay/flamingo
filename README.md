@@ -108,9 +108,19 @@ graph, columns, inbox and connect mode, and filters them as you type. The essent
 
 ## Build and run
 
-Requires macOS 14 or later and Xcode, not just the Command Line Tools. `scripts/env.sh` finds
-Xcode-beta or Xcode in `/Applications`; set `DEVELOPER_DIR` to use another. There are no
-dependencies to install.
+Requirements:
+
+- macOS 14 or later and Xcode, not just the Command Line Tools (SwiftUI's macros ship with
+  Xcode). `scripts/env.sh` finds Xcode-beta or Xcode in `/Applications` and stops with an error
+  when only the Command Line Tools are there; set `DEVELOPER_DIR` to use another Xcode.
+- Optional: [Ollama](https://ollama.com) with `qwen3-embedding:0.6b` (semantic search) and
+  `gemma3:4b` (titles and on-device Ask). Without Ollama, search falls back to Apple's on-device
+  embeddings when present, else keyword-only.
+- Optional: `llama-server` (Homebrew `llama.cpp`) for the local 27B in Ask; the model folder is
+  set in Ask's settings.
+- `make fixtures` only: `uv` and `ffmpeg`.
+
+There are no package dependencies to install.
 
 ```
 make demo      # build, copy the demo vault to a temp folder, open it

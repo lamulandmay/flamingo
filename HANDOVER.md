@@ -164,8 +164,7 @@ chrome. The 2026-10-16 pass kept the function and rebuilt the surface to DESIGN.
   `FLAMINGO_SLOWMO=6`, `FLAMINGO_PIP_IN_WINDOW=1`, `FLAMINGO_QA_CHANNEL`, and QAHook's `menu <title>` and `thought <text>`. The capture
   panel's footer shows the target's glyph and the glyphs of files linked so far.
 
-Nothing is committed. A tarball of the tree before the 2026-10-16 pass was kept in that
-session's scratchpad only; commit before the next big change.
+This work is committed (on `main` since then; `v0.1` is tagged). Commit small.
 
 **Open, in priority order**
 
@@ -197,7 +196,8 @@ session's scratchpad only; commit before the next big change.
 - Keep `make test` green. Commit small. The only files no one should edit casually are
   `Package.swift` and `CONTRACT.md`.
 - Before any view: DESIGN.md. If a label can be removed, remove it. No placeholder text, no emoji.
-- User's hardware: M5 Pro, 64 GB. Ollama has gemma3:4b, llama3.2:1b, qwen2.5:1.5b.
+- Hardware and installed models differ per Mac; README's Requirements lists the optional
+  Ollama models and `llama-server` the code expects.
 
 ## 2026-10-17 program: ring, tiles, thoughts v2, night shift, morning inbox
 

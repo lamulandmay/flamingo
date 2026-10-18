@@ -15,7 +15,23 @@ struct ChatClient: Sendable {
     struct Usage: Sendable, Equatable { var input: Int?; var output: Int? }
 
     /// Like `send`, and also the token counts the server reported (when it reports them).
+    /// An answer the length limit cut off throws: structured output that stops early is no use.
     func sendDetailed(_ body: JSON, to endpoint: ChatEndpoint, onText: @escaping @Sendable (String) -> Void) async throws -> (text: String, usage: Usage?) {
+        let reply = try await stream(body, to: endpoint, onText: onText)
+        if reply.truncated { throw AskError.stream("Answer interrupted (length). Retry or narrow the question.") }
+        return (reply.text, reply.usage)
+    }
+
+    struct Reply: Sendable, Equatable {
+        var text: String
+        var usage: Usage?
+        /// `finish_reason` was `length`: the text so far stands, but it stops mid-answer.
+        var truncated = false
+    }
+
+    /// The whole stream. A `length` finish returns what arrived, marked truncated; any other
+    /// reason that isn't `stop` throws.
+    func stream(_ body: JSON, to endpoint: ChatEndpoint, onText: @escaping @Sendable (String) -> Void) async throws -> Reply {
         var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("chat/completions"))
         request.httpMethod = "POST"
         request.timeoutInterval = timeout
@@ -36,6 +52,7 @@ struct ChatClient: Sendable {
             var parser = SSEParser()
             var line: [UInt8] = []
             var done = false
+            var truncated = false
             func handle(_ event: SSEParser.Event) throws {
                 if event.data == "[DONE]" { done = true; return }
                 guard let json = try? JSON.decode(Data(event.data.utf8)) else { return }
@@ -49,7 +66,8 @@ struct ChatClient: Sendable {
                     onText(t)
                 }
                 if let reason = choice["finish_reason"]?.string, !reason.isEmpty {
-                    guard reason == "stop" else { throw AskError.stream("Answer interrupted (\(reason)). Retry or narrow the question.") }
+                    if reason == "length" { truncated = true }
+                    else if reason != "stop" { throw AskError.stream("Answer interrupted (\(reason)). Retry or narrow the question.") }
                     done = true
                 }
             }
@@ -65,7 +83,7 @@ struct ChatClient: Sendable {
             if !line.isEmpty, let event = parser.feed(String(decoding: line, as: UTF8.self)) { try handle(event) }
             if let event = parser.flush() { try handle(event) }
             guard done else { throw AskError.stream("Answer interrupted before completion. Retry to finish it.") }
-            return (text, usage)
+            return Reply(text: text, usage: usage, truncated: truncated)
         } catch let error as URLError {
             if error.code == .cancelled { throw CancellationError() }
             throw AskError.unavailable(Self.name(endpoint))

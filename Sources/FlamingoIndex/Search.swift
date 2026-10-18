@@ -154,10 +154,7 @@ extension IndexStore {
                 try db.query("SELECT path FROM files WHERE 1 = 1 \(Self.folderPredicate(folder)) ORDER BY mtime DESC, path LIMIT ?", limit) { FileRef(relativePath: $0.string(0)) }
             }
         }
-        let paths: [String]
-        if folder?.isEmpty == false {
-            paths = try read { db in try db.query("SELECT path FROM files WHERE 1 = 1 \(Self.folderPredicate(folder)) ORDER BY path") { $0.string(0) } }
-        } else { paths = try indexedPaths() }
+        let paths = try folder.map { try indexedPaths(inFolder: $0) } ?? indexedPaths()
         return FuzzyMatch.rank(q, in: paths, limit: limit).map(FileRef.init(relativePath:))
     }
 

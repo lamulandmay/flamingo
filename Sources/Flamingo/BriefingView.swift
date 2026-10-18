@@ -93,6 +93,7 @@ struct BriefingView: View {
                 cards(width: width, compact: compact)
                     .padding(.bottom, Theme.Space.xxl)
             }
+            BriefingAgenda(now: now, visible: model.visible)
             if !model.address.isEmpty || !model.attention.isEmpty {
                 Hairline()
                     .fadesIn(model.visible, delay: 0.1)

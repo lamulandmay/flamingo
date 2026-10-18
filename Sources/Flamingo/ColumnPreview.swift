@@ -140,25 +140,12 @@ struct ColumnPreview: View {
         let v = try? url.resourceValues(forKeys: keys)
         var info = Info(kind: v?.localizedTypeDescription, created: v?.creationDate, modified: v?.contentModificationDate)
         var bytes = v?.fileSize.map(Int64.init)
-        if v?.isDirectory == true { bytes = packageSize(url) }
+        if v?.isDirectory == true { bytes = FolderSize.of(url) }
         if let bytes { info.size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
         info.opened = NSMetadataItem(url: url)?.value(forAttribute: "kMDItemLastUsedDate") as? Date
         if url.pathExtension == "app", let version = Bundle(url: url)?.infoDictionary?["CFBundleShortVersionString"] as? String {
             info.version = version
         }
         return info
-    }
-
-    /// A package's size, as Finder adds it up; nil past 20,000 items rather than stall.
-    nonisolated private static func packageSize(_ url: URL) -> Int64? {
-        guard let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.totalFileSizeKey, .fileSizeKey]) else { return nil }
-        var total: Int64 = 0, count = 0
-        for case let file as URL in walker {
-            count += 1
-            if count > 20_000 { return nil }
-            let v = try? file.resourceValues(forKeys: [.totalFileSizeKey, .fileSizeKey])
-            total += Int64(v?.totalFileSize ?? v?.fileSize ?? 0)
-        }
-        return total
     }
 }

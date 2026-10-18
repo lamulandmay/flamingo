@@ -16,7 +16,7 @@ let package = Package(
         .executableTarget(
             name: "Flamingo",
             dependencies: ["FlamingoCore", "FlamingoDesign", "FlamingoCapture", "FlamingoExtract",
-                           "FlamingoIndex", "FlamingoGraph", "FlamingoTrail", "FlamingoAsk", "FlamingoThoughts", "FlamingoAgents"],
+                           "FlamingoIndex", "FlamingoGraph", "FlamingoTrail", "FlamingoAsk", "FlamingoThoughts", "FlamingoAgents", "FlamingoConnectors"],
             path: "Sources/Flamingo"
         ),
         // Pure model layer: vault, file identity, sidecar notes, wikilinks, graph model.
@@ -41,6 +41,9 @@ let package = Package(
         .target(name: "FlamingoThoughts", dependencies: ["FlamingoCore", "FlamingoIndex", "FlamingoAsk", "FlamingoTrail"], path: "Sources/FlamingoThoughts"),
         // Agent projects (plan 18): which harness works where, from processes and session logs.
         .target(name: "FlamingoAgents", dependencies: ["FlamingoCore"], path: "Sources/FlamingoAgents"),
+        // Connectors (plan 19): calendar feeds and Apple Calendar brought in as items, by purpose card.
+        // Items stay on this Mac; Claude only drafts the card from a description and the feed's shape.
+        .target(name: "FlamingoConnectors", dependencies: ["FlamingoCore"], path: "Sources/FlamingoConnectors"),
 
         .testTarget(name: "FlamingoCoreTests", dependencies: ["FlamingoCore"], path: "Tests/FlamingoCoreTests"),
         .testTarget(name: "FlamingoExtractTests", dependencies: ["FlamingoExtract"], path: "Tests/FlamingoExtractTests"),
@@ -51,6 +54,7 @@ let package = Package(
         .testTarget(name: "FlamingoCaptureTests", dependencies: ["FlamingoCapture", "FlamingoCore"], path: "Tests/FlamingoCaptureTests"),
         .testTarget(name: "FlamingoGraphTests", dependencies: ["FlamingoGraph", "FlamingoCore"], path: "Tests/FlamingoGraphTests"),
         .testTarget(name: "FlamingoAgentsTests", dependencies: ["FlamingoAgents", "FlamingoCore"], path: "Tests/FlamingoAgentsTests"),
+        .testTarget(name: "FlamingoConnectorsTests", dependencies: ["FlamingoConnectors"], path: "Tests/FlamingoConnectorsTests"),
         .testTarget(name: "FlamingoAppTests", dependencies: ["Flamingo"], path: "Tests/FlamingoAppTests"),
     ]
 )

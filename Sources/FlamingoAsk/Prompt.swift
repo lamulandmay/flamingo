@@ -171,13 +171,47 @@ enum Prompt {
         supportsFallbacks(model) ? ["server-side-fallback-2026-07-01"] : []
     }
 
+    /// Server-side refusal fallbacks (`fallbacks: "default"`): Opus 5 on, Sonnet 5.5 on,
+    /// Fable and Mythos 5.1 on. Haiku has none; a decline there just ends the answer.
     static func supportsFallbacks(_ model: String) -> Bool {
-        ["claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1"].contains(model)
+        guard let id = ModelID(model) else { return false }
+        switch id.family {
+        case "opus": return id.atLeast([5])
+        case "sonnet": return id.atLeast([5, 5])
+        case "fable", "mythos": return id.atLeast([5, 1])
+        default: return false
+        }
     }
 
+    /// `output_config.effort`: Opus 4.5 on, Sonnet 4.6 on, Haiku 5 on, every Fable and Mythos.
     static func supportsEffort(_ model: String) -> Bool {
-        ["claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
-         "claude-sonnet-4-6", "claude-sonnet-5", "claude-haiku-5", "claude-fable", "claude-mythos"]
-            .contains { model.hasPrefix($0) }
+        guard let id = ModelID(model) else { return false }
+        switch id.family {
+        case "opus": return id.atLeast([4, 5])
+        case "sonnet": return id.atLeast([4, 6])
+        case "haiku": return id.atLeast([5])
+        case "fable", "mythos": return true
+        default: return false
+        }
     }
+}
+
+/// `claude-<family>-<major>[-<minor>]`, with anything after (a date, `[1m]`) ignored, so a
+/// new point release inherits its family's rules instead of needing a list entry.
+struct ModelID: Equatable {
+    var family: String
+    var version: [Int]
+
+    init?(_ id: String) {
+        let base = id.lowercased().split(separator: "[").first ?? ""
+        let parts = base.split(separator: "-")
+        guard parts.count >= 3, parts[0] == "claude", let major = Int(parts[2]) else { return nil }
+        family = String(parts[1])
+        version = [major]
+        // A minor is one or two digits; an eight-digit date suffix is not one.
+        if parts.count > 3, parts[3].count <= 2, let minor = Int(parts[3]) { version.append(minor) }
+    }
+
+    /// Version order: `[5] < [5, 1]`, `[4, 8] < [5]`.
+    func atLeast(_ minimum: [Int]) -> Bool { !version.lexicographicallyPrecedes(minimum) }
 }

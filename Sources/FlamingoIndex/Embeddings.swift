@@ -200,38 +200,20 @@ public struct Embedder: Sendable {
     /// `completion` also receives the result when this call gives up waiting first, so a
     /// slow first query (model loading) still warms the cache for the next keystroke.
     private func ollama(_ name: String, _ inputs: [String], contextLength: Int?, timeout: TimeInterval, completion: (@Sendable ([[Float]]?) -> Void)?) -> [[Float]]? {
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        // The request outlives a short wait so it can finish loading the model.
-        request.timeoutInterval = max(timeout, completion == nil ? timeout : 60)
-        request.setValue("application/json", forHTTPHeaderField: "content-type")
         var body: [String: Any] = ["model": name, "input": inputs, "keep_alive": "30m", "truncate": true]
         if let contextLength { body["options"] = ["num_ctx": contextLength] }
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        let done = DispatchSemaphore(value: 0)
-        let box = ResultBox()
+        // The request outlives a short wait so it can finish loading the model.
+        let request = OllamaHTTP.post(url, body: body, timeout: max(timeout, completion == nil ? timeout : 60))
         let count = inputs.count
         let base = url
-        let task = session.dataTask(with: request) { data, response, error in
-            var vectors: [[Float]]?
-            if let error = error as? URLError, [.cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet, .cannotFindHost].contains(error.code) {
+        let vectors = OllamaHTTP.send(request, session: session, wait: timeout + 0.25, outlive: completion != nil, transform: { reply -> [[Float]]? in
+            if let error = reply.error, [.cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet, .cannotFindHost].contains(error.code) {
                 OllamaCatalog.shared.markDown(base: base)
             }
-            if (response as? HTTPURLResponse)?.statusCode == 200, let data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let rows = json["embeddings"] as? [[NSNumber]], rows.count == count {
-                vectors = rows.map { Self.normalized($0.map(\.floatValue)) }
-            }
-            box.set(vectors)
-            completion?(vectors)
-            done.signal()
-        }
-        task.resume()
-        if done.wait(timeout: .now() + timeout + 0.25) == .timedOut {
-            if completion == nil { task.cancel() }
-            return nil
-        }
-        return box.get()
+            guard let rows = reply.json?["embeddings"] as? [[NSNumber]], rows.count == count else { return nil }
+            return rows.map { Self.normalized($0.map(\.floatValue)) }
+        }, completion: completion)
+        return vectors ?? nil
     }
 
     static func normalized(_ v: [Float]) -> [Float] {
@@ -243,13 +225,6 @@ public struct Embedder: Sendable {
         var scale = 1 / norm
         vDSP_vsmul(v, 1, &scale, &out, 1, vDSP_Length(v.count))
         return out
-    }
-
-    private final class ResultBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: [[Float]]?
-        func set(_ v: [[Float]]?) { lock.withLock { value = v } }
-        func get() -> [[Float]]? { lock.withLock { value } }
     }
 }
 
@@ -278,25 +253,15 @@ final class OllamaCatalog: @unchecked Sendable {
     func models(base: URL) -> [String]? {
         let key = Self.key(base)
         if let e = lock.withLock({ entries[key] }), Date().timeIntervalSince(e.checked) < Self.interval { return e.models }
-        var tags = URLComponents(url: base, resolvingAgainstBaseURL: false)
-        tags?.path = "/api/tags"
-        guard let url = tags?.url else { return nil }
+        guard let url = OllamaHTTP.endpoint(base, path: "/api/tags") else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 1.5
-        let done = DispatchSemaphore(value: 0)
-        nonisolated(unsafe) var names: [String]?
-        URLSession.shared.dataTask(with: request) { data, response, _ in
-            if (response as? HTTPURLResponse)?.statusCode == 200, let data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let models = json["models"] as? [[String: Any]] {
-                names = models.compactMap { $0["name"] as? String ?? $0["model"] as? String }
-            }
-            done.signal()
-        }.resume()
-        _ = done.wait(timeout: .now() + 2)
-        let result = names
-        lock.withLock { entries[key] = (result, Date()) }
-        return result
+        // Blocks at most 2 s, and only once per interval: a down server is remembered.
+        let names = OllamaHTTP.send(request, wait: 2, transform: { reply -> [String]? in
+            (reply.json?["models"] as? [[String: Any]])?.compactMap { $0["name"] as? String ?? $0["model"] as? String }
+        }) ?? nil
+        lock.withLock { entries[key] = (names, Date()) }
+        return names
     }
 
     private static func key(_ url: URL) -> String { (url.host ?? "") + ":" + String(url.port ?? 0) }
@@ -470,6 +435,8 @@ final class EmbeddingState: @unchecked Sendable {
     let queue = DispatchQueue(label: "flamingo.embeddings", qos: .background)
     var embedder = Embedder()
     var titler = Titler()
+    /// Files whose titling reply was unreadable this session; asked about again after a relaunch.
+    var titleSkipped: Set<String> = []
     /// The in-memory vector indexes this store reads, shared with other stores on the same file.
     var indexes: [String: VectorIndex] = [:]
     /// Whether the semantic tables exist (checked once per store).

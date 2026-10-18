@@ -16,6 +16,8 @@ public enum SidecarError: Error, Equatable, Sendable, LocalizedError {
     case identityMismatch(path: String)
     /// A uid-addressed call named a thought that is not in the sidecar.
     case thoughtNotFound(uid: String)
+    /// Another process held the notes lock (at `path`) for longer than the wait allows.
+    case busy(path: String)
 
     public var errorDescription: String? {
         switch self {
@@ -26,6 +28,7 @@ public enum SidecarError: Error, Equatable, Sendable, LocalizedError {
         case .notUTF8(let path): return "\(path) is not UTF-8 text."
         case .identityMismatch(let path): return "The identity of \(path) changed or is unknown. Its thoughts were preserved."
         case .thoughtNotFound(let uid): return "Thought \(uid) is not in this sidecar."
+        case .busy: return "Thoughts are busy in another Flamingo process. Try again in a moment."
         }
     }
 }

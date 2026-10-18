@@ -5,7 +5,6 @@ What QA found running `make demo` on the Kestrel Works vault, over six passes fr
 
 ## Open at v0.1
 
-- [ ] (09, cc 01) Ask has no question field that takes focus. Repro: ⌘4, type "What price did the board see for Arc?", press Return. The keystrokes go to the sidebar's type-to-select (it selected `whiteboard-pricing.jpg`) and Return jumps back to Files. Ask is still an empty pane with one hairline.
 - [ ] (01) pptx anchors don't match the preview. After ⌘↓ ⌘↓ on `arc-launch-plan.pptx` the anchor and title say `slide 2`, but Quick Look still shows slide 1, so ⌘⇧C pins the thought to a slide the user isn't looking at. Two presses should also reach slide 3. Last checked in pass 5.
 - [x] (01) Sidebar names are middle-truncated with room to spare (`arc-launc…plan.pptx`). Plan 11: the row's trailing padding is `Space.s`, not `Space.l`. Not re-checked on the demo vault.
 - [x] (01) The rail's mini-graph is drawn in Graph mode too, so the same graph appears twice. Plan 11: hidden in Graph mode.
@@ -25,10 +24,8 @@ Measured on this Mac (M5 Pro, 64 GB) with the vault at `~`, a debug build, `FLAM
 - Pins, unpin with ⌫ plus the Undo toast and ⌘Z, the lazy tree, dotfiles listed, and ⌘K into `.config` were all checked in the app. "Pin Folder…", drag to reorder and drop-to-pin weren't driven (NSOpenPanel and drags can't be scripted headlessly).
 - Full Disk Access: the palette command appears only when `~/Library/Mail` or `~/Library/Messages` can't be listed. This Mac grants it to the test runner, so the command didn't show.
 
-- [ ] (12) `IndexStore` metadata-only rows for files over 50 MB and iCloud placeholders. The shell keeps both out of `update` for now, so they are findable by name in ⌘K but not in search.
 - [ ] (12) Index size and graph size on a whole disk, above.
 - [ ] (03, unowned) Capture walks the whole vault itself (`loadCandidates`, and `TitleIndex` every 30 s). On `~` that is a 30 s walk. See REQUESTS.md.
-- [ ] (06, unowned) `GraphInputNSView` takes first responder whenever it enters a window, so the rail's mini-graph took the keyboard from the sidebar after every selection. The shell's `MainWindow` refuses that outside Graph mode; the real fix belongs in the graph.
 
 ## Working at v0.1
 

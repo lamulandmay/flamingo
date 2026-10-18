@@ -376,8 +376,8 @@ private struct ExchangeView: View {
                     }
                 }
             }
-            if let error = exchange.error {
-                Text(error).font(Theme.Font.small).foregroundStyle(Theme.Color.textTertiary)
+            if let line = exchange.error ?? exchange.note {
+                Text(line).font(Theme.Font.small).foregroundStyle(Theme.Color.textTertiary)
                     .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
             HStack(spacing: 2) {

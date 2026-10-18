@@ -16,12 +16,14 @@ public struct UnifiedSearchQuery: Sendable, Equatable {
     public private(set) var issues: [String] = []
     public let now: Date
 
+    /// `key:value` and `key:"quoted value"` filters, compiled once.
+    private static let filterPattern = try! NSRegularExpression(pattern: #"(?i)(?<!\S)(path|type|ext|after|before):(?:"([^"]*)"|(\S*))"#)
+
     public init(raw: String, now: Date = Date()) {
         self.raw = raw
         self.text = raw
         self.now = now
-        let pattern = #"(?i)(?<!\S)(path|type|ext|after|before):(?:"([^"]*)"|(\S*))"#
-        let regex = try! NSRegularExpression(pattern: pattern)
+        let regex = Self.filterPattern
         let source = raw as NSString
         let matches = regex.matches(in: raw, range: NSRange(location: 0, length: source.length)).filter {
             source.substring(to: $0.range.location).filter { $0 == "\"" }.count.isMultiple(of: 2)

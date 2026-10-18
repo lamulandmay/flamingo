@@ -52,6 +52,8 @@ struct Exchange: Identifiable, Equatable, Codable, Sendable {
     var fileScope: FileRef?
     var saveTarget: FileRef?
     var model: String?
+    /// A line under a finished answer that isn't an error, e.g. the length limit cut it off.
+    var note: String?
 }
 
 /// Questions and answers for one engine. Outlives the view, so leaving Ask mode doesn't
@@ -218,6 +220,7 @@ final class AskSession: ObservableObject {
             current?.citations = answer.citations
             current?.sources = answer.sources
             current?.model = answer.model
+            current?.note = answer.truncated ? "Cut off at the length limit. Ask a narrower question for the rest." : nil
             current?.done = true
         }
     }
@@ -458,7 +461,7 @@ final class AskSession: ObservableObject {
         case .ollama:
             readiness = "Ollama · " + AskProvider.ollamaModel + " · requires Ollama running locally"
         default:
-            if let files = try? LlamaServer.shared.files(), LlamaServer.binaries.contains(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            if let files = try? LlamaServer.shared.files(), LlamaServer.binary != nil {
                 readiness = "Local · " + files.0.lastPathComponent + (LlamaServer.shared.isRunning ? " · running" : " · installed; loads on first question")
             } else {
                 readiness = "Local model unavailable. Choose a GGUF folder, start Ollama, or select Claude and add a key."
@@ -683,6 +686,7 @@ struct AskSurface: View {
                 }
                 .transition(.opacity)
             }
+            if let note = exchange.note { ErrorLine(text: note) }
             if let error = exchange.error { ErrorLine(text: error) }
         }
         .padding(.top, Theme.Space.l)

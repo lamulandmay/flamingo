@@ -15,6 +15,8 @@ public final class SidecarStore: @unchecked Sendable {
     public let vault: Vault
     private let lock = NSLock()
     private let processLock: ProcessLock
+    /// What `notesClaiming` last saw per note. Only touched under `locked`.
+    private var noteClaims: [FileRef: NoteClaim] = [:]
 
     public init(vault: Vault) {
         self.vault = vault
@@ -69,7 +71,12 @@ public final class SidecarStore: @unchecked Sendable {
         try locked {
             var out: [FileRef: SidecarDocument] = [:]
             for ref in try sidecarRefsLocked() {
-                if let doc = try? read(ref) { out[ref] = doc }
+                do {
+                    if let doc = try read(ref) { out[ref] = doc }
+                } catch {
+                    // Still skipped (one bad note must not hide the rest), but never silently.
+                    FileHandle.standardError.write(Data("flamingo: skipped unreadable note \(ref.relativePath): \(error.localizedDescription)\n".utf8))
+                }
             }
             return out
         }
@@ -269,6 +276,10 @@ public final class SidecarStore: @unchecked Sendable {
         // (about 90 ms for 1,400 notes) and, only if some note lost its file, a walk of the
         // whole vault for identities. A thought saved meanwhile waits for the moves alone.
         // Everything is checked again under the lock before a note moves.
+        //
+        // The walk stays vault-wide on purpose: a renamed or moved file can land anywhere,
+        // and an xattr can only be found by visiting the file. It runs only when a note is
+        // orphaned, and `VaultScanner`'s ignore rules keep it off caches and build output.
         var orphans: [(ref: FileRef, id: UUID)] = []
         for ref in try sidecarRefs() where !vault.existsExactly(ref) {
             if let id = try? document(for: ref)?.id { orphans.append((ref, id)) }
@@ -291,6 +302,19 @@ public final class SidecarStore: @unchecked Sendable {
     }
 
     // MARK: - Private
+
+    /// One note's `id:` as last read, with the stamp of the file it was read from.
+    private struct NoteClaim {
+        struct Stamp: Equatable {
+            let inode: UInt64, size: Int64, seconds: Int, nanoseconds: Int
+            init(_ st: stat) {
+                inode = UInt64(st.st_ino); size = Int64(st.st_size)
+                seconds = Int(st.st_mtimespec.tv_sec); nanoseconds = Int(st.st_mtimespec.tv_nsec)
+            }
+        }
+        let stamp: Stamp
+        let id: UUID?
+    }
 
     private func locked<T>(_ body: () throws -> T) throws -> T {
         lock.lock(); defer { lock.unlock() }
@@ -317,7 +341,7 @@ public final class SidecarStore: @unchecked Sendable {
         guard vault.exists(ref) else { return SidecarDocument(target: ref, id: nil, comments: []) }
         let url = vault.url(for: ref)
         if let carried = try? FileIdentity.existingID(for: url) {
-            for other in try sidecarRefsLocked() where other != ref {
+            for other in try notesClaiming(carried) where other != ref {
                 guard let doc = try? read(other), doc.id == carried else { continue }
                 if !vault.existsExactly(other) {
                     _ = try moveMatchingLocked(from: other, to: ref, identity: carried)
@@ -330,6 +354,29 @@ public final class SidecarStore: @unchecked Sendable {
             }
         }
         return SidecarDocument(target: ref, id: identity(of: ref), comments: [])
+    }
+
+    /// Notes whose `id:` is `id`. Each note is parsed once and again only when its inode, size
+    /// or modification time changes (atomic writes give a new inode), so finding the note a
+    /// file should adopt costs a `stat` per note under the lock rather than a read and parse.
+    /// The stamps also catch notes changed by another store, another process or by hand.
+    /// Callers re-read every match before trusting it. Call under `locked`.
+    private func notesClaiming(_ id: UUID) throws -> [FileRef] {
+        let root = vault.notesDir.path + "/"
+        var current: [FileRef: NoteClaim] = [:]
+        var matches: [FileRef] = []
+        for ref in try sidecarRefsLocked() {
+            var st = stat()
+            guard lstat(root + ref.relativePath + ".md", &st) == 0 else { continue }
+            let stamp = NoteClaim.Stamp(st)
+            let claimed: UUID?
+            if let known = noteClaims[ref], known.stamp == stamp { claimed = known.id }
+            else { claimed = (try? read(ref))?.id }
+            current[ref] = NoteClaim(stamp: stamp, id: claimed)
+            if claimed == id { matches.append(ref) }
+        }
+        noteClaims = current
+        return matches
     }
 
     /// The file's identity, stamping it if needed. Nil when the file is missing or
@@ -458,11 +505,19 @@ public final class SidecarStore: @unchecked Sendable {
 /// An advisory `flock` so two processes (the app and `flamingo-index --watch`) never
 /// interleave a read-modify-write on the same note. Best effort: if the lock file cannot
 /// be created (read-only volume) operations proceed unlocked.
+///
+/// Never an unbounded wait: the lock is tried without blocking, with a pause between tries
+/// that grows from 1 ms to 50 ms (a waiter never spins), and after `timeout` the operation
+/// throws `SidecarError.busy` instead of hanging its caller, which may be the main thread.
 final class ProcessLock: @unchecked Sendable {
     private let path: String
+    private let timeout: TimeInterval
     private var fd: Int32 = -1
 
-    init(path: String) { self.path = path }
+    init(path: String, timeout: TimeInterval = 5) {
+        self.path = path
+        self.timeout = timeout
+    }
 
     deinit { if fd >= 0 { close(fd) } }
 
@@ -471,8 +526,25 @@ final class ProcessLock: @unchecked Sendable {
             try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
             fd = open(path, O_RDONLY | O_CREAT | O_CLOEXEC, 0o644)
         }
-        guard fd >= 0, flock(fd, LOCK_EX) == 0 else { return try body() }
+        guard fd >= 0, try acquire() else { return try body() }
         defer { flock(fd, LOCK_UN) }
         return try body()
+    }
+
+    /// True once the lock is held; false if `flock` itself fails (an unsupported volume),
+    /// which keeps the old best-effort behaviour. Throws `busy` when another holder outlasts
+    /// the timeout.
+    private func acquire() throws -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds + UInt64(max(0, timeout) * 1_000_000_000)
+        var pause: useconds_t = 1_000
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            if code == EINTR { continue }
+            guard code == EWOULDBLOCK else { return false }
+            guard DispatchTime.now().uptimeNanoseconds < deadline else { throw SidecarError.busy(path: path) }
+            usleep(pause)
+            pause = min(pause * 2, 50_000)
+        }
+        return true
     }
 }
