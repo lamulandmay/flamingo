@@ -12,7 +12,7 @@ import FlamingoCore
 ///     postnote com.flamingo.qa "focus ThoughtNSTextView"
 ///     postnote com.flamingo.qa "thought see [[q3-model.xlsx]]"
 ///     postnote com.flamingo.qa "open decks/q3.pptx"     jump to a file, as a click would
-///     postnote com.flamingo.qa "flags cmd opt"          hold ⌘⌥ (the recent-files ring); "flags none" releases
+///     postnote com.flamingo.qa "flags opt shift"        hold ⌥⇧ (the recent-files ring); "flags none" releases
 ///     postnote com.flamingo.qa "radial 90 80"           pointer 80 pt clockwise from 12 o'clock, 90°; "radial center"
 ///     postnote com.flamingo.qa "radial origin 400 300"  where the next ring opens (window coordinates, y down)
 ///     postnote com.flamingo.qa "tile thirds"            a layout: single halves thirds mainPlusStack grid
@@ -116,7 +116,7 @@ enum QAHook {
             runTiling(parts[0], parts[1], state)
             return
         }
-        // `flags cmd opt` presses ⌘⌥ for the recent-files ring, `flags none` lets go. Synthesized
+        // `flags opt shift` presses ⌥⇧ for the recent-files ring, `flags none` lets go. Synthesized
         // events never reach a local monitor, so these call the controller directly.
         if parts[0] == "flags" {
             var flags: NSEvent.ModifierFlags = []

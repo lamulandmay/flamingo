@@ -57,6 +57,7 @@ final class GestureTests: XCTestCase {
     private var clock: TimeInterval = 100
     private var animationStarts = 0
     private var panning: [Bool] = []
+    private var ticks = 0
 
     /// Node 0 sits at the view center, node 1 at world (50, 0) → screen (250, 150).
     private let center = CGPoint(x: 200, y: 150)
@@ -71,6 +72,8 @@ final class GestureTests: XCTestCase {
         clock = 100
         animationStarts = 0
         panning = []
+        ticks = 0
+        recognizer.onPointerReachedNode = { [unowned self] in self.ticks += 1 }
         recognizer.schedule = { [unowned self] delay, work in self.scheduled.append((delay, work)) }
         recognizer.now = { [unowned self] in self.clock }
         recognizer.doubleClickInterval = { 0.4 }
@@ -350,6 +353,30 @@ final class GestureTests: XCTestCase {
         recognizer.mouseExited()
         recognizer.mouseExited()
         XCTAssertEqual(target.calls, [.hover(0), .hover(nil), .hover(1), .hover(nil)])
+    }
+
+    func testPointerTicksOnReachingEachNode() {
+        recognizer.mouseMoved(to: center)
+        recognizer.mouseMoved(to: CGPoint(x: 202, y: 151))   // still on node 0
+        XCTAssertEqual(ticks, 1)
+        recognizer.mouseMoved(to: other)                     // straight onto node 1
+        XCTAssertEqual(ticks, 2)
+        recognizer.mouseMoved(to: empty)                     // leaving is silent
+        recognizer.mouseExited()
+        XCTAssertEqual(ticks, 2)
+        recognizer.mouseMoved(to: other)                     // coming back is another crossing
+        XCTAssertEqual(ticks, 3)
+    }
+
+    func testNoTickWhenANodeSlidesUnderAStillPointer() {
+        target.camera = GraphCamera(center: CGPoint(x: 50, y: 0), zoom: 1)
+        recognizer.mouseMoved(to: center)
+        XCTAssertEqual(ticks, 1)
+        recognizer.scroll(GraphScrollInput(location: center, delta: CGSize(width: 50, height: 0),
+                                           precise: true, phase: .began))
+        runScheduled(delay: GraphGestureRecognizer.hoverSettleDelay)
+        XCTAssertEqual(target.calls.last, .hover(0))
+        XCTAssertEqual(ticks, 1)
     }
 
     // MARK: Keys

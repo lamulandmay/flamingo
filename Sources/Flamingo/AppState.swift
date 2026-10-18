@@ -224,7 +224,7 @@ final class AppState: ObservableObject {
     @Published var trailEnabled = TrailStore.isEnabled { didSet { TrailStore.isEnabled = trailEnabled; recents.refreshSoon(); recordSetting("Record Trail", before: oldValue, after: trailEnabled) { [weak self] in self?.trailEnabled = $0 } } }
 
     private(set) var session: VaultSession?
-    /// Recent files for the ⌘⌥ ring and Go → Recent Files (AppState+Recents.swift). Separate
+    /// Recent files for the ⌥⇧ ring and Go → Recent Files (AppState+Recents.swift). Separate
     /// objects, so their updates redraw only the ring, not the window.
     let recents = RecentFilesModel()
     let radial = RadialMenuModel()

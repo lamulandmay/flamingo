@@ -69,8 +69,10 @@ public enum Chime {
         Feedback.haptic(final ? .threshold : .detent)
     }
 
+    /// Silent under XCTest: a test run must never chime on the user's speakers.
     nonisolated static var soundsEnabled: Bool {
-        (UserDefaults.standard.object(forKey: "com.apple.sound.uiaudio.enabled") as? Int).map { $0 != 0 } ?? true
+        guard NSClassFromString("XCTestCase") == nil else { return false }
+        return (UserDefaults.standard.object(forKey: "com.apple.sound.uiaudio.enabled") as? Int).map { $0 != 0 } ?? true
     }
 
     /// A soft mallet on a small bell. The fundamental rings for about a second; a quiet

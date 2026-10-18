@@ -60,7 +60,7 @@ Q briefing close; sleep 0.6
 
 echo "== the ring does not open over the briefing"
 Q briefing; sleep 1.2
-N=$(grep -c "radial: open" $LOG); W=1 Q flags cmd opt; Q flags none
+N=$(grep -c "radial: open" $LOG); W=1 Q flags opt shift; Q flags none
 [[ $(grep -c "radial: open" $LOG) == $N ]] && echo "ok   no ring while the briefing is up" || echo "FAIL ring opened over the briefing"
 Q briefing close; sleep 0.6
 

@@ -3,12 +3,12 @@ import XCTest
 
 final class RadialHoldMachineTests: XCTestCase {
     typealias M = RadialHoldMachine
-    private let both: M.Modifiers = [.command, .option]
+    private let both: M.Modifiers = [.option, .shift]
 
-    /// A machine that has seen ⌘ then ⌥ and been ticked open with `count` files.
+    /// A machine that has seen ⌥ then ⌥⇧ and been ticked open with `count` files.
     private func opened(count: Int = 8, at t: TimeInterval = 0) -> M {
         var m = M()
-        _ = m.handle(.flags([.command], buttonsDown: false, eligible: true), now: t)
+        _ = m.handle(.flags([.option], buttonsDown: false, eligible: true), now: t)
         _ = m.handle(.flags(both, buttonsDown: false, eligible: true), now: t)
         _ = m.handle(.tick(itemCount: count), now: t + 0.3)
         return m
@@ -24,31 +24,34 @@ final class RadialHoldMachineTests: XCTestCase {
         return m.highlighted
     }
 
-    func testArmsOnlyOnExactCommandOptionReachedFromFewer() {
+    func testArmsOnlyOnExactOptionShiftReachedFromFewer() {
         var m = M()
-        XCTAssertEqual(m.handle(.flags([.command], buttonsDown: false, eligible: true), now: 0).effects, [])
+        XCTAssertEqual(m.handle(.flags([.option], buttonsDown: false, eligible: true), now: 0).effects, [])
         let r = m.handle(.flags(both, buttonsDown: false, eligible: true), now: 0.1)
         XCTAssertEqual(r.effects, [.schedule(0.30)])
         XCTAssertTrue(r.passThrough, "flagsChanged is never consumed")
         XCTAssertEqual(m.phase, .armed)
 
-        // ⌘⌥⇧ → ⌘⌥ doesn't count.
+        // ⌘⌥⇧ → ⌥⇧ doesn't count.
         var n = M()
         _ = n.handle(.flags([.command, .option, .shift], buttonsDown: false, eligible: true), now: 0)
         XCTAssertEqual(n.handle(.flags(both, buttonsDown: false, eligible: true), now: 0.1).effects, [])
         XCTAssertEqual(n.phase, .idle)
 
-        // ⌘⌥⌃ is not exactly ⌘⌥.
+        // ⌃⌥⇧ is not exactly ⌥⇧, and neither is the old ⌘⌥ (Rectangle's).
         var o = M()
-        XCTAssertEqual(o.handle(.flags([.command, .option, .control], buttonsDown: false, eligible: true), now: 0).effects, [])
+        XCTAssertEqual(o.handle(.flags([.option, .shift, .control], buttonsDown: false, eligible: true), now: 0).effects, [])
+        var q = M()
+        _ = q.handle(.flags([.command], buttonsDown: false, eligible: true), now: 0)
+        XCTAssertEqual(q.handle(.flags([.command, .option], buttonsDown: false, eligible: true), now: 0.1).effects, [])
     }
 
     func testNeverArmsWithAMouseButtonDownOrWhenIneligible() {
         var m = M()
-        _ = m.handle(.flags([.command], buttonsDown: true, eligible: true), now: 0)
+        _ = m.handle(.flags([.option], buttonsDown: true, eligible: true), now: 0)
         XCTAssertEqual(m.handle(.flags(both, buttonsDown: true, eligible: true), now: 0.1).effects, [])
         var n = M()
-        _ = n.handle(.flags([.command], buttonsDown: false, eligible: false), now: 0)
+        _ = n.handle(.flags([.option], buttonsDown: false, eligible: false), now: 0)
         XCTAssertEqual(n.handle(.flags(both, buttonsDown: false, eligible: false), now: 0.1).effects, [])
         XCTAssertEqual(n.phase, .idle)
     }
@@ -57,11 +60,11 @@ final class RadialHoldMachineTests: XCTestCase {
         let cases: [(M.Input, String)] = [
             (.keyDown(34), "key"), (.keyDown(53), "key"), (.mouseDown, "mouse"), (.scroll, "scroll"),
             (.flags([.command, .option, .shift], buttonsDown: false, eligible: true), "flags"),
-            (.flags([.command], buttonsDown: false, eligible: true), "flags"),
+            (.flags([.shift], buttonsDown: false, eligible: true), "flags"),
         ]
         for (input, reason) in cases {
             var m = M()
-            _ = m.handle(.flags([.command], buttonsDown: false, eligible: true), now: 0)
+            _ = m.handle(.flags([.option], buttonsDown: false, eligible: true), now: 0)
             _ = m.handle(.flags(both, buttonsDown: false, eligible: true), now: 0)
             let r = m.handle(input, now: 0.1)
             XCTAssertEqual(r.effects, [.disarm(reason: reason)])
@@ -73,7 +76,7 @@ final class RadialHoldMachineTests: XCTestCase {
 
     func testTickAfterHoldDelayOpens() {
         var m = M()
-        _ = m.handle(.flags([.command], buttonsDown: false, eligible: true), now: 0)
+        _ = m.handle(.flags([.option], buttonsDown: false, eligible: true), now: 0)
         _ = m.handle(.flags(both, buttonsDown: false, eligible: true), now: 0)
         let r = m.handle(.tick(itemCount: 8), now: 0.3)
         XCTAssertEqual(r.effects, [.present])
@@ -83,12 +86,12 @@ final class RadialHoldMachineTests: XCTestCase {
 
     func testTickWithNoFilesOrTooEarlyDoesNotOpen() {
         var m = M()
-        _ = m.handle(.flags([.command], buttonsDown: false, eligible: true), now: 0)
+        _ = m.handle(.flags([.option], buttonsDown: false, eligible: true), now: 0)
         _ = m.handle(.flags(both, buttonsDown: false, eligible: true), now: 0)
         XCTAssertEqual(m.handle(.tick(itemCount: 0), now: 0.3).effects, [.disarm(reason: "empty")])
         XCTAssertEqual(m.phase, .idle)
         var n = M()
-        _ = n.handle(.flags([.command], buttonsDown: false, eligible: true), now: 0)
+        _ = n.handle(.flags([.option], buttonsDown: false, eligible: true), now: 0)
         _ = n.handle(.flags(both, buttonsDown: false, eligible: true), now: 0)
         XCTAssertEqual(n.handle(.tick(itemCount: 3), now: 0.1).effects, [.disarm(reason: "flags")])
     }
@@ -151,7 +154,7 @@ final class RadialHoldMachineTests: XCTestCase {
     }
 
     func testReleasingInASlotCommitsAndInTheDeadZoneCloses() {
-        for released: M.Modifiers in [[.option], [.command], []] {
+        for released: M.Modifiers in [[.option], [.shift], []] {
             var m = opened()
             _ = m.handle(.pointer(offset(135)), now: 1)
             let r = m.handle(.flags(released, buttonsDown: false, eligible: true), now: 2)

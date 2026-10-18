@@ -1,5 +1,5 @@
 // Posts one QA command to a running Flamingo started with FLAMINGO_DEBUG=1, as a distributed
-// notification: `qa-post <channel> <command…>`, e.g. `qa-post qa.radial.1 flags cmd opt`.
+// notification: `qa-post <channel> <command…>`, e.g. `qa-post qa.radial.1 flags opt shift`.
 // The channel is the app's FLAMINGO_QA_CHANNEL (default com.flamingo.qa). See QAHook.swift.
 // Usage: qa-post [channel] command…   (compiled to build/qa-post; see scripts/radial-qa.sh)
 import Foundation

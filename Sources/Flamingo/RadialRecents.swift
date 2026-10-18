@@ -5,21 +5,25 @@ import FlamingoDesign
 
 // MARK: - State machine
 
-/// Hold ⌘⌥ for a ring of recent files. This is the whole decision logic as a pure struct of
-/// inputs and effects, so it can be unit-tested without a window. `RadialRecentsController`
-/// feeds it AppKit events and carries out the effects.
+/// Hold ⌥⇧ for a ring of recent files (not ⌘⌥, which window managers like Rectangle take).
+/// This is the whole decision logic as a pure struct of inputs and effects, so it can be
+/// unit-tested without a window. `RadialRecentsController` feeds it AppKit events and carries
+/// out the effects.
 ///
-/// Idle → armed when the modifiers become exactly ⌘⌥ from fewer. Armed → open when the hold
-/// delay passes with ⌘⌥ still down. Anything else while armed cancels and the event goes on
-/// to the app, so ⌥⌘H/N/I/L/1/3/→ keep working. Open: the pointer picks a slot, releasing ⌘
-/// or ⌥ commits it (or closes, in the dead zone), Esc closes and is consumed, other keys and
-/// clicks close and pass through.
+/// Idle → armed when the modifiers become exactly ⌥⇧ from fewer. Armed → open when the hold
+/// delay passes with ⌥⇧ still down. Anything else while armed cancels and the event goes on
+/// to the app, so ⌥⇧-typed characters and ⌥⇧ shortcuts keep working. Open: the pointer picks
+/// a slot, releasing ⌥ or ⇧ commits it (or closes, in the dead zone), Esc closes and is
+/// consumed, other keys and clicks close and pass through.
 struct RadialHoldMachine {
     struct Modifiers: OptionSet, Equatable {
         let rawValue: Int
         static let command = Modifiers(rawValue: 1), option = Modifiers(rawValue: 2)
         static let shift = Modifiers(rawValue: 4), control = Modifiers(rawValue: 8)
     }
+
+    /// The held chord that opens the ring.
+    static let chord: Modifiers = [.option, .shift]
 
     enum Input {
         /// `eligible`: the controller's check that a ring may open now (main window key, no
@@ -71,15 +75,15 @@ struct RadialHoldMachine {
             modifiers = flags
             switch phase {
             case .idle:
-                // Exactly ⌘⌥, reached by adding to what was held: ⌘⌥⇧ → ⌘⌥ doesn't count.
-                if flags == [.command, .option], before != flags, before.isSubset(of: flags), eligible, !buttonsDown {
+                // Exactly ⌥⇧, reached by adding to what was held: ⌘⌥⇧ → ⌥⇧ doesn't count.
+                if flags == Self.chord, before != flags, before.isSubset(of: flags), eligible, !buttonsDown {
                     phase = .armed; armedAt = now
                     effects.append(.schedule(holdDelay))
                 }
             case .armed:
                 if flags != before { phase = .idle; effects.append(.disarm(reason: "flags")) }
             case .open:
-                if !flags.contains(.command) || !flags.contains(.option) {
+                if !flags.isSuperset(of: Self.chord) {
                     phase = .idle
                     if let h = highlighted { effects.append(.commit(h)) }
                     else { effects.append(.dismiss(animated: true, reason: "released")) }
@@ -115,7 +119,7 @@ struct RadialHoldMachine {
 
         case let .tick(count):
             guard phase == .armed else { return ([], true) }
-            guard modifiers == [.command, .option], now - armedAt >= holdDelay - 0.01, count > 0 else {
+            guard modifiers == Self.chord, now - armedAt >= holdDelay - 0.01, count > 0 else {
                 phase = .idle
                 return ([.disarm(reason: count > 0 ? "flags" : "empty")], true)
             }
@@ -213,7 +217,7 @@ final class RadialMenuModel: ObservableObject {
 
 // MARK: - Controller
 
-/// Watches ⌘⌥ inside Flamingo only (a local monitor), so no Input Monitoring permission is
+/// Watches ⌥⇧ inside Flamingo only (a local monitor), so no Input Monitoring permission is
 /// needed, and drives `RadialHoldMachine`. It never consumes `flagsChanged`, so the graph's
 /// ⌥ handling still sees them.
 @MainActor
@@ -392,7 +396,7 @@ final class RadialRecentsController {
 
     // MARK: QA
 
-    /// `flags cmd opt` / `flags none`.
+    /// `flags opt shift` / `flags none`.
     func qaIngest(flags: NSEvent.ModifierFlags) {
         qaKeyWindowOverride = true
         let mods = Self.modifiers(of: flags)

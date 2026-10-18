@@ -2,7 +2,7 @@ import SwiftUI
 import FlamingoCore
 import FlamingoDesign
 
-/// The ⌘⌥ ring: a round plate with up to eight recent files around a hub that names the
+/// The ⌥⇧ ring: a round plate with up to eight recent files around a hub that names the
 /// highlighted one. Slot 0 is at 12 o'clock and the rest follow clockwise in rank order. With
 /// four files or fewer the four compass slots are drawn larger. No labels; the hub shows only
 /// the file's own name, folder and times. It never takes hits, so clicks reach the app.

@@ -202,7 +202,7 @@ private struct GeneralSettings: View {
                         .foregroundStyle(Theme.Color.textSecondary)
                 }
             }
-            footnote("How long ⌘⌥ is held before the ring opens.")
+            footnote("How long ⌥⇧ is held before the ring opens.")
 
             Divider().padding(.vertical, Theme.Space.s)
 

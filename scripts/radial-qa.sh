@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Headless QA for the hold-⌘⌥ recent-files ring (plan 14, steps A1–A8). Runs a copy of
+# Headless QA for the hold-⌥⇧ recent-files ring (plan 14, steps A1–A8). Runs a copy of
 # build/Flamingo.app on a copy of fixtures/vault under its own bundle id, so the user's real
 # settings are never touched, drives it with build/qa-post and saves screenshots.
 # Usage: scripts/radial-qa.sh <scratch-dir> [dark|light] [files-to-open (default 10)]
@@ -40,7 +40,7 @@ W=1.5 Q open ${FILES[$COUNT]}   # the last is the active file, left out of the r
 Q radial origin 560 380
 
 echo "A2 hold: ring opens"
-Q flags cmd opt; sleep 0.8; shot ring-open
+Q flags opt shift; sleep 0.8; shot ring-open
 grep "radial:" $LOG | tail -4
 echo "A3 flick right"
 Q radial 90; sleep 0.4; shot ring-slot
@@ -50,15 +50,15 @@ echo "A4 release: commits"
 BEFORE=$(count "radial: commit")
 Q flags none; sleep 0.8; shot after-commit
 grep "radial: commit" $LOG | tail -1
-echo "A5 ⌥⌘I within the hold delay cancels, the shortcut still works"
-W=0.05 Q flags cmd opt; Q key 34 cmd opt; sleep 0.5; shot after-key
+echo "A5 a key within the hold delay (⌥⇧I) cancels and goes on to the app"
+W=0.05 Q flags opt shift; Q key 34 opt shift; sleep 0.5; shot after-key
 Q flags none
 grep "radial:" $LOG | tail -3
 echo "A6 Esc closes and keeps the file"
-Q flags cmd opt; sleep 0.8; Q radial 90; Q key 53; Q flags none; sleep 0.5
+Q flags opt shift; sleep 0.8; Q radial 90; Q key 53; Q flags none; sleep 0.5
 grep "radial:" $LOG | tail -4
 echo "A7 release in the dead zone opens nothing"
-Q flags cmd opt; sleep 0.8; Q radial center; Q flags none; sleep 0.5
+Q flags opt shift; sleep 0.8; Q radial center; Q flags none; sleep 0.5
 grep "radial:" $LOG | tail -3
 echo "lag:"; grep "worst lag" $LOG | tail -3
 kill $PID 2>/dev/null; wait $PID 2>/dev/null

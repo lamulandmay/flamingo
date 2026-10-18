@@ -79,6 +79,10 @@ final class GraphGestureRecognizer {
     /// A keyboard zoom animation started: call `stepAnimation()` every display frame until it
     /// returns false.
     var onAnimationStarted: () -> Void = {}
+    /// The pointer itself moved onto a node: the lightest tick, landing with the frame that
+    /// lights its neighborhood up. Not for hover that changes under a still pointer (a pan,
+    /// a zoom, a new layout), which the hand didn't do.
+    var onPointerReachedNode: () -> Void = { Feedback.haptic(.detent) }
 
     // MARK: State
 
@@ -222,7 +226,9 @@ final class GraphGestureRecognizer {
     func mouseMoved(to p: CGPoint) {
         pointer = p
         guard case .idle = press else { return }
+        let before = hovered
         refreshHover(at: p)
+        if hovered != nil, hovered != before { onPointerReachedNode() }
     }
 
     func mouseExited() {

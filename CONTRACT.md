@@ -211,7 +211,7 @@ One `TrailEvent` JSON per line, append-only. `opened`, `commented`, `searched`, 
 | ⌘⌥I | Toggle the comments rail |
 | ⌘[ ⌘] | Back, forward |
 | ⌘↑ ⌘↓ or ⌥↑ ⌥↓ | Previous/next anchor (page, slide) in the preview |
-| ⌘⌥ (hold) | Recent files: a ring around the pointer; flick toward one, release to open it |
+| ⌥⇧ (hold) | Recent files: a ring around the pointer; flick toward one, release to open it |
 | ⌘\ | Split view: the file again beside itself, or back to one pane |
 | ⌃⌥⌘1–5 | Layouts: single, two side by side, three columns, one and two, four |
 | ⌥⌘→ ⌥⌘← | Next, previous pane |

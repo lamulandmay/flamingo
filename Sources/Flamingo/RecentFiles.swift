@@ -19,7 +19,7 @@ struct RecentItem: Identifiable, Equatable {
     var id: String { file.relativePath }
 }
 
-/// The ranked recents behind the ⌘⌥ ring and Go → Recent Files. Everything is computed off the
+/// The ranked recents behind the ⌥⇧ ring and Go → Recent Files. Everything is computed off the
 /// main thread, 400 ms after the session's own trail changes; the ring only reads `items`.
 /// Held as `state.recents`, not published on `AppState`, so only the ring and the menu observe it.
 @MainActor
