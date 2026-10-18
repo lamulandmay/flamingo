@@ -10,7 +10,8 @@ extension IndexStore {
     /// `link` edges point from the commented file to the linked one; weight is the number
     /// of comments making that link. Wikilinks in the body of Markdown notes are edges from
     /// the note, weight 1, as in Obsidian. `extraEdges` between known nodes are merged in.
-    public func buildGraph(extraEdges: [Graph.Edge] = []) throws -> Graph {
+    /// `mentionsReuseFor` is `mentionEdges`'.
+    public func buildGraph(extraEdges: [Graph.Edge] = [], mentionsReuseFor: TimeInterval = 0) throws -> Graph {
         try requireVault()   // never recreate `.flamingo` in a folder that was moved away
         let (paths, counts, linking, written) = try read(snapshot: true) { db in
             (try db.query("SELECT path FROM files ORDER BY path") { $0.string(0) },
@@ -67,7 +68,7 @@ extension IndexStore {
         }
         addLinks(linking, kind: .link)
         addLinks(written, kind: .related)
-        for (key, w) in try mentionEdges(paths: paths) where nodes[key.source] != nil && nodes[key.target] != nil {
+        for (key, w) in try mentionEdges(paths: paths, reuseFor: mentionsReuseFor) where nodes[key.source] != nil && nodes[key.target] != nil {
             weights[key, default: 0] += w
         }
         for e in extraEdges where e.source != e.target && nodes[e.source] != nil && nodes[e.target] != nil {

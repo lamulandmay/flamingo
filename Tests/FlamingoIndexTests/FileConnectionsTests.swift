@@ -88,4 +88,17 @@ final class FileConnectionsTests: IndexTestCase {
         XCTAssertTrue(found.text.contains("q3-model-2026"), found.text)
         XCTAssertNil(try store.mentionExcerpt(in: memo, naming: FileRef(relativePath: "x.md")), "a short or generic name is never searched")
     }
+
+    func testMentionEdgesAreReusedOnlyWithinTheirWindow() throws {
+        _ = try write("q3-model-2026.fltest", "numbers")
+        _ = try write("memo.fltest", "The board numbers come from q3-model-2026 and nothing else.")
+        try store.reindex()
+        let paths = ["memo.fltest", "q3-model-2026.fltest"]
+        XCTAssertEqual(try store.mentionEdges(paths: paths).count, 1)
+        _ = try write("later.fltest", "Later notes: see q3-model-2026 for the numbers.")
+        try store.reindex()
+        let all = paths + ["later.fltest"]
+        XCTAssertEqual(try store.mentionEdges(paths: all, reuseFor: 60).count, 1, "a recent answer is reused")
+        XCTAssertEqual(try store.mentionEdges(paths: all).count, 2, "without reuse it is worked out again")
+    }
 }

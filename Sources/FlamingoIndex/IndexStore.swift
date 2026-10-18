@@ -101,6 +101,7 @@ public final class IndexStore: @unchecked Sendable {
     let writeLock = NSRecursiveLock()
     let embedding = EmbeddingState()
     let maintenance = MaintenanceState()
+    let mentions = MentionMemo()
     private let readLock = NSLock()
     private let cacheLock = NSLock()
     private var pathCache: [String]?

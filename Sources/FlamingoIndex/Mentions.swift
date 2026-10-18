@@ -6,7 +6,21 @@ extension IndexStore {
     /// q3-model.xlsx" in a memo, a deck that cites the brief, a note that says "arc launch plan".
     /// One FTS phrase query per distinctively named file; names that are too short, generic, or
     /// that hit everywhere are skipped so the graph gains signal, not noise.
-    func mentionEdges(paths: [String]) throws -> [EdgeKey: Double] {
+    ///
+    /// With `reuseFor`, an answer younger than that many seconds is returned as it was: on a
+    /// whole disk this is thousands of phrase queries, most of a graph build, and a disk's
+    /// churn (logs, caches) rarely names anything. Edges to files gone since drop out where
+    /// the caller keeps only edges between nodes it has.
+    func mentionEdges(paths: [String], reuseFor maxAge: TimeInterval = 0) throws -> [EdgeKey: Double] {
+        if maxAge > 0, let last = mentions.lock.withLock({ mentions.last }), Date().timeIntervalSince(last.made) < maxAge {
+            return last.edges
+        }
+        let edges = try computeMentionEdges(paths: paths)
+        mentions.lock.withLock { mentions.last = (Date(), edges) }
+        return edges
+    }
+
+    private func computeMentionEdges(paths: [String]) throws -> [EdgeKey: Double] {
         var candidates: [(path: String, phrase: String)] = []
         for p in paths where !Self.isMachineListing(p) {
             guard let phrase = Self.mentionPhrase(for: p) else { continue }
@@ -123,4 +137,10 @@ extension IndexStore {
         guard !distinctive.isEmpty else { return nil }
         return "\"" + tokens.joined(separator: " ").replacingOccurrences(of: "\"", with: "") + "\""
     }
+}
+
+/// The last `mentionEdges` answer and when it was worked out.
+final class MentionMemo: @unchecked Sendable {
+    let lock = NSLock()
+    var last: (made: Date, edges: [EdgeKey: Double])?
 }

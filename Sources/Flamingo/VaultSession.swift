@@ -814,11 +814,12 @@ final class VaultSession {
         let g = (try? await onGraph { () -> Graph? in
             var drawn = Graph()
             do {
-                // Similar content is quadratic in the files embedded: a disk reuses it a while.
+                // Similar content is quadratic in the files embedded and mentions are thousands of
+                // phrase queries: a disk reuses both a while.
                 let reuse = memo.files > bigVault ? Self.similarReuse : 0
                 let extra = ((try? trail.edges()) ?? []) + ((try? connections.edges()) ?? [])
                     + ((try? index.similarEdges(reuseFor: reuse)) ?? [])
-                let built = try index.buildGraph(extraEdges: extra)
+                let built = try index.buildGraph(extraEdges: extra, mentionsReuseFor: reuse)
                 memo.files = built.nodes.count
                 // A dismissed suggestion is gone from the graph too; explicit edges always stay.
                 let hidden = dismissed.keys()
@@ -848,7 +849,7 @@ final class VaultSession {
         return elapsed >= rest ? .zero : rest - elapsed
     }
 
-    /// Seconds a disk's similar-content edges are reused before they are worked out again.
+    /// Seconds a disk's similar-content and mention edges are reused before they are worked out again.
     nonisolated static let similarReuse: TimeInterval = 120
 
     /// Past `orphanLimit` files, files with no relationship and no thought are dropped.
