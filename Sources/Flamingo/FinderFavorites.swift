@@ -80,9 +80,22 @@ enum FinderFavorites {
         }
     }
 
+    /// Made once per place and size: the rows redraw on every navigation, and a new image
+    /// (or a read of the Applications template from disk) each time made going back slower.
+    @MainActor private static var images: [String: NSImage] = [:]
+
     /// Finder's own sidebar glyph for a place: the same SF Symbols, and its Applications
     /// glyph (which has no public symbol) from the system's template.
+    @MainActor
     static func image(for url: URL, size: CGFloat = Theme.Size.icon) -> NSImage {
+        let key = "\(size) \(url.path)"
+        if let image = images[key] { return image }
+        let image = makeImage(for: url, size: size)
+        images[key] = image
+        return image
+    }
+
+    private static func makeImage(for url: URL, size: CGFloat) -> NSImage {
         let config = NSImage.SymbolConfiguration(pointSize: size, weight: .regular)
         if url.path == "/Applications" || url.path == FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications").path,
            let image = applicationsGlyph(size: size) {

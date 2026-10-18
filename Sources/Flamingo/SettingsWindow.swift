@@ -166,6 +166,8 @@ private struct GeneralSettings: View {
     @State private var appearance = Defaults.appearance
     @State private var inboxEachDay = Defaults.briefingAutoOpen
     @State private var holdDelay = Defaults.radialHoldDelay
+    @State private var writingFont = Defaults.writingFont
+    @State private var writingSize = Defaults.writingSize
 
     var body: some View {
         Form {
@@ -199,8 +201,22 @@ private struct GeneralSettings: View {
                 }
             }
             footnote("How long ⌘⌥ is held before the ring opens.")
+
+            Divider().padding(.vertical, Theme.Space.s)
+
+            Picker("Writing font:", selection: $writingFont) {
+                ForEach(WritingFont.allCases, id: \.self) { Text($0.title).font(Font($0.font(13))).tag($0) }
+            }
+            .fixedSize()
+            Picker("Text size:", selection: $writingSize) {
+                ForEach(WritingFont.sizes, id: \.self) { Text("\(Int($0)) pt").tag($0) }
+            }
+            .fixedSize()
+            footnote("Markdown notes. Code and plain text stay monospaced.")
         }
         .formStyle(.columns)
+        .onChange(of: writingFont) { Defaults.writingFont = writingFont; NotificationCenter.default.post(name: .writingFontChanged, object: nil) }
+        .onChange(of: writingSize) { Defaults.writingSize = writingSize; NotificationCenter.default.post(name: .writingFontChanged, object: nil) }
         .onChange(of: appearance) { Defaults.appearance = appearance; appearance.apply() }
         .onChange(of: inboxEachDay) { Defaults.briefingAutoOpen = inboxEachDay }
         .onChange(of: holdDelay) {

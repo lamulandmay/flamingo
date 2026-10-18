@@ -2,17 +2,14 @@ import AppKit
 import SwiftUI
 import FlamingoDesign
 
-/// Geometry that changes every frame while someone drags a divider, resizes the window or
-/// swipes. Kept out of `AppState` so those frames redraw the layout, not every view that
-/// reads the shell's state. Widths persist when a drag ends.
+/// Geometry that changes every frame while someone drags a divider or resizes the window.
+/// Kept out of `AppState` so those frames redraw the layout, not every view that reads the
+/// shell's state. Widths persist when a drag ends. (A swipe's frames are `SwipeMotion`'s.)
 @MainActor
 final class PanelLayout: ObservableObject {
     @Published var leftWidth = Defaults.sidebarWidth
     @Published var rightWidth = Defaults.inspectorWidth
     @Published var windowWidth: CGFloat = 1200
-    @Published var swipeAmount: CGFloat = 0
-    /// After a swipe commits: where the new place starts, -1 left of its rest, 1 right; eases to 0.
-    @Published var swipeArrival: CGFloat = 0
 
     static let left: ClosedRange<CGFloat> = 180...480
     static let right: ClosedRange<CGFloat> = 260...720

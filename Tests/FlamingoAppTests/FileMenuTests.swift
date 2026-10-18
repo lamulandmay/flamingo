@@ -48,6 +48,17 @@ final class FileMenuTests: XCTestCase {
         }
     }
 
+    func testTheListsOwnItemsComeBeforeMoveToTrash() throws {
+        try withState { state, root in
+            let menu = NSMenu()
+            FileMenu.build(menu, url: root.appendingPathComponent("a.md"), isFolder: false, state: state,
+                           host: FileMenu.Host(open: {}, rename: nil, quickLook: nil, window: nil,
+                                               extra: [NSMenuItem(title: "Sort By", action: nil, keyEquivalent: "")]))
+            let titles = menu.items.filter { !$0.isSeparatorItem }.map(\.title)
+            XCTAssertEqual(titles.suffix(2), ["Sort By", "Move to Trash"])
+        }
+    }
+
     func testAVaultFolderCanTakeNewFilesAndBePinned() throws {
         try withState { state, root in
             let items = titles(root.appendingPathComponent("finance"), folder: true, state: state)

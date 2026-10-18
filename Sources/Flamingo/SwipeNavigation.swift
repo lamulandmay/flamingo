@@ -129,11 +129,13 @@ private func + (a: CGSize, b: CGSize) -> CGSize { CGSize(width: a.width + b.widt
 
 // MARK: - Following a swipe
 
-/// AppKit's swipe tracking callbacks (`trackSwipeEvent`) read the way Safari reads them:
-/// `.ended` means the fingers lifted and the swipe goes through, `.cancelled` that it won't.
-/// AppKit then animates the amount home (±1 or 0) and says `isComplete` last, often in a
-/// callback with no phase, which is where the swipe commits or doesn't. While the fingers are
-/// down (`.began`, `.changed`), crossing `ready` taps once (re-armed below `rearm`).
+/// AppKit's swipe tracking callbacks (`trackSwipeEvent`) read the way Apple's own example
+/// reads them: `.ended` means the fingers lifted and the swipe goes through, `.cancelled` that
+/// it won't, and either one decides it there and then. AppKit would go on animating the
+/// amount home (±1 or 0) for another quarter second before `isComplete`; waiting for that is
+/// what made a swipe feel slow next to Finder. `isComplete` decides only a swipe that never
+/// reported its lift. While the fingers are down (`.began`, `.changed`), crossing `ready`
+/// taps once (re-armed below `rearm`).
 struct SwipeProgress: Equatable {
     enum Output: Equatable { case haptic, commit, cancel }
 
@@ -157,19 +159,21 @@ struct SwipeProgress: Equatable {
     mutating func update(amount: CGFloat, phase: SwipeGate.Phase, complete: Bool) -> [Output] {
         guard !finished else { return [] }
         self.amount = amount
-        if phase == .ended { ended = true }
-        if phase == .cancelled { cancelled = true }
         var out: [Output] = []
         // Only callbacks the fingers drive tap; the settle after a lift comes with no phase.
-        if !lifted, phase == .began || phase == .changed {
+        if phase == .began || phase == .changed {
             if armed, progress >= Self.ready { armed = false; out.append(.haptic) }
             else if !armed, progress < Self.rearm { armed = true }
         }
-        if complete {
+        if phase == .ended || phase == .cancelled {
+            ended = phase == .ended
+            cancelled = phase == .cancelled
             finished = true
-            // Without either phase, where the amount settled says which it was.
-            let commits = cancelled ? false : ended || progress >= 0.5
-            out.append(commits ? .commit : .cancel)
+            out.append(ended ? .commit : .cancel)
+        } else if complete {
+            finished = true
+            // No lift was reported: where the amount settled says which it was.
+            out.append(progress >= 0.5 ? .commit : .cancel)
         }
         return out
     }
@@ -185,8 +189,9 @@ struct SwipeProgress: Equatable {
 
 /// Two-finger swipes go back and forward through history, tracked like Safari: the content
 /// follows the fingers, rubber-banding past a full swipe; an edge chevron fills in and turns
-/// accent with one tap of the trackpad when letting go will commit; after a commit the new
-/// place eases in from the side it was on. Three-finger swipes (when macOS is set that way)
+/// accent with one tap of the trackpad when letting go will commit. The swipe commits the
+/// moment the fingers lift and AppKit's tracking stops there; the new place slides the last
+/// few points in from the side it was on. Three-finger swipes (when macOS is set that way)
 /// commit at once. Sideways scrollers keep the gesture until they rest at the edge; the graph
 /// keeps it always. With FLAMINGO_DEBUG every decision is logged as `swipe:`.
 @MainActor
@@ -336,19 +341,25 @@ final class SwipeNavigator {
         armWatchdog()
         // Past a full swipe the amount rubber-bands; towards no history it can't go at all.
         e.trackSwipeEvent(options: [.lockDirection], dampenAmountThresholdMin: canForward ? -1 : 0,
-                          max: canBack ? 1 : 0) { [weak self] amount, phase, complete, _ in
-            MainActor.assumeIsolated { self?.tracked(id, amount, SwipeGate.Phase(phase), complete) }
+                          max: canBack ? 1 : 0) { [weak self] amount, phase, complete, stop in
+            MainActor.assumeIsolated {
+                // Once decided, AppKit's settle animation is only a wait: stop it.
+                if self?.tracked(id, amount, SwipeGate.Phase(phase), complete) != true { stop.pointee = true }
+            }
         }
     }
 
-    private func tracked(_ id: Int, _ amount: CGFloat, _ phase: SwipeGate.Phase, _ complete: Bool) {
-        guard id == swipeID, var p = progress else { return }
+    /// `false` once the swipe is decided (or isn't this one), so AppKit stops tracking.
+    @discardableResult
+    private func tracked(_ id: Int, _ amount: CGFloat, _ phase: SwipeGate.Phase, _ complete: Bool) -> Bool {
+        guard id == swipeID, var p = progress else { return false }
         let outputs = p.update(amount: amount, phase: phase, complete: complete)
         progress = p
         Log.debug(String(format: "swipe: #%d amount=%.3f %@%@", id, amount, "\(phase)", complete ? " complete" : ""))
-        if !complete { armWatchdog() }
+        if !p.finished { armWatchdog() }
         state.swipeAmount = amount
         for output in outputs { perform(output, back: p.back) }
+        return !p.finished
     }
 
     private func perform(_ output: SwipeProgress.Output, back: Bool) {
@@ -364,7 +375,8 @@ final class SwipeNavigator {
         case .cancel:
             finish()
             Log.debug("swipe: cancelled\(eventsWhileTracking > 0 ? " (\(eventsWhileTracking) events reached the monitor while tracking)" : "")")
-            state.swipeAmount = 0
+            // AppKit no longer animates it home, so the content springs back itself.
+            withAnimation(Theme.Motion.fast.speed(1 / Self.slowdown)) { state.swipeAmount = 0 }
         }
     }
 
@@ -391,19 +403,20 @@ final class SwipeNavigator {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.quietLimit, execute: work)
     }
 
-    /// Back or forward, and the place it lands on eases in from the side it was on.
+    /// Back or forward, and the place it lands on slides the last few points in from the side
+    /// it was on, on the quick spring: it reads as arriving, not as a wait.
     private func commit(back: Bool) {
         if back { state.goBack() } else { state.goForward() }
-        let layout = state.layout
+        let motion = state.swipe
         var still = Transaction()
         still.disablesAnimations = true
         withTransaction(still) {
-            layout.swipeAmount = 0
-            layout.swipeArrival = back ? -1 : 1
+            motion.amount = 0
+            motion.arrival = back ? -1 : 1
         }
         // A frame later, so the starting side is drawn before it eases home.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60) {
-            withAnimation(Theme.Motion.normal.speed(1 / Self.slowdown)) { layout.swipeArrival = 0 }
+            withAnimation(Theme.Motion.fast.speed(1 / Self.slowdown)) { motion.arrival = 0 }
         }
     }
 
@@ -457,22 +470,34 @@ final class SwipeNavigator {
 
 // MARK: - What the content does
 
-/// The content while swiping: it follows the fingers (a quarter of its width at a full swipe,
-/// rubber-banding past that) and fades a little as it leaves; after a commit the new place
-/// eases in from the side it was on. The chevrons ride the edges.
-struct SwipeFollow: ViewModifier {
-    @ObservedObject var layout: PanelLayout
+/// Where the content is while a swipe follows the fingers, and as the new place arrives. Its
+/// own object, so a swipe's frames redraw `SwipeFollow` and nothing else in the window.
+@MainActor
+final class SwipeMotion: ObservableObject {
+    /// +1 is a full back swipe, -1 a full forward one, 0 at rest.
+    @Published var amount: CGFloat = 0
+    /// After a commit: where the new place starts, -1 left of its rest, 1 right; eases to 0.
+    @Published var arrival: CGFloat = 0
+}
 
-    nonisolated static func travel(_ width: CGFloat) -> CGFloat { min(240, max(80, width * 0.25)) }
+/// The content while swiping: it follows the fingers (half its width at a full swipe,
+/// rubber-banding past that) and fades a little as it leaves; after a commit the new place
+/// slides the last stretch in from the side it was on. The chevrons ride the edges.
+struct SwipeFollow: ViewModifier {
+    @ObservedObject var motion: SwipeMotion
+
+    nonisolated static func travel(_ width: CGFloat) -> CGFloat { min(560, max(120, width * 0.5)) }
+    /// Where the new place starts, as a share of `travel`.
+    nonisolated static let arrivalShare: CGFloat = 0.3
 
     func body(content: Content) -> some View {
-        let amount = layout.swipeAmount, arrival = layout.swipeArrival
+        let amount = motion.amount, arrival = motion.arrival
         content
             .visualEffect { view, proxy in
                 let travel = SwipeFollow.travel(proxy.size.width)
-                return view.offset(x: amount * travel + arrival * travel * 0.5)
+                return view.offset(x: amount * travel + arrival * travel * SwipeFollow.arrivalShare)
             }
-            .opacity(1 - 0.2 * Double(min(1, abs(amount))) - 0.5 * Double(abs(arrival)))
+            .opacity(1 - 0.3 * Double(min(1, abs(amount))) - 0.35 * Double(abs(arrival)))
             .overlay(alignment: .leading) { SwipeChevron(amount: amount, back: true) }
             .overlay(alignment: .trailing) { SwipeChevron(amount: amount, back: false) }
     }

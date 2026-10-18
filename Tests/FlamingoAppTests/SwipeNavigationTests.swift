@@ -124,11 +124,23 @@ final class SwipeProgressTests: XCTestCase {
     /// The shape AppKit reports: fingers down, the lift, the settle and `isComplete`, the last
     /// two with no phase. The old handler only committed on `.ended` *and* complete, which
     /// never comes together, so no swipe ever went through.
-    func testASwipeCommitsWhenCompleteArrivesWithNoPhase() {
+    func testASwipeCommitsWhenTheFingersLift() {
         let (out, p) = run([(0.01, .began, false), (0.4, .changed, false), (0.8, .changed, false), (1.04, .changed, false),
                             (1.04, .ended, false), (1.02, .none, false), (1.0, .none, true)])
         XCTAssertEqual(out, [.haptic, .commit])
         XCTAssertTrue(p.finished)
+    }
+
+    /// Waiting for AppKit's settle cost a quarter second on every swipe: the lift decides.
+    func testTheLiftDecidesWithoutWaitingForTheSettle() {
+        var p = SwipeProgress(back: true)
+        XCTAssertEqual(p.update(amount: 0.5, phase: .changed, complete: false), [])
+        XCTAssertEqual(p.update(amount: 0.5, phase: .ended, complete: false), [.commit])
+        XCTAssertTrue(p.finished, "so AppKit's tracking can stop")
+        XCTAssertEqual(p.update(amount: 0.8, phase: .none, complete: false), [], "the settle changes nothing")
+        var q = SwipeProgress(back: true)
+        XCTAssertEqual(q.update(amount: 0.2, phase: .cancelled, complete: false), [.cancel])
+        XCTAssertTrue(q.finished)
     }
 
     func testACancelledSwipeDoesNotCommit() {
@@ -153,7 +165,7 @@ final class SwipeProgressTests: XCTestCase {
     func testForwardSwipesCountTheOtherWay() {
         let (out, p) = run(back: false, [(-0.5, .changed, false), (-1.01, .changed, false), (-1.01, .ended, false), (-1, .none, true)])
         XCTAssertEqual(out, [.haptic, .commit])
-        XCTAssertEqual(p.progress, 1)
+        XCTAssertEqual(p.progress, 1.01, accuracy: 0.0001, "where the fingers lifted; the settle after is ignored")
         XCTAssertEqual(run(back: false, [(0.5, .changed, false), (1.2, .changed, false)]).outputs, [], "the wrong way never taps")
     }
 
@@ -164,9 +176,12 @@ final class SwipeProgressTests: XCTestCase {
 
     func testNothingAfterItFinishes() {
         var p = SwipeProgress(back: true)
-        _ = p.update(amount: 1, phase: .ended, complete: false)
-        XCTAssertEqual(p.update(amount: 1, phase: .none, complete: true), [.commit])
+        XCTAssertEqual(p.update(amount: 1, phase: .ended, complete: false), [.commit])
         XCTAssertEqual(p.update(amount: 1, phase: .none, complete: true), [])
+        var q = SwipeProgress(back: true)
+        XCTAssertEqual(q.update(amount: 0.7, phase: .changed, complete: false), [])
+        XCTAssertEqual(q.update(amount: 1, phase: .none, complete: true), [.commit])
+        XCTAssertEqual(q.update(amount: 1, phase: .none, complete: true), [])
     }
 
     func testAbandoningKeepsWhatTheLiftDecided() {

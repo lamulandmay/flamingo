@@ -32,6 +32,8 @@ final class ColumnBrowserModel: ObservableObject {
     @Published private(set) var focusRevision = 0
     /// Hidden files, toggled with ⇧⌘. as in Finder; starts as Finder's own setting.
     @Published var showHidden = FinderSettings.showsAllFiles
+    /// Sort By in any column's menu: every column at once, as in a Finder window.
+    @Published var sort = Defaults.columnSort { didSet { Defaults.columnSort = sort } }
     /// The item selected in each column, outermost first. Column `i + 1` lists `trail[i]`
     /// when it is a folder; a file ends the trail and gets the preview column.
     var trail: [URL] = []
@@ -200,10 +202,12 @@ extension AppState {
         browser.requestFocus()
     }
 
-    /// Opens what a column or tile shows: a folder becomes the place, a file in the vault
-    /// opens here, an app or a file outside the vault opens the way Finder would.
+    /// Opens what a column or tile shows: a folder becomes the place, an archive expands
+    /// beside itself, a file in the vault opens here, an app or a file outside the vault
+    /// opens the way Finder would.
     func openFromBrowser(_ url: URL, isFolder: Bool) {
         if isFolder { showFolder(url, focus: true); return }
+        if expandIfArchive(url) { return }
         let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType
         if let v = vault, let ref = v.ref(for: url), !v.isState(url), type?.conforms(to: .application) != true {
             jump(to: ref, anchor: nil)
@@ -367,8 +371,8 @@ enum FileDrop {
 /// columns), typing selects by name, Space is Quick Look, ⌘↓ or a double-click opens,
 /// ↩ (or a slow second click on the name) renames, ⌘↑ goes to the enclosing folder, ⇧⌘.
 /// shows hidden files. Drop files on a folder (rest on it to open it) or paste them with
-/// ⌘V. The context menu is the file explorer's (`FileMenu`), and the explorer follows what
-/// is selected here. Drag a column's edge to
+/// ⌘V. The context menu is the file explorer's (`FileMenu`) plus Finder's Sort By (`ColumnSort`),
+/// and the explorer follows what is selected here. Drag a column's edge to
 /// resize it (⌥ for all), double-click the edge to fit. Built from `NSTableView`s so
 /// keyboard, type-select, scrolling and drag-out are the system's.
 struct ColumnBrowser: NSViewRepresentable {
@@ -379,6 +383,12 @@ struct ColumnBrowser: NSViewRepresentable {
     func makeNSView(context: Context) -> ColumnBrowserView { ColumnBrowserView(state: state, model: model) }
 
     func updateNSView(_ view: ColumnBrowserView, context: Context) { view.apply(counts: counts) }
+
+    /// Takes the space it is offered. Left to measure it, SwiftUI asks Auto Layout, which
+    /// walks every column and row on each update.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ColumnBrowserView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions()
+    }
 }
 
 /// One item in a column.
@@ -412,6 +422,7 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     private var revision = -1
     private var focusRevision = -1
     private var showHidden: Bool
+    private var sort: ColumnSort
     private var counts: [FileRef: Int] = [:]
     /// Above zero while the code, not the user, moves a selection.
     private var suppress = 0
@@ -421,11 +432,16 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     private var spring: (table: NSTableView, row: Int, work: DispatchWorkItem)?
     /// A folder just made here, to rename once its column lists it.
     private var pendingRename: URL?
+    /// Inside `apply`, where SwiftUI is updating views and the state mustn't change; a
+    /// `publish` then waits for it to finish.
+    private var updating = 0
+    private var publishPending = false
 
     init(state: AppState, model: ColumnBrowserModel) {
         self.state = state
         self.model = model
         self.showHidden = model.showHidden
+        self.sort = model.sort
         super.init(frame: .zero)
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
@@ -455,10 +471,19 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
 
     /// Every SwiftUI update lands here; it does work only when something moved.
     func apply(counts newCounts: [FileRef: Int]) {
-        let moved = model.revision != revision, relist = model.showHidden != showHidden
+        updating += 1
+        defer {
+            updating -= 1
+            if updating == 0, publishPending {
+                publishPending = false
+                DispatchQueue.main.async { [weak self] in self?.publish() }
+            }
+        }
+        let moved = model.revision != revision, relist = model.showHidden != showHidden || model.sort != sort
         revision = model.revision
         showHidden = model.showHidden
-        if moved { rebuild() } else if relist { for c in columns { load(c) } }
+        sort = model.sort
+        if moved { rebuild() } else if relist { for c in columns { load(c, reveal: true) } }
         if model.focusRevision != focusRevision {
             focusRevision = model.focusRevision
             takePendingFocus()
@@ -545,19 +570,31 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
         if let p = pendingFocus, p > index { pendingFocus = nil }
     }
 
-    private func load(_ column: BrowserColumn) {
+    /// `reveal` scrolls the selection into view once listed, as after a new sort.
+    private func load(_ column: BrowserColumn, reveal: Bool = false) {
+        if reveal { column.revealSelection = true }
         // A name being typed keeps its row; the listing waits until the field goes.
         if column.table.renamer.isEditing { column.stale = true; return }
         column.stale = false
         column.generation += 1
         let generation = column.generation, url = column.url
-        let hidden = showHidden, foldersFirst = FinderSettings.foldersFirst
+        let hidden = showHidden, foldersFirst = FinderSettings.foldersFirst, order = sort
+        let key = ColumnListings.Key(url: url, hidden: hidden, foldersFirst: foldersFirst, sort: order.key.rawValue, ascending: order.ascending)
+        // A folder listed before shows now, so going back fills every column in one frame
+        // (and descends through them) rather than one disk read at a time; the read below
+        // corrects it if the folder changed since. Not if it lacks what the trail picks there.
+        if !column.loaded, let cached = ColumnListings.get(key), let i = columns.firstIndex(where: { $0 === column }),
+           i >= model.trail.count || cached.contains(where: { $0.url == model.trail[i] }) {
+            fill(column, with: cached)
+        }
         Task { [weak self, weak column] in
             let entries = await Task.detached(priority: .userInitiated) {
-                Self.list(url, showHidden: hidden, foldersFirst: foldersFirst)
+                Self.list(url, showHidden: hidden, foldersFirst: foldersFirst, sort: order)
             }.value
+            ColumnListings.put(entries, for: key)
             guard let self, let column, column.generation == generation,
                   self.columns.contains(where: { $0 === column }) else { return }
+            if column.loaded, !column.revealSelection, entries == column.entries { return }
             self.fill(column, with: entries)
         }
     }
@@ -566,16 +603,17 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     /// on down the trail; when the selected item is gone, the columns after it go too.
     private func fill(_ column: BrowserColumn, with entries: [ColumnEntry]) {
         guard let i = columns.firstIndex(where: { $0 === column }) else { return }
-        let first = !column.loaded
+        let first = !column.loaded, reveal = first || column.revealSelection
         column.entries = entries
         column.loaded = true
+        column.revealSelection = false
         suppress += 1
         column.table.reloadData()
         let wanted = i < model.trail.count ? model.trail[i] : nil
         let row = wanted.flatMap { w in entries.firstIndex { $0.url == w } }
         if let row {
             column.table.selectRowIndexes([row], byExtendingSelection: false)
-            if first { column.table.scrollRowToVisible(row) }
+            if reveal { column.table.scrollRowToVisible(row) }
         } else {
             column.table.deselectAll(nil)
         }
@@ -641,6 +679,8 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
     }
 
     private func publish() {
+        // Columns filled from `ColumnListings` during a SwiftUI update say so once it is over.
+        if updating > 0 { publishPending = true; return }
         model.columnsChanged(trail: model.trail, folder: columns.last?.url)
         state.columnsPicked(item: model.trail.last ?? model.root, folder: columns.last?.url)
     }
@@ -968,6 +1008,8 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
         let row = column.table.contextRow
         guard row >= 0, row < column.entries.count else {
             FileMenu.buildBackground(menu, folder: column.url, state: state, extra: [
+                .separator(),
+                sortItem(),
                 ActionItem(model.showHidden ? "Hide Hidden Files" : "Show Hidden Files") { [weak self] in self?.toggleHidden() },
             ])
             return
@@ -986,7 +1028,30 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
                 self.window?.makeFirstResponder(table)
                 QLPreviewPanel.shared().makeKeyAndOrderFront(nil)
             },
-            window: window))
+            window: window,
+            extra: [sortItem()]))
+    }
+
+    /// Finder's Sort By, then which way, for every column at once.
+    private func sortItem() -> NSMenuItem {
+        let menu = NSMenu(title: "Sort By"), current = model.sort
+        for key in ColumnSortKey.allCases {
+            let item = ActionItem(key.title) { [weak model] in model?.sort = current.picked(key) }
+            item.state = key == current.key ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let ways = current.key.directions
+        for ascending in current.key.ascendingFirst ? [true, false] : [false, true] {
+            let item = ActionItem(ascending ? ways.ascending : ways.descending) { [weak model] in
+                model?.sort = ColumnSort(key: current.key, ascending: ascending)
+            }
+            item.state = ascending == current.ascending ? .on : .off
+            menu.addItem(item)
+        }
+        let item = NSMenuItem(title: "Sort By", action: nil, keyEquivalent: "")
+        item.submenu = menu
+        return item
     }
 
     // MARK: Quick Look
@@ -1019,11 +1084,12 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
 
     // MARK: Listing
 
-    nonisolated static func list(_ url: URL, showHidden: Bool, foldersFirst: Bool) -> [ColumnEntry] {
-        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isPackageKey, .isHiddenKey, .localizedNameKey,
-                                         .isSymbolicLinkKey, .isAliasFileKey]
+    nonisolated static func list(_ url: URL, showHidden: Bool, foldersFirst: Bool, sort: ColumnSort = .finder) -> [ColumnEntry] {
+        let keys = Set<URLResourceKey>([.isDirectoryKey, .isPackageKey, .isHiddenKey, .localizedNameKey,
+                                        .isSymbolicLinkKey, .isAliasFileKey]).union(ColumnOrder.resourceKeys(for: sort.key))
         guard let urls = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: Array(keys),
                                                                        options: showHidden ? [] : [.skipsHiddenFiles]) else { return [] }
+        var sortKeys: [ResultsOrder.Key?] = []
         let entries = urls.map { u -> ColumnEntry in
             let v = try? u.resourceValues(forKeys: keys)
             var folder = v?.isDirectory == true && v?.isPackage != true
@@ -1031,13 +1097,16 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
                 let target = try? u.resolvingSymlinksInPath().resourceValues(forKeys: [.isDirectoryKey, .isPackageKey])
                 folder = target?.isDirectory == true && target?.isPackage != true
             }
-            return ColumnEntry(url: ColumnBrowserModel.normal(u), name: v?.localizedName ?? u.lastPathComponent,
-                               isFolder: folder,
-                               isHidden: v?.isHidden == true || u.lastPathComponent.hasPrefix("."),
-                               isAlias: v?.isAliasFile == true && v?.isSymbolicLink != true)
+            let entry = ColumnEntry(url: ColumnBrowserModel.normal(u), name: v?.localizedName ?? u.lastPathComponent,
+                                    isFolder: folder,
+                                    isHidden: v?.isHidden == true || u.lastPathComponent.hasPrefix("."),
+                                    isAlias: v?.isAliasFile == true && v?.isSymbolicLink != true)
+            if sort.key != .name {
+                sortKeys.append(ColumnOrder.value(entry, sort.key, values: v, isPackage: v?.isDirectory == true && v?.isPackage == true))
+            }
+            return entry
         }
-        let sorted = FinderOrder.sorted(entries, by: \.name)
-        return foldersFirst ? sorted.filter(\.isFolder) + sorted.filter { !$0.isFolder } : sorted
+        return ColumnOrder.sorted(entries, by: sort, foldersFirst: foldersFirst, keys: sortKeys)
     }
 
     nonisolated static func resolveFolderAlias(_ url: URL) -> URL? {
@@ -1057,6 +1126,8 @@ private final class BrowserColumn {
     var loaded = false
     /// Changed on disk while a rename was being typed; listed when it ends.
     var stale = false
+    /// The next listing scrolls to the selection.
+    var revealSelection = false
     var generation = 0
     let table = ColumnTableView()
     let scroll = ColumnScrollView()
@@ -1406,6 +1477,44 @@ private final class ColumnCellView: NSTableCellView {
         let x = icon.frame.maxX + Theme.Space.s - 2
         let th = name.frame.height
         name.frame = NSRect(x: x, y: ((h - th) / 2).rounded(), width: max(0, right - x), height: th)
+    }
+}
+
+/// What each folder listed as when the columns last read it, for as long as the app runs:
+/// a column for a folder seen before fills at once, as Finder's do, and is read again behind
+/// it. Keyed by everything that changes a listing. The oldest go once there are more than
+/// `limit` folders or `budget` items in all (a few megabytes).
+@MainActor
+enum ColumnListings {
+    struct Key: Hashable {
+        let url: URL
+        let hidden: Bool
+        let foldersFirst: Bool
+        let sort: String
+        let ascending: Bool
+    }
+
+    static let limit = 400
+    static let budget = 50_000
+    private static var listings: [Key: [ColumnEntry]] = [:]
+    private static var order: [Key] = []
+    private static var items = 0
+
+    static func get(_ key: Key) -> [ColumnEntry]? { listings[key] }
+
+    static func put(_ entries: [ColumnEntry], for key: Key) {
+        guard entries.count <= budget else { return }
+        // Every column shown reads its folder again, so newest last is most recently seen.
+        if let old = listings.updateValue(entries, forKey: key) {
+            items -= old.count
+            order.removeAll { $0 == key }
+        }
+        order.append(key)
+        items += entries.count
+        while order.count > limit || items > budget, let oldest = order.first, oldest != key {
+            order.removeFirst()
+            items -= listings.removeValue(forKey: oldest)?.count ?? 0
+        }
     }
 }
 

@@ -15,6 +15,8 @@ enum FileMenu {
         var rename: (() -> Void)?
         var quickLook: (() -> Void)?
         var window: NSWindow?
+        /// The list's own items (the columns' Sort By), in a section before Move to Trash.
+        var extra: [NSMenuItem] = []
     }
 
     /// Fills `menu` for one item.
@@ -54,6 +56,10 @@ enum FileMenu {
 
         menu.addItem(.separator())
         addFinderItems(to: menu, url: url, isFolder: isFolder)
+        if !host.extra.isEmpty {
+            menu.addItem(.separator())
+            for item in host.extra { menu.addItem(item) }
+        }
         if let rel {
             menu.addItem(.separator())
             menu.addItem(ActionItem("Move to Trash") { state.requestTrash(rel, in: host.window) })

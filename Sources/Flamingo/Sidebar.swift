@@ -344,6 +344,12 @@ private struct FileExplorerOutline: NSViewRepresentable {
     func updateNSView(_ view: NSScrollView, context: Context) {
         context.coordinator.apply(self)
     }
+
+    /// Takes the space it is offered. Left to measure it, SwiftUI asks Auto Layout, which
+    /// walks every row on each update.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions()
+    }
 }
 
 // MARK: - Coordinator
@@ -734,9 +740,11 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         return true
     }
 
-    /// Scrolls to `node`'s row and pulses it. A list that has only just appeared (back from
-    /// another tab, unfolded) has no size yet: it waits for one, then is put in place rather
-    /// than scrolled.
+    /// Scrolls to `node`'s row and pulses it. Following a navigation it jumps there: an
+    /// animated scroll redraws the whole window every frame, for half a second after each
+    /// back, forward or column pick. Only an asked-for reveal (the pulse) glides. A list that
+    /// has only just appeared (back from another tab, unfolded) has no size yet: it waits for
+    /// one, then is put in place rather than scrolled.
     private func show(_ node: FileNode, placement: SidebarOutlineView.RowPlacement, pulse: Bool, attempt: Int = 0) {
         guard outline.window != nil, scroll.contentView.bounds.height > 1 else {
             guard attempt < 30 else { return }
@@ -745,7 +753,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         }
         let row = outline.row(forItem: node)
         guard row >= 0 else { return }
-        outline.bringRowIntoView(row, placement: placement, animated: attempt == 0) { [weak self] in
+        outline.bringRowIntoView(row, placement: placement, animated: pulse && attempt == 0) { [weak self] in
             guard pulse, let self else { return }
             let row = self.outline.row(forItem: node)
             guard row >= 0 else { return }
@@ -1015,6 +1023,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         let row = outline.clickedRow
         guard row >= 0, let node = outline.item(atRow: row) as? FileNode else { return }
         if let ref = node.ref {
+            if let url = state.url(for: ref), state.expandIfArchive(url) { return }
             state.openExternally(ref)
         } else if outline.isItemExpanded(node) {
             outline.collapseItem(node)

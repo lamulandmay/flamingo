@@ -50,6 +50,7 @@ extension AppState {
             return
         }
         if externally { openExternally(result.file); return }
+        if let url = url(for: result.file), expandIfArchive(url) { return }
         let target = hit ?? result.hits.first
         jump(to: result.file, anchor: target?.anchor)
         sourceHighlight = UnifiedSearchQuery(raw: query).text

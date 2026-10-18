@@ -77,6 +77,14 @@ enum MainMenu {
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = editMenu
 
+        // Format: Markdown notes only. The first responder answers, so these are off elsewhere.
+        let formatItem = NSMenuItem(); main.addItem(formatItem)
+        let formatMenu = NSMenu(title: "Format")
+        formatMenu.addItem(withTitle: "Bold", action: #selector(MarkdownTextView.toggleMarkdownBold(_:)), keyEquivalent: "b")
+        formatMenu.addItem(withTitle: "Italic", action: #selector(MarkdownTextView.toggleMarkdownItalic(_:)), keyEquivalent: "i")
+        formatMenu.addItem(withTitle: "Underline", action: #selector(MarkdownTextView.toggleMarkdownUnderline(_:)), keyEquivalent: "u")
+        formatItem.submenu = formatMenu
+
         // View
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
@@ -198,6 +206,13 @@ enum MainMenu {
         windowItem.submenu = windowMenu
         NSApp.windowsMenu = windowMenu
 
+        // Help. macOS adds its menu search field here, which finds any menu item by name.
+        let helpItem = NSMenuItem(); main.addItem(helpItem)
+        let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(withTitle: "Keyboard Shortcuts", action: #selector(AppDelegate.showShortcuts(_:)), keyEquivalent: "/")
+        helpItem.submenu = helpMenu
+        NSApp.helpMenu = helpMenu
+
         NSApp.mainMenu = main
         refreshRecents()
     }
@@ -231,6 +246,7 @@ extension AppDelegate: NSMenuItemValidation {
     }
 
     @objc func showSettings(_ sender: Any?) { SettingsWindowController.show(state: state) }
+    @objc func showShortcuts(_ sender: Any?) { ShortcutsWindowController.toggle(captureKeys: state.captureGlobalKeys) }
     @objc func openVault(_ sender: Any?) { state.openVaultDialog() }
     @objc func openRecent(_ sender: NSMenuItem) {
         if let url = sender.representedObject as? URL { state.open(url) }

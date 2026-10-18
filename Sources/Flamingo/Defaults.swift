@@ -93,6 +93,18 @@ enum Defaults {
         set { d.set(newValue.rawValue, forKey: "folderStyle") }
     }
 
+    /// How the columns are sorted: Finder's name order unless chosen otherwise.
+    static var columnSort: ColumnSort {
+        get {
+            guard let key = d.string(forKey: "columnSort").flatMap(ColumnSortKey.init(rawValue:)) else { return .finder }
+            return ColumnSort(key: key, ascending: d.object(forKey: "columnSortAscending") as? Bool ?? key.ascendingFirst)
+        }
+        set {
+            d.set(newValue.key.rawValue, forKey: "columnSort")
+            d.set(newValue.ascending, forKey: "columnSortAscending")
+        }
+    }
+
     /// How the graph is laid out: organic (the force layout) unless chosen otherwise.
     static var graphArrangement: GraphArrangement {
         get { d.string(forKey: "graphArrangement").flatMap(GraphArrangement.init(rawValue:)) ?? .organic }
@@ -147,6 +159,17 @@ enum Defaults {
     static var settingsPane: String? {
         get { d.string(forKey: "settingsPane") }
         set { d.set(newValue, forKey: "settingsPane") }
+    }
+
+    /// The typeface and size Markdown notes are written in.
+    static var writingFont: WritingFont {
+        get { d.string(forKey: "writingFont").flatMap(WritingFont.init(rawValue:)) ?? .system }
+        set { d.set(newValue.rawValue, forKey: "writingFont") }
+    }
+
+    static var writingSize: CGFloat {
+        get { WritingFont.sizes.contains(CGFloat(d.double(forKey: "writingSize"))) ? CGFloat(d.double(forKey: "writingSize")) : 16 }
+        set { d.set(Double(newValue), forKey: "writingSize") }
     }
 
     // MARK: Morning inbox

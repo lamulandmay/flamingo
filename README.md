@@ -42,6 +42,13 @@ formats in their own app. Kinds only an app can start, like a Shapr3D design or 
 scene, open that app. Save text with ⌘S. Drafts recover after
 restart; a conflicting external save offers retry, save a copy, and reload with recovery.
 
+Markdown notes are written, not coded: San Francisco at a reading size (font and size in
+Settings ▸ General), the first line set as the title, and the syntax kept but quiet. Type
+`- `, `1. ` or `- [ ] ` to start a list; Return continues it, Return on an empty item ends it,
+Tab and Shift-Tab nest. ⌘B, ⌘I and ⌘U wrap the selection or the word at the caret in `**`,
+`*` and `<u>`; with nothing to wrap they open a pair the same key steps out of. Click a
+checkbox to tick it. The file stays plain Markdown.
+
 Command-Z reverses workspace actions, including file creation and moves, bookmarks,
 thoughts, graph edits, trail corrections, navigation, and text saves. Shift-Command-Z
 redoes them. Deleting a file or folder has a strict 10-second undo window; after that,
@@ -66,8 +73,12 @@ sessions in Trail, or split, merge, and exclude misleading activity connections.
 
 ## Keys
 
+**Help ▸ Keyboard Shortcuts** (⌘/) lists every key, including the ones that only work in the
+graph, columns, inbox and connect mode, and filters them as you type. The essentials:
+
 | Keys | Action |
 |---|---|
+| ⌘/ | Every shortcut, searchable |
 | ⌘O | Open a folder as a vault |
 | ⌘K ⌘F | Unified search with previews and file families; type `>` for commands |
 | ⌃⌥F | Search from any app; toggle in Go → Search from Any App |
@@ -76,6 +87,7 @@ sessions in Trail, or split, merge, and exclude misleading activity connections.
 | ⌘C | Copy the selected file/folder in the explorer or bookmarks; text editors retain normal Copy |
 | ⌘N | New file of any kind in the folder on screen: type `3d`, `ppt`, `excel`… |
 | ⌘S | Save the built-in text editor |
+| ⌘B ⌘I ⌘U | Bold, italic, underline in a Markdown note |
 | ⌘Z ⌘⇧Z | Undo, redo (file deletion expires after 10 seconds) |
 | ⌥⌘N ⌘⇧N | New note, new folder, named in place |
 | ⌘D | Bookmark the current file |

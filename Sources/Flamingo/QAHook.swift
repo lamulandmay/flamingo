@@ -21,6 +21,7 @@ import FlamingoCore
 ///     postnote com.flamingo.qa "launch 2 #0"            the launcher in slot 2 opens its pick 0; "launch 2 q3" types q3 into it
 ///     postnote com.flamingo.qa "results sort size"      the search results list: a header click; also status, menu, kind, query, field
 ///     postnote com.flamingo.qa "rclick 300 20 Rename…"  right-click at a point (as click), then pick that menu item
+///     postnote com.flamingo.qa "dclick 300 20"          double-click at a point, as click
 @MainActor
 enum QAHook {
     /// `FLAMINGO_QA_CHANNEL` picks another name, so concurrent test builds don't hear each other.
@@ -140,17 +141,17 @@ enum QAHook {
             }
             return
         }
-        // `hover 120 80`, `press 120 80`, `release 120 80`, `click 120 80`: the pointer at a point
-        // in the main window's content (points, y down), queued as real events are, so hover,
-        // press states and taps can be seen and checked.
-        if ["hover", "press", "release", "click"].contains(parts[0]) {
+        // `hover 120 80`, `press 120 80`, `release 120 80`, `click 120 80`, `dclick 120 80`: the
+        // pointer at a point in the main window's content (points, y down), queued as real events
+        // are, so hover, press states, taps and double-clicks can be seen and checked.
+        if ["hover", "press", "release", "click", "dclick"].contains(parts[0]) {
             let n = parts[1].split(separator: " ").compactMap { Double($0) }
             guard n.count == 2, let window = (NSApp.delegate as? AppDelegate)?.window, let content = window.contentView else { return }
             let point = content.convert(NSPoint(x: n[0], y: n[1]), to: nil)
-            func post(_ type: NSEvent.EventType) {
+            func post(_ type: NSEvent.EventType, clicks: Int = 1) {
                 guard let e = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
                                                  timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                                                 context: nil, eventNumber: 0, clickCount: 1,
+                                                 context: nil, eventNumber: 0, clickCount: clicks,
                                                  pressure: type == .leftMouseDown ? 1 : 0) else { return }
                 NSApp.postEvent(e, atStart: false)
             }
@@ -158,6 +159,9 @@ enum QAHook {
             case "hover": post(.mouseMoved)
             case "press": post(.mouseMoved); post(.leftMouseDown)
             case "release": post(.leftMouseUp)
+            case "dclick":
+                post(.mouseMoved); post(.leftMouseDown); post(.leftMouseUp)
+                post(.leftMouseDown, clicks: 2); post(.leftMouseUp, clicks: 2)
             default:
                 post(.mouseMoved); post(.leftMouseDown)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { post(.leftMouseUp) }
@@ -329,7 +333,8 @@ enum QAHook {
                                            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                            context: nil, characters: chars, charactersIgnoringModifiers: chars,
                                            isARepeat: false, keyCode: code) else { return }
-        if flags.contains(.command) || flags.contains(.control) {
+        // A sheet's default button takes ↩, as it does from a real key.
+        if flags.contains(.command) || flags.contains(.control) || window.sheetParent != nil {
             if window.performKeyEquivalent(with: event) { return }
             if NSApp.mainMenu?.performKeyEquivalent(with: event) == true { return }
         }

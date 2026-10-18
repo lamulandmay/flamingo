@@ -1,6 +1,6 @@
 # Flamingo — Handover
 
-Flamingo is Obsidian for every file on a Mac. Native SwiftUI, zero dependencies. Open a folder
+Flamingo is Obsidian for every file on a Mac. Native SwiftUI, no dependencies beyond a bundled 7-Zip for archives. Open a folder
 (or `~`), preview anything with Quick Look, press ⌘⇧C to leave a thought on the slide, page,
 cell or moment you're looking at, link thoughts with `[[wikilinks]]`, and see a graph of how the
 files connect. It never writes into user files; everything lives in `<vault>/.flamingo/`.
@@ -113,6 +113,11 @@ chrome. The 2026-10-16 pass kept the function and rebuilt the surface to DESIGN.
   entries carry a `place` for folders outside the vault. Opening a vault file shows it here;
   apps and outside files open as Finder would. Go menu has Finder's keys. The ribbon's second
   button (and ⌥⌘3) shows the open file's folder in columns with the file selected; again goes back.
+  Sort By (2026-10-18, `ColumnSort.swift`) is in every column's context menu, on items and on
+  the empty space: Finder's keys (Name, Kind, Application, Date Last Opened/Added/Modified/
+  Created, Size, Tags) and which way. One order for every column, kept in `Defaults.columnSort`.
+  Missing values (a folder's size, a date Spotlight never saw) go last; "Keep folders on top"
+  counts only for Name, as in Finder; a package's size and Date Last Opened come from Spotlight.
 - ⌘W closes one tab and never the window; closing the window only hides it
   (`applicationShouldTerminateAfterLastWindowClosed` is false); only ⌘Q quits.
 - Chat (same day): a ranking prior that pushes package/build/tool files down
@@ -130,6 +135,22 @@ chrome. The 2026-10-16 pass kept the function and rebuilt the surface to DESIGN.
   (bundle id `com.flamingo.app`, not under XCTest) touches that Keychain item
   (`KeyStore.keychainEnabled`): the item trusts the app that saved it, so tests and QA copies
   would raise an access prompt on the user's screen. They use `ANTHROPIC_API_KEY`.
+- Keyboard shortcuts (2026-10-18): Help ▸ Keyboard Shortcuts (⌘/, also in the palette) is a
+  searchable window (`ShortcutsWindow.swift`) over `ShortcutCatalog` (`Shortcuts.swift`): a
+  "Start Here" primer, then every menu key and every key a focused view takes (graph, columns,
+  inbox, connect mode, trail, wander, chat). `ShortcutCatalogTests` fails when a menu item's
+  key isn't in the catalog, so add the line when you add a key. View-only keys aren't checked:
+  update the catalog by hand when you change one.
+- Archives (2026-10-18, `Unarchive.swift`): double-click or ↩ on a zip, rar, 7z, tarball, gz,
+  cab... in the columns, tiles, explorer or search results expands it beside itself, as Finder
+  does. One item out keeps its name; several go in a folder named for the archive; nothing is
+  overwritten ("name 2"); quarantine carries over; an encrypted one asks for its password in a
+  sheet. If the columns are still on the archive, what came out is selected; otherwise a toast
+  offers Show. ⌘↩ still opens the archive in its default app. Zips go through ditto, tarballs
+  through /usr/bin/bsdtar, the rest (and whatever those fail on) through 7-Zip, vendored
+  unmodified at `Vendor/7-Zip/7zz` (LGPL; see its README) and bundled as
+  `Contents/Helpers/7zz`. It is the app's one bundled tool. QA: the `dclick x y` verb. Typing
+  into a secure field from the QA hook sends key code 0, so only an "aaa..." password works there.
 - Calmer graph (same day): mentions skip machine listings and keep the strongest 20 per source,
   5 per file; dashed suggestions draw only for the selected or hovered node; selection dims
   the rest; labels fade in by degree; clicks in the graph don't re-scope it; the local graph

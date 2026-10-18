@@ -469,14 +469,18 @@ struct SourceTextView: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = PaneTextView.scrollableTextView()
+        // Markdown is written, not coded: it gets the styled editor. Everything else stays monospaced.
+        let markdown = editable && MarkdownStyler.extensions.contains(file.ext)
+        let scroll = markdown ? MarkdownTextView.scrollView() : PaneTextView.scrollableTextView()
         let view = scroll.documentView as! NSTextView
         view.isRichText = false; view.isEditable = editable; view.isSelectable = true
         view.allowsUndo = true; view.isAutomaticQuoteSubstitutionEnabled = false
         view.isAutomaticDashSubstitutionEnabled = false; view.isAutomaticTextReplacementEnabled = false
-        view.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-        view.textColor = Theme.NS.text; view.backgroundColor = Theme.NS.bg
-        view.insertionPointColor = Theme.NS.accent; view.textContainerInset = NSSize(width: 24, height: 24)
+        if !markdown {
+            view.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+            view.textColor = Theme.NS.text; view.textContainerInset = NSSize(width: 24, height: 24)
+        }
+        view.backgroundColor = Theme.NS.bg; view.insertionPointColor = Theme.NS.accent
         view.autoresizingMask = [.width]; view.textContainer?.widthTracksTextView = true
         view.delegate = context.coordinator
         (view as? PaneTextView)?.onActivate = onActivate
@@ -494,6 +498,7 @@ struct SourceTextView: NSViewRepresentable {
             // A second pane shares the buffer, but keeps its own selection and viewport.
             let selection = view.selectedRange(), origin = scroll.contentView.bounds.origin
             view.string = text
+            if let markdown = view as? MarkdownTextView, let storage = markdown.textStorage { markdown.styler.flush(storage) }
             let length = (text as NSString).length
             let start = min(selection.location, length)
             view.setSelectedRange(NSRange(location: start, length: min(selection.length, length - start)))
@@ -574,7 +579,7 @@ struct SourceTextView: NSViewRepresentable {
 }
 
 /// First-responder changes also cover keyboard traversal and native Find commands.
-final class PaneTextView: NSTextView {
+class PaneTextView: NSTextView {
     var onActivate: (() -> Void)?
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()

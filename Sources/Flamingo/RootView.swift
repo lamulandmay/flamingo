@@ -15,8 +15,8 @@ struct RootView: View {
     var body: some View { RootLayout(layout: state.layout) }
 }
 
-/// Observes only the geometry, so a divider drag or a swipe redraws the frame and the
-/// columns' sizes, not every view that reads `AppState`.
+/// Observes only the geometry, so a divider drag redraws the frame and the columns' sizes,
+/// not every view that reads `AppState`. A swipe's frames redraw only `SwipeFollow`.
 private struct RootLayout: View {
     @EnvironmentObject var state: AppState
     @ObservedObject var layout: PanelLayout
@@ -41,7 +41,7 @@ private struct RootLayout: View {
                     WorkingFilesBar()
                     content
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .modifier(SwipeFollow(layout: layout))
+                        .modifier(SwipeFollow(motion: state.swipe))
                         .overlay(alignment: .bottom) {
                             ZStack {
                                 if let toast = state.toast {

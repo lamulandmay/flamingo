@@ -79,13 +79,16 @@ final class AppState: ObservableObject {
     } }
     /// The sidebar's folder, or the selected file's parent. The graph scopes to it.
     @Published var selectedFolder: String?
-    /// Two-finger swipe progress: +1 is a completed back swipe, -1 forward, 0 at rest.
-    /// Divider widths, window width and swipe progress: per-frame geometry, observed only
-    /// by the layout so dragging a divider doesn't redraw every view reading this object.
+    /// Divider widths and window width: per-frame geometry, observed only by the layout so
+    /// dragging a divider doesn't redraw every view reading this object.
     let layout = PanelLayout()
+    /// Two-finger swipe progress and the arrival after one, observed only by the content's
+    /// `SwipeFollow`, so a swipe's frames don't redraw the layout either.
+    let swipe = SwipeMotion()
+    /// +1 is a completed back swipe, -1 forward, 0 at rest.
     var swipeAmount: CGFloat {
-        get { layout.swipeAmount }
-        set { layout.swipeAmount = newValue }
+        get { swipe.amount }
+        set { swipe.amount = newValue }
     }
     private var restoringHistory = false
     var openingVault = false
@@ -2134,6 +2137,9 @@ final class AppState: ObservableObject {
             PaletteCommand(id: "health", title: "Workspace Health", keys: nil, symbol: "externaldrive", enabled: hasVault) { [weak self] in self?.isHealthPresented = true },
             PaletteCommand(id: "settings", title: "Settings…", keys: "⌘,", symbol: "gearshape") { [weak self] in
                 if let self { SettingsWindowController.show(state: self) }
+            },
+            PaletteCommand(id: "shortcuts", title: "Keyboard Shortcuts", keys: "⌘/", symbol: "keyboard") { [weak self] in
+                if let self { ShortcutsWindowController.toggle(captureKeys: self.captureGlobalKeys) }
             },
             PaletteCommand(id: "open", title: "Open Vault…", keys: "⌘O", symbol: "folder") { [weak self] in self?.openVaultDialog() },
             PaletteCommand(id: "search", title: "Search", keys: "⌘F", symbol: "magnifyingglass", enabled: hasVault) { [weak self] in self?.showPalette(.search) },
