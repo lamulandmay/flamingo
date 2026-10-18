@@ -367,6 +367,12 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     private var lastSelected: FileRef?
     private var lastFolder: String?
     private var lastColumns: String?
+    /// Folders open only because the columns went into them. They close again when the
+    /// columns leave, so the tree shows the columns' way; folders opened here stay.
+    private var columnsOpened: Set<String> = []
+    /// The row last picked in the explorer itself. The columns follow it there; the explorer
+    /// doesn't then open it, as a pick elsewhere would.
+    private var pickedHere: String?
     private var showAllFolders = false
     private var rootItems: [AnyObject] = []
     private let pinnedHeader = ExplorerSection("Pinned")
@@ -483,6 +489,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
             noteActivity()
         }
         if v.selected != lastSelected || v.selectedFolder != lastFolder || v.columnsSelection != lastColumns {
+            let folderMoved = v.selectedFolder != lastFolder
             selectionCleared = false
             lastSelected = v.selected
             lastFolder = v.selectedFolder
@@ -493,12 +500,21 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
                 return v.autoReveal ? self.reveal(ref, placement: .centredIfHidden) : selectIfVisible(ref)
             }
             if let path = v.selected?.relativePath ?? v.columnsSelection ?? v.selectedFolder {
+                // The columns went somewhere, or a folder became the place, not after a pick
+                // here: the explorer goes too, into the folder as well as to it.
+                let following = v.autoReveal && v.selected == nil && path != pickedHere
+                    && (v.columnsSelection != nil || folderMoved)
+                if path != pickedHere { pickedHere = nil }
                 // Something the columns show that the tree leaves out (an ignored file):
                 // its folder instead.
-                var shown = place(path)
-                if !shown, v.selected == nil, path == v.columnsSelection, let folder = v.selectedFolder { shown = place(folder) }
+                var shown = following ? followColumns(to: path) : place(path)
+                if !shown, v.selected == nil, path == v.columnsSelection, let folder = v.selectedFolder {
+                    shown = following ? followColumns(to: folder) : place(folder)
+                }
                 if !shown { deselectStale(keeping: v.selectedFolder) }
             } else {
+                // The columns back at the vault's top.
+                if v.autoReveal, v.selected == nil { closeColumnsFolders(keeping: []) }
                 deselectFile()
             }
             noteActivity()
@@ -536,7 +552,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     // MARK: Reload, expansion, reveal
 
     private func reload(tree: FileTree) {
-        if self.tree.vault != tree.vault { selectionCleared = false }
+        if self.tree.vault != tree.vault { selectionCleared = false; columnsOpened = [] }
         self.tree = tree
         expanded = vault.flatMap { Defaults.expandedFolders(in: $0) } ?? []
         showAllFolders = vault.map { Defaults.showsAllUnpinnedFolders(in: $0) } ?? false
@@ -607,6 +623,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         suppressSelection = wasSuppressed
         restoring = false
         expanded = []
+        columnsOpened = []
         persistExpansion()
     }
 
@@ -644,7 +661,8 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     /// highlight cleared, the current place).
     private func collapseIdle() {
         var keepRows = Set<ObjectIdentifier>(), keepPaths = Set<String>()
-        var node = selectedNode?.parent
+        // A folder the columns are in stays open, as they show it.
+        var node = selectedNode.flatMap { $0.isFolder && columnsOpened.contains($0.id) ? $0 : $0.parent }
         while let n = node, n.depth >= 0 { keepRows.insert(ObjectIdentifier(n)); keepPaths.insert(n.id); node = n.parent }
         if selectedNode == nil, let path = selectionPath {
             var parent = (path as NSString).deletingLastPathComponent
@@ -666,6 +684,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         suppressSelection = wasSuppressed
         restoring = false
         expanded.formIntersection(keepPaths)
+        columnsOpened.formIntersection(keepPaths)
         persistExpansion()
         if outline.selectedRow >= 0 { outline.bringRowIntoView(outline.selectedRow, placement: .centredIfHidden) }
     }
@@ -732,6 +751,39 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
             guard row >= 0 else { return }
             (self.outline.rowView(atRow: row, makeIfNecessary: false) as? SidebarRowView)?.pulse()
         }
+    }
+
+    /// The columns are at `path`: its row is selected with the folders on the way open and,
+    /// a folder, open too, its rows in view. Folders opened for the columns before and off
+    /// that way close.
+    private func followColumns(to path: String) -> Bool {
+        guard let node = node(for: path) else { return false }
+        var keep = Set<String>()
+        var folder = node.isFolder ? path : (path as NSString).deletingLastPathComponent
+        while !folder.isEmpty { keep.insert(folder); folder = (folder as NSString).deletingLastPathComponent }
+        closeColumnsFolders(keeping: keep)
+        let before = expanded
+        let shown = reveal(FileRef(relativePath: path), placement: node.isFolder ? .opened : .centredIfHidden, expand: node.isFolder)
+        columnsOpened.formUnion(expanded.subtracting(before))
+        return shown
+    }
+
+    /// Closes the folders opened for the columns that aren't in `keep`, innermost first.
+    private func closeColumnsFolders(keeping keep: Set<String>) {
+        let closing = columnsOpened.subtracting(keep)
+        guard !closing.isEmpty else { return }
+        let wasSuppressed = suppressSelection, wasRestoring = restoring
+        restoring = true
+        suppressSelection = true
+        for row in (0..<outline.numberOfRows).reversed() {
+            guard let n = outline.item(atRow: row) as? FileNode, closing.contains(n.id), outline.isItemExpanded(n) else { continue }
+            outline.collapseItem(n)
+        }
+        suppressSelection = wasSuppressed
+        restoring = wasRestoring
+        columnsOpened.subtract(closing)
+        expanded.subtract(closing)
+        persistExpansion()
     }
 
     /// For a list that was just made: its selected row in view once it has a size.
@@ -916,6 +968,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         guard let node = selectedNode else { return }
         selectionCleared = false
         quickLookNode = nil
+        pickedHere = node.id
         noteActivity()
         state.selectFromSidebar(folder: node.ref == nil ? node.id : (node.id as NSString).deletingLastPathComponent,
                                 file: node.ref)
@@ -937,6 +990,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     func outlineViewItemDidCollapse(_ notification: Notification) {
         guard !restoring, let node = notification.userInfo?["NSObject"] as? FileNode else { return }
         noteActivity()
+        columnsOpened.remove(node.id)
         guard expanded.contains(node.id) else { return }
         expanded.remove(node.id)
         persistExpansion()
@@ -952,6 +1006,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         if let ref = node.ref {
             if state.selected != ref { state.selectFromSidebar(folder: (node.id as NSString).deletingLastPathComponent, file: ref) }
         } else if state.columnsSelection != nil || state.selectedFolder != node.id {
+            pickedHere = node.id
             state.selectFromSidebar(folder: node.id, file: nil)
         }
     }

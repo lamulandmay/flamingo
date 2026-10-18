@@ -195,12 +195,15 @@ final class SidebarOutlineView: NSOutlineView, QLPreviewPanelDataSource {
         case centredIfHidden
         /// About the middle unless the row already sits comfortably inside: "reveal".
         case centredIfCramped
+        /// A folder just opened, with what it holds: the list following the columns into it.
+        case opened
     }
 
     /// The scroll position that shows `row` the way `placement` asks, or nil to stay put.
-    /// `visible` is the clip's bounds; `insets` the scroll view's content insets.
+    /// `visible` is the clip's bounds; `insets` the scroll view's content insets; `contents`
+    /// how far an opened folder's rows run below its own.
     static func scrollTarget(row rowRect: NSRect, visible: NSRect, insets: NSEdgeInsets, contentHeight: CGFloat,
-                             placement: RowPlacement) -> CGFloat? {
+                             placement: RowPlacement, contents: CGFloat = 0) -> CGFloat? {
         let top = visible.minY + insets.top, bottom = visible.maxY - insets.bottom
         let usable = max(rowRect.height, bottom - top)
         let shown = rowRect.minY >= top - 0.5 && rowRect.maxY <= bottom + 0.5
@@ -215,6 +218,16 @@ final class SidebarOutlineView: NSOutlineView, QLPreviewPanelDataSource {
             if placement == .centredIfHidden ? shown : roomy { return nil }
             // A little above the middle, where the eye starts reading a list.
             y = rowRect.midY - insets.top - usable * 0.45
+        case .opened:
+            // The folder and its rows, the folder first: no move while all of it shows, the
+            // least move when only its rows run off the bottom, about the middle when the
+            // folder itself is out of sight. Never so far that the folder leaves the top.
+            let blockMaxY = rowRect.maxY + contents
+            if rowRect.minY >= top - 0.5 && blockMaxY <= bottom + 0.5 { return nil }
+            let folderAtTop = rowRect.minY - insets.top - margin
+            let endAtBottom = blockMaxY + insets.bottom - visible.height
+            y = shown ? max(visible.minY, min(folderAtTop, endAtBottom))
+                : min(folderAtTop, max(endAtBottom, (rowRect.minY + blockMaxY) / 2 - insets.top - usable * 0.45))
         }
         let lowest = max(-insets.top, contentHeight + insets.bottom - visible.height)
         y = min(max(y, -insets.top), lowest)
@@ -227,8 +240,14 @@ final class SidebarOutlineView: NSOutlineView, QLPreviewPanelDataSource {
         guard row >= 0, row < numberOfRows, let scroll = enclosingScrollView else { completion?(); return }
         let clip = scroll.contentView
         let visible = clip.bounds
+        var last = row
+        if placement == .opened {
+            let level = level(forRow: row)
+            while last + 1 < numberOfRows, self.level(forRow: last + 1) > level { last += 1 }
+        }
         guard let y = Self.scrollTarget(row: rect(ofRow: row), visible: visible, insets: scroll.contentInsets,
-                                        contentHeight: bounds.height, placement: placement) else { completion?(); return }
+                                        contentHeight: bounds.height, placement: placement,
+                                        contents: rect(ofRow: last).maxY - rect(ofRow: row).maxY) else { completion?(); return }
         let target = NSPoint(x: visible.origin.x, y: y)
         guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
             clip.setBoundsOrigin(target)

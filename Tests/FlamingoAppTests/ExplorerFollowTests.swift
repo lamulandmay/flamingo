@@ -47,6 +47,38 @@ final class ExplorerFollowTests: XCTestCase {
         XCTAssertNil(target(100, clipY: 0, .nearestEdge))
     }
 
+    // MARK: Following the columns into a folder
+
+    private func opened(_ rowY: CGFloat, contents: CGFloat, clipY: CGFloat) -> CGFloat? {
+        SidebarOutlineView.scrollTarget(row: row(rowY), visible: clip(at: clipY), insets: insets, contentHeight: content,
+                                        placement: .opened, contents: contents)
+    }
+
+    func testAnOpenedFolderThatShowsWholeStaysPut() {
+        XCTAssertNil(opened(100, contents: 5 * 26, clipY: 0))
+    }
+
+    func testAnOpenedFolderRunningOffTheBottomMovesOnlyEnoughToShowItsRows() throws {
+        // The folder at 250, its 6 rows to 432, past the bottom at 392: the last row's bottom
+        // comes to just above the bottom inset.
+        let y = try XCTUnwrap(opened(250, contents: 6 * 26, clipY: 0))
+        XCTAssertEqual(y, 250 + 26 + 6 * 26 + 8 - 400)
+    }
+
+    func testABigOpenedFolderStopsWithTheFolderNearTheTop() throws {
+        let y = try XCTUnwrap(opened(250, contents: 40 * 26, clipY: 0))
+        XCTAssertEqual(y, 250 - 4 - 26 * 1.5, "a row and a half of context above the folder")
+        XCTAssertNil(opened(250, contents: 40 * 26, clipY: y), "and stays there")
+    }
+
+    func testAnOpenedFolderOutOfSightComesToAboutTheMiddle() throws {
+        let y = try XCTUnwrap(opened(700, contents: 2 * 26, clipY: 0))
+        XCTAssertGreaterThan(700, y + 4 + 26 * 1.5, "the folder well inside")
+        XCTAssertLessThan(700 + 3 * 26, y + 400 - 8, "and its rows")
+        let usable: CGFloat = 400 - 4 - 8
+        XCTAssertEqual((700 + 39 - (y + 4)) / usable, 0.45, accuracy: 0.01, "the block's middle a little above the list's")
+    }
+
     // MARK: Listings that predate a file
 
     private func vault() throws -> (Vault, URL) {
