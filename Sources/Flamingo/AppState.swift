@@ -104,7 +104,8 @@ final class AppState {
     var anchor: FileAnchor? { didSet {
         if anchor != oldValue, !synchronizingPane {
             if activePane.anchor != anchor { activePane.anchor = anchor }
-            history.updateAnchor(anchor)
+            // The current entry's place: nothing on screen shows it, so views aren't told.
+            historyValue.updateAnchor(anchor)
             if let selected, let anchor { savedAnchors[selected.relativePath] = anchor }
             // Pages turn, media plays and carets move many times a second: save once it rests.
             persistWorkspaceSoon()
@@ -248,7 +249,11 @@ final class AppState {
     /// What the columns have selected, vault-relative, for the file explorer to highlight
     /// without opening it (ColumnBrowser.swift). Cleared when the sidebar picks for itself.
     var columnsSelection: String?
-    private(set) var history = History()
+    private(set) var history: History {
+        get { access(keyPath: \.history); return historyValue }
+        set { withMutation(keyPath: \.history) { historyValue = newValue } }
+    }
+    @ObservationIgnored private var historyValue = History()
     var trailEnabled = TrailStore.isEnabled { didSet { TrailStore.isEnabled = trailEnabled; recents.refreshSoon(); recordSetting("Record Trail", before: oldValue, after: trailEnabled) { [weak self] in self?.trailEnabled = $0 } } }
 
     @ObservationIgnored private(set) var session: VaultSession?
@@ -2116,10 +2121,19 @@ final class AppState {
 
     /// The app that would open this file, for menu titles like "Open in Keynote".
     func defaultAppName(for ref: FileRef?) -> String? {
-        guard let url = ref.flatMap(url(for:)), let app = NSWorkspace.shared.urlForApplication(toOpen: url) else { return nil }
-        return (try? app.resourceValues(forKeys: [.localizedNameKey]).localizedName)
-            ?? app.deletingPathExtension().lastPathComponent
+        guard let url = ref.flatMap(url(for:)) else { return nil }
+        let now = Date()
+        if let hit = appNames[url.path], now.timeIntervalSince(hit.at) < 10 { return hit.name }
+        let name = NSWorkspace.shared.urlForApplication(toOpen: url).map { app in
+            (try? app.resourceValues(forKeys: [.localizedNameKey]).localizedName) ?? app.deletingPathExtension().lastPathComponent
+        }
+        if appNames.count > 256 { appNames.removeAll() }
+        appNames[url.path] = (name, now)
+        return name
     }
+    /// The document header asks on every redraw and LaunchServices takes a while to answer:
+    /// each file's answer is kept for a few seconds, so a changed default still shows soon.
+    @ObservationIgnored private var appNames: [String: (name: String?, at: Date)] = [:]
 
     func leaveThought() {
         guard vault != nil else { return }

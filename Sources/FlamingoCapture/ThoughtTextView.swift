@@ -39,7 +39,10 @@ final class ThoughtEditorModel: ObservableObject {
         prepareTask = Task { [weak self] in
             let prepared = await Task.detached(priority: .userInitiated) { LinkMatcher(candidates: candidates, recent: recent) }.value
             guard !Task.isCancelled, let self, self.revision == version else { return }
+            let old = self.matcher
             self.matcher = prepared
+            // A replaced table can hold a million rows: let it go off the main thread.
+            Task.detached(priority: .background) { withExtendedLifetime(old) {} }
             self.refreshCompletion()
         }
     }

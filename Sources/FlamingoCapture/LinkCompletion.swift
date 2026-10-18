@@ -73,64 +73,111 @@ struct LinkCandidate: Identifiable, Hashable, Sendable {
 
 /// Ranks vault files against what was typed after `[[`.
 struct LinkMatcher: Sendable {
-    private struct Entry: Sendable {
-        let candidate: LinkCandidate
-        let name: [Character], nameOriginal: [Character], nameStem: Int?
-        let path: [Character], pathOriginal: [Character], pathStem: Int?
-        let recency: Int?
+    /// The vault's files folded for matching, built once per file list and shared by every
+    /// thought field: on a whole disk that is a million rows, too many to rebuild (and to free
+    /// on the main thread) each time a file opens.
+    final class Table: Sendable {
+        struct Entry: Sendable {
+            let candidate: LinkCandidate
+            /// Folded; `nameOriginal` shares its storage when folding changed nothing.
+            let name: [Character], nameOriginal: [Character], nameStem: Int?
+            let pathLength: Int
+        }
+        /// Kept so its buffer can't be reused while this table stands for it (see `isBuilt(from:)`).
+        let candidates: [FileRef]
+        let entries: [Entry]
+        let index: [String: Int]
+
+        init(_ candidates: [FileRef]) {
+            var nameCounts: [String: Int] = [:]
+            for ref in candidates { nameCounts[ref.name.lowercased(), default: 0] += 1 }
+            var index: [String: Int] = [:]
+            index.reserveCapacity(candidates.count)
+            var entries: [Entry] = []
+            entries.reserveCapacity(candidates.count)
+            for ref in candidates {
+                let unique = nameCounts[ref.name.lowercased()] == 1
+                let folded = FuzzyMatch.fold(ref.name), original = Array(ref.name)
+                index[ref.relativePath] = entries.count
+                entries.append(Entry(candidate: LinkCandidate(ref: ref, insertText: unique ? ref.name : ref.relativePath),
+                                     name: folded, nameOriginal: original == folded ? folded : original,
+                                     nameStem: FuzzyMatch.stemEnd(original), pathLength: ref.relativePath.count))
+            }
+            self.candidates = candidates; self.entries = entries; self.index = index
+        }
+
+        /// Same array, not just equal contents: comparing a million paths would cost what it saves.
+        func isBuilt(from other: [FileRef]) -> Bool {
+            other.count == candidates.count && other.withUnsafeBufferPointer { a in
+                candidates.withUnsafeBufferPointer { b in a.baseAddress == b.baseAddress }
+            }
+        }
+
+        private static let lock = NSLock()
+        nonisolated(unsafe) private static var last: Table?
+
+        /// The table for `candidates`, reusing the last one built when it is the same list.
+        static func shared(_ candidates: [FileRef]) -> Table {
+            if let hit = lock.withLock({ last.flatMap { $0.isBuilt(from: candidates) ? $0 : nil } }) { return hit }
+            let made = Table(candidates)
+            let replaced = lock.withLock { () -> Table? in defer { last = made }; return last }
+            _ = replaced   // the old table is freed here, off the main thread when built off it
+            return made
+        }
     }
-    private let entries: [Entry]
+
+    private let table: Table
+    /// Recent files' rank by entry index, most recent first.
+    private let recency: [Int: Int]
     private let recentOrder: [Int]
 
     static let empty = LinkMatcher(candidates: [])
 
     init(candidates: [FileRef], recent: [FileRef] = []) {
-        var nameCounts: [String: Int] = [:]
-        for ref in candidates { nameCounts[ref.name.lowercased(), default: 0] += 1 }
-        var rank: [String: Int] = [:]
-        for (i, ref) in recent.enumerated() where rank[ref.relativePath] == nil { rank[ref.relativePath] = i }
-        let entries = candidates.map { ref in
-            let unique = nameCounts[ref.name.lowercased()] == 1
-            let name = Array(ref.name), path = Array(ref.relativePath)
-            return Entry(candidate: LinkCandidate(ref: ref, insertText: unique ? ref.name : ref.relativePath),
-                         name: FuzzyMatch.fold(ref.name), nameOriginal: name, nameStem: FuzzyMatch.stemEnd(name),
-                         path: FuzzyMatch.fold(ref.relativePath), pathOriginal: path, pathStem: FuzzyMatch.stemEnd(path),
-                         recency: rank[ref.relativePath])
+        table = Table.shared(candidates)
+        var recency: [Int: Int] = [:], order: [Int] = []
+        for (rank, ref) in recent.enumerated() {
+            guard let i = table.index[ref.relativePath], recency[i] == nil else { continue }
+            recency[i] = rank; order.append(i)
         }
-        self.entries = entries
-        recentOrder = entries.indices
-            .compactMap { i in entries[i].recency.map { (i, $0) } }
-            .sorted { $0.1 < $1.1 }
-            .map(\.0)
+        self.recency = recency; recentOrder = order
     }
 
-    var isEmpty: Bool { entries.isEmpty }
+    var isEmpty: Bool { table.entries.isEmpty }
 
     /// Matches on the basename; a query containing `/` matches the relative path instead.
     /// An empty query lists recent files first.
     func matches(_ query: String, limit: Int = 8) -> [LinkCandidate] {
+        let entries = table.entries
         let q = FuzzyMatch.fold(query.trimmingCharacters(in: .whitespaces))
         if q.isEmpty {
             var out = recentOrder.prefix(limit).map { entries[$0].candidate }
-            for e in entries where out.count < limit && e.recency == nil { out.append(e.candidate) }
+            for (i, e) in entries.enumerated() where out.count < limit && recency[i] == nil { out.append(e.candidate) }
             return out
         }
         let byPath = q.contains("/")
-        var scored: [(score: Int, entry: Entry)] = []
-        for e in entries {
-            let s = byPath ? FuzzyMatch.score(q, e.path, original: e.pathOriginal, stemEnd: e.pathStem)
-                           : FuzzyMatch.score(q, e.name, original: e.nameOriginal, stemEnd: e.nameStem)
+        var scored: [(score: Int, index: Int)] = []
+        for (i, e) in entries.enumerated() {
+            var s: Int?
+            if byPath {
+                // Paths are folded only for the rare query that names a folder.
+                let original = Array(e.candidate.ref.relativePath)
+                s = FuzzyMatch.score(q, FuzzyMatch.fold(e.candidate.ref.relativePath), original: original, stemEnd: FuzzyMatch.stemEnd(original))
+            } else {
+                s = FuzzyMatch.score(q, e.name, original: e.nameOriginal, stemEnd: e.nameStem)
+            }
             guard var s else { continue }
-            if let r = e.recency { s += max(0, 30 - r * 3) }
-            scored.append((s, e))
+            if let r = recency[i] { s += max(0, 30 - r * 3) }
+            scored.append((s, i))
         }
-        scored.sort { a, b in
-            if a.score != b.score { return a.score > b.score }
-            if a.entry.name.count != b.entry.name.count { return a.entry.name.count < b.entry.name.count }
-            if a.entry.path.count != b.entry.path.count { return a.entry.path.count < b.entry.path.count }
-            return a.entry.candidate.ref.relativePath < b.entry.candidate.ref.relativePath
+        scored.sort { x, y in
+            let a = entries[x.index], b = entries[y.index]
+            if x.score != y.score { return x.score > y.score }
+            if a.name.count != b.name.count { return a.name.count < b.name.count }
+            if a.pathLength != b.pathLength { return a.pathLength < b.pathLength }
+            return a.candidate.ref.relativePath < b.candidate.ref.relativePath
         }
-        return scored.prefix(limit).map(\.entry.candidate)
+        return scored.prefix(limit).map { entries[$0.index].candidate }
     }
 }
 
