@@ -118,7 +118,7 @@ extension AppState {
 
 /// The card, centred over the work surface.
 struct WanderPanel: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var deck: WanderDeck
     @State private var monitor: Any?
 

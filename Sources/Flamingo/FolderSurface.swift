@@ -9,7 +9,7 @@ import FlamingoDesign
 /// folder and can also be a Finder favorite outside the vault. A list of search results
 /// (SearchResultsView.swift) takes its place while history is on one.
 struct FolderSurface: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         if state.shownResults != nil {
@@ -21,7 +21,7 @@ struct FolderSurface: View {
 }
 
 private struct FolderSurfaceContent: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var browser: ColumnBrowserModel
     @ObservedObject var agents: AgentProjectsModel
 
@@ -49,7 +49,7 @@ private struct IconSurface: View {
         let path: String?
         var id: String { url.path }
     }
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var browser: ColumnBrowserModel
     @State private var items: [Item] = []
     @State private var failure: String?
@@ -155,7 +155,7 @@ private struct IconSurface: View {
 /// One item: a thumbnail (or the family glyph while it renders), the name under it.
 /// Right-click ▸ Rename… edits the name in place, as in Finder's icon view.
 private struct FolderTile: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let item: IconSurface.Item
     @State private var thumbnail: NSImage?
     @State private var hovering = false

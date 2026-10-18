@@ -35,7 +35,7 @@ enum InspectorTab: String, CaseIterable, Identifiable {
 /// The right sidebar. Its tab icons share the title bar, like the left sidebar's; the
 /// open file is the subject of every tab except Chat, which follows you everywhere.
 struct Inspector: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let topInset: CGFloat
 
     var body: some View {
@@ -63,7 +63,7 @@ struct Inspector: View {
 }
 
 private struct InspectorHeader: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @State private var connecting = false
     @Namespace private var tabs
 
@@ -124,7 +124,7 @@ private struct InspectorHeader: View {
 /// The open file's slides, pages, sheets or headings. Click to go there; the current one
 /// is lit.
 struct OutlineTab: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         if state.sections.isEmpty {
@@ -200,7 +200,7 @@ private struct OutlineRow: View {
 
 /// Drop a file on the chat to ask about it: it opens, and the question narrows to it.
 private struct ChatTab: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @State private var scopeRequest = 0
     @State private var targeted = false
 

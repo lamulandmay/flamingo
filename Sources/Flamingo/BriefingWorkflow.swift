@@ -237,7 +237,7 @@ final class BriefingModel: ObservableObject {
     var catchUp: BriefingCatchUp = { _ in }
 
     // Presentation
-    @Published private(set) var isPresented = false { didSet { if isPresented != oldValue { state?.objectWillChange.send() } } }
+    @Published private(set) var isPresented = false { didSet { if isPresented != oldValue { state?.briefingShown = isPresented } } }
     /// Drives the fades: false while mounting and while leaving.
     @Published private(set) var visible = false
     @Published private(set) var snapshot: BriefingSnapshot?

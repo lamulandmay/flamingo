@@ -145,7 +145,7 @@ enum FinderFavorites {
 /// Finder's Favorites at the top of the Files tab, with Finder's glyphs. A click shows the
 /// place in the folder surface, columns or icons, whether or not it is inside the vault.
 struct FavoritesList: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var favorites: FinderFavoritesModel
     @ObservedObject var browser: ColumnBrowserModel
 
@@ -165,7 +165,7 @@ struct FavoritesList: View {
 }
 
 private struct FavoriteRow: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let favorite: FinderFavorite
     let selected: Bool
 

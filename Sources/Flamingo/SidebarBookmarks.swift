@@ -5,7 +5,7 @@ import FlamingoDesign
 
 /// Bookmark the current file, new group, collapse all.
 struct BookmarksHeader: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         let marked = state.selected.map { state.isBookmarked($0.relativePath, folder: false) } ?? false
@@ -24,7 +24,7 @@ struct BookmarksHeader: View {
 /// Click to open; drag to reorder or into a group; drop files from Finder to bookmark
 /// them; ⌫ removes, with Undo. Plan 01 owns.
 struct BookmarksPane: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         if let error = state.bookmarksError {

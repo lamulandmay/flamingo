@@ -7,7 +7,7 @@ import FlamingoIndex
 /// rest secondary. One open file needs no tab bar; the title bar already names it.
 /// Right-click ▸ Rename… edits a tab's name in place.
 struct WorkingFilesBar: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     var body: some View {
         if state.openFiles.count > 1 {
             ScrollViewReader { proxy in
@@ -31,7 +31,7 @@ struct WorkingFilesBar: View {
 }
 
 private struct WorkingFileTab: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let file: FileRef
     let selected: Bool
     @State private var hovering = false
@@ -101,7 +101,7 @@ private struct WorkingFileTab: View {
 }
 
 struct IndexHealthSheet: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var indexing: IndexingModel
     @State private var health: IndexHealth?
     @State private var incomplete: [IndexedFileCoverage] = []
@@ -147,7 +147,7 @@ struct IndexHealthSheet: View {
                 Text(line).font(Theme.Font.small).foregroundStyle(Theme.Color.textSecondary).textSelection(.enabled)
             }
             HStack(spacing: Theme.Space.s) {
-                Toggle("Analyze files saved from Flamingo", isOn: $state.automaticAnalysis)
+                Toggle("Analyze files saved from Flamingo", isOn: Bindable(state).automaticAnalysis)
                     .toggleStyle(.switch).controlSize(.small).font(Theme.Font.small)
                     .help("Runs locally and leaves a labelled AI thought with suggested connections")
                 Spacer()

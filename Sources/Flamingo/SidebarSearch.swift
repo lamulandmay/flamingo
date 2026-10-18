@@ -163,7 +163,7 @@ final class SidebarSearchModel: ObservableObject {
 /// Obsidian's search pane: a field, the result count, and every match under its file.
 /// Click a file to open it, a match to open the file at that slide, page or moment.
 struct SidebarSearchPane: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var model: SidebarSearchModel
     @FocusState private var focused: Bool
     /// The result whose name is being edited (right-click ▸ Rename…).
@@ -361,7 +361,7 @@ final class ImmediateSearchTextField: NSTextField {
 
 /// A file with matches: chevron, glyph, name, count.
 private struct ResultFile: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let group: SidebarSearchModel.Group
     let open: Bool
     let toggle: () -> Void

@@ -26,7 +26,7 @@ struct ReplyTarget: Equatable {
 /// for the next one, left at the place you're looking at. With a folder selected and no file it
 /// is that folder's note.
 struct ThoughtsTab: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let file: FileRef?
 
     var body: some View {
@@ -44,7 +44,7 @@ struct ThoughtsTab: View {
 /// A folder's note is not the open file, so its thoughts are read here and again whenever
 /// the shell changes it.
 private struct FolderThoughts: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let note: ThoughtNote
     @ObservedObject var jobs: ThoughtJobsModel
     @State private var comments: [Comment] = []
@@ -56,7 +56,7 @@ private struct FolderThoughts: View {
 }
 
 private struct ThoughtsPane: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let target: ThoughtTarget
     let comments: [Comment]
     @ObservedObject var jobs: ThoughtJobsModel
@@ -108,7 +108,7 @@ private struct ThoughtsPane: View {
 /// Type, Return. The thought lands on the open file at the current slide, page or line, or
 /// answers the thought named above the field.
 private struct ThoughtComposer: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let target: ThoughtTarget
     @Binding var reply: ReplyTarget?
     let replyFocus: Int

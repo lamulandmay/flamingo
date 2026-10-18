@@ -9,7 +9,7 @@ import FlamingoDesign
 /// `plan.pptx` typed straight in names and picks in one go. The file is made in the folder
 /// on screen when ⌘N was pressed.
 struct NewFileSheet: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @State private var query = ""
     @State private var name = ""
     @State private var highlight = 0

@@ -4,10 +4,10 @@ import FlamingoExtract
 import FlamingoDesign
 
 struct DocumentSurface: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let file: FileRef
     let url: URL
-    @ObservedObject var pane: DocumentPane
+    var pane: DocumentPane
     /// The pointer is somewhere in this pane (brightens •••).
     var paneHovering = false
     static let textExtensions = TextExtractor.extensions.subtracting(["rtf", "rtfd", "ipynb"])
@@ -67,7 +67,7 @@ struct DocumentSurface: View {
 
 /// The file's folders as quiet links, `research / interviews`; the vault's name at its root.
 private struct Breadcrumb: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let file: FileRef
     let open: (String) -> Void
 
@@ -96,10 +96,10 @@ private struct Breadcrumb: View {
 }
 
 struct ExactSourceReader: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let file: FileRef
     let url: URL
-    @ObservedObject var pane: DocumentPane
+    var pane: DocumentPane
     @State private var sections: [FlamingoExtract.Section] = []
     @State private var selectedIndex = 0
     @State private var loading = false

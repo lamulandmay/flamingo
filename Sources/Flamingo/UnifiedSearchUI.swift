@@ -56,7 +56,7 @@ struct UnifiedSearchRow: View {
 /// Search selection is deliberately independent of the editing panes: arrowing through
 /// results never replaces an unsaved buffer or records a misleading work session.
 struct SearchResultDetail: View {
-    @ObservedObject var state: AppState
+    var state: AppState
     let vault: Vault
     let result: UnifiedSearchResult
     let query: String
@@ -211,7 +211,7 @@ struct SearchExactPreview: View {
     @State private var previewError: String?
     @State private var loading = false
     @State private var eligible = false
-    @StateObject private var previewPane = DocumentPane(id: .secondary)
+    @State private var previewPane = DocumentPane(id: .secondary)
     private var anchor: FileAnchor? { hit?.anchor }
     private var key: String { url.path + "|" + (hit?.id ?? "") + "|" + String(PreviewKind.modificationDate(of: url)?.timeIntervalSince1970 ?? 0) }
     var body: some View {

@@ -10,7 +10,7 @@ import FlamingoDesign
 /// to take it back out. Click empty space or press Return to start the next connection, and
 /// Esc to leave. Typing finds any file in the vault, and Return picks the top match.
 struct ConnectGrid: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @State private var query = ""
     /// What shows before you type: the open file, tabs, where you've been, this folder.
     @State private var working: [FileRef] = []

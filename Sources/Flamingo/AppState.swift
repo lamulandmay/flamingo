@@ -66,19 +66,28 @@ enum PaletteMode { case commands, search }
 /// `vault`, `files`, `selected`, `anchor`, `mode` are the names CONTRACT.md promises
 /// to other sessions; everything else is the shell's own.
 @MainActor
-final class AppState: ObservableObject {
+@Observable
+final class AppState {
     let actionHistory: ActionHistory
-    var suppressActionHistory = false
+    @ObservationIgnored var suppressActionHistory = false
 
     // MARK: Contract
 
-    @Published private(set) var vault: Vault?
-    @Published private(set) var files: [FileRef] = []
-    @Published var selected: FileRef? { didSet {
+    private(set) var vault: Vault?
+    /// Set without comparing old and new: on a whole disk that is a million paths, too many
+    /// to compare on the main thread every time the listing moves.
+    private(set) var files: [FileRef] {
+        get { access(keyPath: \.files); return fileList }
+        set { withMutation(keyPath: \.files) { fileList = newValue }; filesChanged.send() }
+    }
+    @ObservationIgnored private var fileList: [FileRef] = []
+    /// Fires after `files` is replaced, for AppKit owners such as the palette.
+    @ObservationIgnored let filesChanged = PassthroughSubject<Void, Never>()
+    var selected: FileRef? { didSet {
         if selected != oldValue, !synchronizingPane { activePane.show(selected); selectionChanged() }
     } }
     /// The sidebar's folder, or the selected file's parent. The graph scopes to it.
-    @Published var selectedFolder: String?
+    var selectedFolder: String?
     /// Divider widths and window width: per-frame geometry, observed only by the layout so
     /// dragging a divider doesn't redraw every view reading this object.
     let layout = PanelLayout()
@@ -90,9 +99,9 @@ final class AppState: ObservableObject {
         get { swipe.amount }
         set { swipe.amount = newValue }
     }
-    private var restoringHistory = false
-    var openingVault = false
-    @Published var anchor: FileAnchor? { didSet {
+    @ObservationIgnored private var restoringHistory = false
+    @ObservationIgnored var openingVault = false
+    var anchor: FileAnchor? { didSet {
         if anchor != oldValue, !synchronizingPane {
             if activePane.anchor != anchor { activePane.anchor = anchor }
             history.updateAnchor(anchor)
@@ -103,28 +112,35 @@ final class AppState: ObservableObject {
     } }
     /// Files, Graph, Trail, Ask. The design module's enum, so `SegmentedModes` binds directly.
     typealias Mode = FlamingoMode
-    @Published var mode: Mode = .files { didSet {
+    var mode: Mode = .files { didSet {
+        // Setting `mode` from here runs this again (it is observed), so the put-back is skipped.
+        if redirectingMode { return }
         // Chat lives in the right sidebar now, reachable from every mode: ⌘4, menus and
         // restored history that still say "ask" open it there instead of replacing the view.
-        if mode == .ask { mode = oldValue == .ask ? .files : oldValue; focusChat(); return }
+        if mode == .ask {
+            redirectingMode = true; mode = oldValue == .ask ? .files : oldValue; redirectingMode = false
+            focusChat(); return
+        }
         if mode != oldValue { modeChanged(); recordSetting("Change View", before: oldValue, after: mode) { [weak self] in self?.mode = $0 } }
     } }
 
+    @ObservationIgnored private var redirectingMode = false
+
     // MARK: Shell state
 
-    @Published private(set) var tree = FileTree.empty
+    private(set) var tree = FileTree.empty
     /// Folders (relative paths) whose listing changed on disk; `""` among them means all.
     /// The sidebar re-lists the ones it has loaded when `treeRevision` moves.
-    @Published private(set) var treeRevision = 0
-    private(set) var changedFolders: Set<String> = []
+    private(set) var treeRevision = 0
+    @ObservationIgnored private(set) var changedFolders: Set<String> = []
     /// `.flamingo/bookmarks.json`: files, folders, searches and groups, Obsidian's format.
-    @Published private(set) var bookmarks = Bookmarks()
-    @Published private(set) var bookmarksError: String?
+    private(set) var bookmarks = Bookmarks()
+    private(set) var bookmarksError: String?
     /// The left sidebar: which tab shows, whether the panel beside the ribbon is open, and
     /// the file explorer's order and auto-reveal toggle.
-    @Published var sidebarTab = Defaults.sidebarTab { didSet { Defaults.sidebarTab = sidebarTab; recordSetting("Change Sidebar", before: oldValue, after: sidebarTab) { [weak self] in self?.sidebarTab = $0 } } }
-    @Published var sidebarCollapsed = Defaults.sidebarCollapsed { didSet { Defaults.sidebarCollapsed = sidebarCollapsed; if !sidebarCollapsed { tiling.userOpened(.sidebar) } } }
-    @Published var fileSort = Defaults.fileSort {
+    var sidebarTab = Defaults.sidebarTab { didSet { Defaults.sidebarTab = sidebarTab; recordSetting("Change Sidebar", before: oldValue, after: sidebarTab) { [weak self] in self?.sidebarTab = $0 } } }
+    var sidebarCollapsed = Defaults.sidebarCollapsed { didSet { Defaults.sidebarCollapsed = sidebarCollapsed; if !sidebarCollapsed { tiling.userOpened(.sidebar) } } }
+    var fileSort = Defaults.fileSort {
         didSet {
             guard fileSort != oldValue else { return }
             recordSetting("Sort Files", before: oldValue, after: fileSort) { [weak self] in self?.fileSort = $0 }
@@ -132,7 +148,7 @@ final class AppState: ObservableObject {
             if let v = vault { tree = FileTree(vault: v, sort: fileSort) }
         }
     }
-    @Published var autoReveal = Defaults.autoReveal {
+    var autoReveal = Defaults.autoReveal {
         didSet {
             recordSetting("Auto Reveal", before: oldValue, after: autoReveal) { [weak self] in self?.autoReveal = $0 }
             Defaults.autoReveal = autoReveal
@@ -140,11 +156,11 @@ final class AppState: ObservableObject {
         }
     }
     /// "Collapse all" in the file explorer or the bookmarks, by tab.
-    @Published private(set) var collapseRequest: (tab: SidebarTab, id: UUID)?
+    private(set) var collapseRequest: (tab: SidebarTab, id: UUID)?
     /// A row the file explorer or the bookmarks should start renaming in place.
-    @Published private(set) var renameRequest: RenameRequest?
+    private(set) var renameRequest: RenameRequest?
     /// The current file, while its name in the title is being edited (`renameInTitle`).
-    @Published var renamingTitle: FileRef?
+    var renamingTitle: FileRef?
     /// The search tab's query and results; kept here so they survive switching tabs.
     let sidebarSearch = SidebarSearchModel()
     /// The search results list in the content area (SearchResults.swift).
@@ -154,76 +170,88 @@ final class AppState: ObservableObject {
     let favorites = FinderFavoritesModel()
     /// Requests (reveal, rename, collapse) a sidebar list has acted on, so one made after
     /// a tab switch doesn't act on them again.
-    private var handledRequests: Set<UUID> = []
+    @ObservationIgnored private var handledRequests: Set<UUID> = []
 
     /// `true` the first time a sidebar list sees request `id`.
     func take(_ id: UUID) -> Bool { handledRequests.insert(id).inserted }
     /// `files` as a set, for membership on a whole-disk vault.
-    private(set) var fileSet: Set<FileRef> = []
+    @ObservationIgnored private(set) var fileSet: Set<FileRef> = []
     /// Bumped whenever `files` is replaced, so the palette rebuilds its table only then.
-    private(set) var filesVersion = 0
+    @ObservationIgnored private(set) var filesVersion = 0
     /// `false` until the first full walk of the vault lands; `files` is partial until then.
-    private var listed = false
-    private var fileListingRequest = 0
+    @ObservationIgnored private var listed = false
+    @ObservationIgnored private var fileListingRequest = 0
     /// One line over the content with at most one action, such as Undo after an unpin.
-    @Published private(set) var toast: ToastMessage?
-    private var toastTask: Task<Void, Never>?
+    private(set) var toast: ToastMessage?
+    @ObservationIgnored private var toastTask: Task<Void, Never>?
     /// `true` when `~/Library/Mail` or `~/Library/Messages` exists but can't be read.
-    @Published private(set) var needsFullDiskAccess = false
-    @Published private(set) var comments: [Comment] = []
-    @Published private(set) var commentCounts: [FileRef: Int] = [:]
-    @Published private(set) var graph = Graph()
-    @Published private(set) var sections: [FlamingoExtract.Section] = []
+    private(set) var needsFullDiskAccess = false
+    private(set) var comments: [Comment] = []
+    private(set) var commentCounts: [FileRef: Int] = [:]
+    /// Replaced, never compared: `graphRevision` says when (see `files`).
+    private(set) var graph: Graph {
+        get { access(keyPath: \.graph); return graphValue }
+        set { withMutation(keyPath: \.graph) { graphValue = newValue } }
+    }
+    @ObservationIgnored private var graphValue = Graph()
+    private(set) var sections: [FlamingoExtract.Section] = []
     /// `nil` when no reindex is running. The palette shows it; nothing else on screen does,
-    /// so it lives outside this object's `objectWillChange` and ticks don't redraw the window.
+    /// so it lives in its own object and ticks don't redraw the window.
     let indexing = IndexingModel()
     var indexStatus: VaultSession.IndexStatus? { indexing.status }
-    @Published var railVisible = Defaults.railVisible { didSet { Defaults.railVisible = railVisible; if railVisible { tiling.userOpened(.inspector) }; refreshGraphIfShown() } }
+    var railVisible = Defaults.railVisible { didSet { Defaults.railVisible = railVisible; if railVisible { tiling.userOpened(.inspector) }; refreshGraphIfShown() } }
     /// Set when the user shows the rail on a window too narrow to show it by itself.
-    @Published var railPinned = false
+    var railPinned = false
     /// Tracked by the app delegate; the rail hides itself below `narrowWindow` unless pinned.
     var windowWidth: CGFloat {
         get { layout.windowWidth }
-        set { if layout.windowWidth != newValue { layout.windowWidth = newValue; windowResizedForTiles() } }
+        set {
+            guard layout.windowWidth != newValue else { return }
+            layout.windowWidth = newValue
+            windowNarrow = newValue < AppState.narrowWindow
+            windowResizedForTiles()
+        }
     }
     static let narrowWindow: CGFloat = 980
+    /// The width crossing `narrowWindow`: observed here, where every pixel of a resize isn't.
+    private(set) var windowNarrow = false
 
     /// What the layout actually shows: the user's choice, unless the window is too narrow.
-    var railShown: Bool { railVisible && (windowWidth >= AppState.narrowWindow || railPinned) }
+    var railShown: Bool { railVisible && (!windowNarrow || railPinned) }
     var sidebarWidth: CGFloat {
         get { layout.leftWidth }
         set { layout.leftWidth = newValue; Defaults.sidebarWidth = newValue }
     }
     /// The right sidebar's open tab.
-    @Published var inspectorTab = Defaults.inspectorTab { didSet { Defaults.inspectorTab = inspectorTab; refreshGraphIfShown() } }
+    var inspectorTab = Defaults.inspectorTab { didSet { Defaults.inspectorTab = inspectorTab; refreshGraphIfShown() } }
     /// Bumped to put the keys in the chat field.
-    @Published private(set) var chatFocusRequest = 0
+    private(set) var chatFocusRequest = 0
     /// Bumped whenever connections or dismissed suggestions change on disk.
-    @Published var connectionsRevision = 0
-    private var workspaceSaveTask: Task<Void, Never>?
+    var connectionsRevision = 0
+    @ObservationIgnored private var workspaceSaveTask: Task<Void, Never>?
     /// The suggestion deck, while wandering.
-    @Published var wander: WanderDeck? { didSet { refreshGraphIfShown() } }
+    var wander: WanderDeck? { didSet { refreshGraphIfShown() } }
     /// Bumped whenever `graph` is replaced. Views compare this, not the graph itself.
-    @Published private(set) var graphRevision = 0
+    private(set) var graphRevision = 0
     /// The newest connection for the graph to show off; a new `id` plays it.
-    @Published private(set) var graphCelebration: GraphCelebration?
+    private(set) var graphCelebration: GraphCelebration?
     /// Thoughts and connections celebrated so far; the Thoughts tab's glyph hops on each.
-    @Published private(set) var celebrationCount = 0
+    private(set) var celebrationCount = 0
     /// Bumped to start the graph's Replay History.
-    @Published private(set) var graphReplayRequest = 0
+    private(set) var graphReplayRequest = 0
     /// How the graph is laid out. From View ▸ Graph Layout, the palette, or the graph's own menu.
-    @Published var graphArrangement = Defaults.graphArrangement { didSet { Defaults.graphArrangement = graphArrangement } }
-    @Published private(set) var jumpRequest: JumpRequest? { didSet {
+    var graphArrangement = Defaults.graphArrangement { didSet { Defaults.graphArrangement = graphArrangement } }
+    private(set) var jumpRequest: JumpRequest? { didSet {
         if !synchronizingPane { activePane.jumpRequest = jumpRequest }
     } }
-    @Published private(set) var revealRequest: RevealRequest?
+    private(set) var revealRequest: RevealRequest?
     /// What the columns have selected, vault-relative, for the file explorer to highlight
     /// without opening it (ColumnBrowser.swift). Cleared when the sidebar picks for itself.
-    @Published var columnsSelection: String?
-    @Published private(set) var history = History()
-    @Published var trailEnabled = TrailStore.isEnabled { didSet { TrailStore.isEnabled = trailEnabled; recents.refreshSoon(); recordSetting("Record Trail", before: oldValue, after: trailEnabled) { [weak self] in self?.trailEnabled = $0 } } }
+    var columnsSelection: String?
+    private(set) var history = History()
+    var trailEnabled = TrailStore.isEnabled { didSet { TrailStore.isEnabled = trailEnabled; recents.refreshSoon(); recordSetting("Record Trail", before: oldValue, after: trailEnabled) { [weak self] in self?.trailEnabled = $0 } } }
 
-    private(set) var session: VaultSession?
+    @ObservationIgnored private(set) var session: VaultSession?
     /// Recent files for the ⌥⇧ ring and Go → Recent Files (AppState+Recents.swift). Separate
     /// objects, so their updates redraw only the ring, not the window.
     let recents = RecentFilesModel()
@@ -232,31 +260,33 @@ final class AppState: ObservableObject {
     let thoughts = ThoughtsRuntime()
     /// Plan 18: which agents work where, the dot, and Make Project.
     let agentProjects = AgentProjectsModel()
-    @Published var isNewFilePresented = false
+    var isNewFilePresented = false
     /// Connect mode (⌘J): the grid of files you click to connect, over the content.
-    @Published var connectGridShown = false
+    var connectGridShown = false
     /// Where the New File sheet creates: the folder on screen when ⌘N was pressed.
-    @Published var newFileDirectory: URL?
-    @Published var sourceHighlight = "" { didSet {
+    var newFileDirectory: URL?
+    var sourceHighlight = "" { didSet {
         if !synchronizingPane { activePane.sourceHighlight = sourceHighlight }
     } }
-    @Published var selectedCommentID: UUID?
-    @Published var openFiles: [FileRef] = []
-    @Published var isHealthPresented = false
-    @Published var isInboxPresented = false
+    var selectedCommentID: UUID?
+    var openFiles: [FileRef] = []
+    var isHealthPresented = false
+    var isInboxPresented = false
     /// The morning inbox (see `AppState+Briefing.swift`).
-    lazy var briefing: BriefingModel = { let model = BriefingModel(); model.state = self; return model }()
-    @Published var analysisMessage: String?
-    @Published var continuityError: String?
-    private var reconcilingRenames: VaultSession?
-    @Published var automaticAnalysis = UserDefaults.standard.object(forKey: "automaticAnalysis") as? Bool ?? true {
+    @ObservationIgnored lazy var briefing: BriefingModel = { let model = BriefingModel(); model.state = self; return model }()
+    /// `briefing.isPresented`, mirrored here so views that only read this object follow it.
+    var briefingShown = false
+    var analysisMessage: String?
+    var continuityError: String?
+    @ObservationIgnored private var reconcilingRenames: VaultSession?
+    var automaticAnalysis = UserDefaults.standard.object(forKey: "automaticAnalysis") as? Bool ?? true {
         didSet { UserDefaults.standard.set(automaticAnalysis, forKey: "automaticAnalysis"); recordSetting("Automatic Analysis", before: oldValue, after: automaticAnalysis) { [weak self] in self?.automaticAnalysis = $0 } }
     }
-    var textBuffers: [String: TextBuffer] = [:]
-    var savedAnchors: [String: FileAnchor] = [:]
-    var trackedEditorFiles = Set<FileRef>()
-    var analysisTasks: [FileRef: Task<Void, Never>] = [:]
-    var analyzedStamps: [FileRef: Date] = [:]
+    @ObservationIgnored var textBuffers: [String: TextBuffer] = [:]
+    @ObservationIgnored var savedAnchors: [String: FileAnchor] = [:]
+    @ObservationIgnored var trackedEditorFiles = Set<FileRef>()
+    @ObservationIgnored var analysisTasks: [FileRef: Task<Void, Never>] = [:]
+    @ObservationIgnored var analyzedStamps: [FileRef: Date] = [:]
     var askEngine: AskEngine? { session?.ask }
     var trailStore: TrailStore? { session?.trail }
 
@@ -270,32 +300,31 @@ final class AppState: ObservableObject {
     let tiling = PaneTiling()
     /// What each empty pane offers (PaneLauncher.swift).
     let launcher = PaneLauncherModel()
-    private var tilingObserver: AnyCancellable?
     var primaryPane: DocumentPane { allPanes[0] }
     var secondaryPane: DocumentPane { allPanes[1] }
-    @Published var activePaneID: DocumentPaneID = .primary
+    var activePaneID: DocumentPaneID = .primary
     var splitVisible: Bool { tiling.arrangement.kind != .single }
     var activePane: DocumentPane { pane(activePaneID) }
     func pane(_ id: DocumentPaneID) -> DocumentPane { allPanes[DocumentPaneID.allCases.firstIndex(of: id)!] }
-    var synchronizingPane = false
+    @ObservationIgnored var synchronizingPane = false
     /// Set by the sidebar so panels can hand keyboard focus back.
-    var focusSidebar: (() -> Void)?
+    @ObservationIgnored var focusSidebar: (() -> Void)?
     /// The main window. Floating panels parent to it.
-    weak var hostWindow: NSWindow?
+    @ObservationIgnored weak var hostWindow: NSWindow?
 
-    private var selectionFromSidebar = false
-    private var recordInHistory = true
-    private var pendingAnchor: FileAnchor?
+    @ObservationIgnored private var selectionFromSidebar = false
+    @ObservationIgnored private var recordInHistory = true
+    @ObservationIgnored private var pendingAnchor: FileAnchor?
     /// Keep startup references until a successful identity scan has drained its rename outbox.
     /// A missing path can be a file renamed while Flamingo was closed, not a deleted tab.
-    private var pendingWorkspaceSelection: FileRef?
-    private var workspaceRestorationPending = false
-    private var workspaceIndexCompleted = false
-    private var openedTask: Task<Void, Never>?
-    private var graphTask: Task<Void, Never>?
-    private var graphStale = true
-    private var trashConfirmationOpen = false
-    private var trailObserver: NSObjectProtocol?
+    @ObservationIgnored private var pendingWorkspaceSelection: FileRef?
+    @ObservationIgnored private var workspaceRestorationPending = false
+    @ObservationIgnored private var workspaceIndexCompleted = false
+    @ObservationIgnored private var openedTask: Task<Void, Never>?
+    @ObservationIgnored private var graphTask: Task<Void, Never>?
+    @ObservationIgnored private var graphStale = true
+    @ObservationIgnored private var trashConfirmationOpen = false
+    @ObservationIgnored private var trailObserver: NSObjectProtocol?
 
     init(actionHistory: ActionHistory? = nil) {
         self.actionHistory = actionHistory ?? ActionHistory()
@@ -303,8 +332,6 @@ final class AppState: ObservableObject {
             pane.onActivate = { [weak self] id in self?.activatePane(id) }
             pane.onLocationChanged = { [weak self] pane in self?.paneLocationChanged(pane) }
         }
-        // Layout changes are rare, so the whole shell may redraw for them (menus, the top bar).
-        tilingObserver = tiling.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         launcher.attach(self)
         agentProjects.state = self
         sidebarSearch.runUnified = { [weak self] query in
@@ -1788,7 +1815,7 @@ final class AppState: ObservableObject {
         Task { [weak self] in try? await Task.sleep(for: .milliseconds(450)); self?.showPendingPiP(c.id) }
     }
 
-    private var pendingPiP: GraphCelebration?
+    @ObservationIgnored private var pendingPiP: GraphCelebration?
 
     private func showPendingPiP(_ id: Int) {
         guard let c = pendingPiP, c.id == id else { return }

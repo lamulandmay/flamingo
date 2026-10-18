@@ -46,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Closing only hides it, so the Dock icon can show it again.
         w.isReleasedWhenClosed = false
         w.backgroundColor = Theme.NS.bg
-        w.contentView = NSHostingView(rootView: RootView().environmentObject(state))
+        w.contentView = NSHostingView(rootView: RootView().environment(state))
         if !w.setFrameUsingName("FlamingoMain") { w.center() }
         w.setFrameAutosaveName("FlamingoMain")
         w.delegate = self

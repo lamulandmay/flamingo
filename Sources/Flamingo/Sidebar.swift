@@ -31,7 +31,7 @@ enum SidebarTab: String, CaseIterable, Identifiable {
 /// The tab icons share the title bar with the traffic lights; the toggle beside them folds
 /// the panel away and leaves the ribbon. Plan 01 owns.
 struct Sidebar: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let topInset: CGFloat
 
     /// Room the traffic lights take at the window's left edge.
@@ -70,7 +70,7 @@ struct Sidebar: View {
 
 /// Folds the panel away, or brings it back (⌃⌘S).
 struct SidebarToggle: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         IconButton("sidebar.left", help: state.sidebarCollapsed ? "Expand" : "Collapse") { state.toggleSidebar() }
@@ -79,7 +79,7 @@ struct SidebarToggle: View {
 
 /// Files, Search, Bookmarks.
 private struct SidebarTabs: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @Namespace private var tabs
 
     var body: some View {
@@ -102,7 +102,7 @@ private struct SidebarTabs: View {
 
 /// The column of actions down the left edge.
 struct Ribbon: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     static let width: CGFloat = 44
 
     var body: some View {
@@ -119,7 +119,7 @@ struct Ribbon: View {
             IconButton("square.and.pencil", help: "Create new note") { state.newNote() }
             IconButton("dice", help: "Open random file") { state.openRandomFile() }
             Spacer(minLength: 0)
-            IconButton("tray", help: "Inbox", isOn: state.briefing.isPresented) { state.showBriefing() }
+            IconButton("tray", help: "Inbox", isOn: state.briefingShown) { state.showBriefing() }
         }
         .padding(.top, Theme.Space.xs)
         .padding(.bottom, Theme.Space.m)
@@ -130,7 +130,7 @@ struct Ribbon: View {
 /// Finder's column view of the current folder, with the open file selected in it; pressed
 /// again, back to the file.
 private struct FinderColumnsButton: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var browser: ColumnBrowserModel
 
     var body: some View {
@@ -143,7 +143,7 @@ private struct FinderColumnsButton: View {
 
 /// The open tab, and the vault switcher under it.
 private struct SidebarPanel: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         VStack(spacing: 0) {
@@ -203,7 +203,7 @@ struct IconMenu<Content: View>: View {
 
 /// New note, new folder, sort order, reveal the open file, collapse all.
 private struct FileExplorerHeader: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         let hasFile = state.selected != nil
@@ -231,7 +231,7 @@ private struct FileExplorerHeader: View {
 
 /// The vault's name; click for the other vaults.
 private struct VaultSwitcher: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @State private var hovering = false
 
     var body: some View {
@@ -286,7 +286,7 @@ private struct VaultSwitcher: View {
 /// (`FileMenu`). It follows what the columns select, and folders close again after a
 /// while left alone.
 struct FileExplorer: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         FileExplorerOutline(state: state, tree: state.tree, revision: state.treeRevision, selected: state.selected,

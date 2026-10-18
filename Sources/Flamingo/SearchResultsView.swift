@@ -11,9 +11,10 @@ import FlamingoIndex
 /// ⌘↩ in its app, Space is Quick Look, Esc goes back. It is a place in history, so ⌘[ from a
 /// file opened out of it comes back to it as it was left. Plan 01 owns.
 struct SearchResultsSurface: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var model: SearchResultsModel
     @FocusState private var fieldFocused: Bool
+    @State private var metaRefresh: Task<Void, Never>?
 
     /// The palette's dimming while a search is in flight.
     static let searchingOpacity = 0.55
@@ -38,7 +39,10 @@ struct SearchResultsSurface: View {
         }
         .background(Theme.Color.bg)
         // Trashed, renamed or edited files: dates, sizes and vanished rows catch up.
-        .onReceive(state.$treeRevision.dropFirst().debounce(for: .seconds(1), scheduler: RunLoop.main)) { _ in model.refreshMeta() }
+        .onChange(of: state.treeRevision) { _, _ in
+            metaRefresh?.cancel()
+            metaRefresh = Task { try? await Task.sleep(for: .seconds(1)); if !Task.isCancelled { model.refreshMeta() } }
+        }
         // Icons or columns from the toolbar or the View menu: the folder, in that style.
         .onReceive(state.browser.$style.dropFirst()) { _ in state.leaveResults() }
     }

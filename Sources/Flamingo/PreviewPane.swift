@@ -7,7 +7,7 @@ import FlamingoDesign
 /// frames: no PDF, Quick Look or text view is remounted. Each pane owns its location; only the
 /// active one drives the shell and the context rail.
 struct PreviewPane: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         TileContainer(tiling: state.tiling, geometry: state.tiling.geometry)
@@ -16,8 +16,8 @@ struct PreviewPane: View {
 }
 
 private struct TileContainer: View {
-    @EnvironmentObject var state: AppState
-    @ObservedObject var tiling: PaneTiling
+    @Environment(AppState.self) var state
+    var tiling: PaneTiling
     @ObservedObject var geometry: TileGeometry
 
     var body: some View {
@@ -47,8 +47,8 @@ private struct TileContainer: View {
 }
 
 private struct DocumentPaneColumn: View {
-    @EnvironmentObject var state: AppState
-    @ObservedObject var pane: DocumentPane
+    @Environment(AppState.self) var state
+    var pane: DocumentPane
     let slot: Int
     let count: Int
     var width: CGFloat = 1000

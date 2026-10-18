@@ -97,7 +97,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
             self.layout()
             if completed, self.isVisible { self.refreshItems() }
         }
-        catalogSubscription = state.$files.dropFirst().debounce(for: .milliseconds(800), scheduler: RunLoop.main).sink { [weak self] _ in
+        catalogSubscription = state.filesChanged.debounce(for: .milliseconds(800), scheduler: RunLoop.main).sink { [weak self] _ in
             guard let self, self.isVisible, self.model.items.isEmpty, !self.model.searching else { return }
             self.refreshItems()
         }

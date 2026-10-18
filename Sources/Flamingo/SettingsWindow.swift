@@ -57,7 +57,7 @@ final class SettingsWindowController: NSWindowController, NSToolbarDelegate {
         window.isReleasedWhenClosed = false
         window.backgroundColor = Theme.NS.bg
         window.tabbingMode = .disallowed
-        let host = NSHostingController(rootView: SettingsRoot(selection: selection).environmentObject(state))
+        let host = NSHostingController(rootView: SettingsRoot(selection: selection).environment(state))
         host.sizingOptions = [.preferredContentSize]
         window.contentViewController = host
         super.init(window: window)
@@ -162,7 +162,7 @@ enum Appearance: String, CaseIterable {
 // MARK: General
 
 private struct GeneralSettings: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @State private var appearance = Defaults.appearance
     @State private var inboxEachDay = Defaults.briefingAutoOpen
     @State private var offerProjects = Defaults.offerAgentProjects
@@ -188,7 +188,7 @@ private struct GeneralSettings: View {
 
             Divider().padding(.vertical, Theme.Space.s)
 
-            Toggle("Reveal the open file in the sidebar", isOn: $state.autoReveal)
+            Toggle("Reveal the open file in the sidebar", isOn: Bindable(state).autoReveal)
             Toggle("Open the inbox the first time each day", isOn: $inboxEachDay)
             Toggle("Offer to make folders agents work in into projects", isOn: $offerProjects)
 
@@ -233,7 +233,7 @@ private struct GeneralSettings: View {
 
 /// Everything that reads thoughts runs on this Mac, with no setting that sends them anywhere.
 private struct ThoughtSettings: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @State private var nightShift = Defaults.nightShiftEnabled
     @State private var thoughtModel = storedName("FlamingoThoughtModel")
     @State private var titleModel = storedName("FlamingoTitleModel")
@@ -241,7 +241,7 @@ private struct ThoughtSettings: View {
     var body: some View {
         Form {
             Toggle("Work on open thoughts overnight", isOn: $nightShift)
-            Toggle("Analyze files saved from Flamingo", isOn: $state.automaticAnalysis)
+            Toggle("Analyze files saved from Flamingo", isOn: Bindable(state).automaticAnalysis)
 
             Divider().padding(.vertical, Theme.Space.s)
 
@@ -267,7 +267,7 @@ private func modelField(_ name: String, _ text: Binding<String>) -> some View {
 // MARK: Capture
 
 private struct CaptureSettings: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @State private var captureGlobal = CaptureController.shared.isGlobalCaptureEnabled
     @State private var searchGlobal = SettingsWindowController.globalSearch?.isEnabled ?? false
     @State private var searchTaken = false
@@ -280,7 +280,7 @@ private struct CaptureSettings: View {
 
             Divider().padding(.vertical, Theme.Space.s)
 
-            Toggle("Record the trail of files you open", isOn: $state.trailEnabled)
+            Toggle("Record the trail of files you open", isOn: Bindable(state).trailEnabled)
         }
         .formStyle(.columns)
         .onChange(of: captureGlobal) {
@@ -305,7 +305,7 @@ extension SettingsWindowController {
 /// The vault's `.flamingo/ignore`, editable in place. Saving rescans, so what is now excluded
 /// drops out of the index and what is let back in gets read.
 private struct IndexSettings: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @State private var text = ""
     @State private var saved = ""
     @State private var error: String?

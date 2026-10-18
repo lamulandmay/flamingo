@@ -8,7 +8,7 @@ import FlamingoDesign
 /// count stays current without reloading the tree. Plan 01 owns.
 struct SidebarRow: View {
     let node: FileNode
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @Environment(\.flamingoRowSelected) private var selected
     @State private var hovering = false
 
@@ -59,7 +59,7 @@ struct SidebarRowHost: View {
 
     var body: some View {
         SidebarRow(node: node)
-            .environmentObject(state)
+            .environment(state)
             .environment(\.flamingoRowSelected, selected)
             .id(ObjectIdentifier(node))   // a reused cell starts its hover state afresh
     }

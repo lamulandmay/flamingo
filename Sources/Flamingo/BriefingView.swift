@@ -8,7 +8,7 @@ import FlamingoThoughts
 struct BriefingOverlay: View {
     @ObservedObject var model: BriefingModel
     let topInset: CGFloat
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         if model.isPresented {

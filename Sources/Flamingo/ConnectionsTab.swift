@@ -36,7 +36,7 @@ extension ConnectionReason {
 /// what Flamingo noticed. A suggestion is accepted or dismissed on hover; either way it
 /// leaves the suggestions.
 struct ConnectionsTab: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let file: FileRef?
 
     @State private var snapshot = FileConnectionsSnapshot()
@@ -134,7 +134,7 @@ struct ConnectionsTab: View {
 
 /// One connected file: its name, the line of evidence worth reading, and why, as glyphs.
 private struct ConnectionRow: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let connection: FileConnection
     let from: FileRef
     let suggested: Bool
@@ -260,7 +260,7 @@ private struct ConnectionRow: View {
 
 /// Type part of a name, Return connects the open file to the highlighted match.
 struct ConnectPicker: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let source: FileRef
     let onPick: (FileRef) -> Void
     @State private var query = ""

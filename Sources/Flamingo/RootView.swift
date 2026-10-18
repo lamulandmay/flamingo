@@ -10,7 +10,7 @@ import FlamingoAsk
 /// Sidebar | content | inspector, under a transparent title bar. Both sidebars resize by
 /// their dividers. Plan 01 owns.
 struct RootView: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View { RootLayout(layout: state.layout) }
 }
@@ -18,7 +18,7 @@ struct RootView: View {
 /// Observes only the geometry, so a divider drag redraws the frame and the columns' sizes,
 /// not every view that reads `AppState`. A swipe's frames redraw only `SwipeFollow`.
 private struct RootLayout: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var layout: PanelLayout
     @State private var dropTargeted = false
 
@@ -77,8 +77,8 @@ private struct RootLayout: View {
         .tint(Theme.Color.accent)
         .animation(Theme.Motion.normal, value: state.wander != nil)
         .animation(Theme.Motion.normal, value: state.connectGridShown)
-        .sheet(isPresented: $state.isNewFilePresented) { NewFileSheet().environmentObject(state) }
-        .sheet(isPresented: $state.isHealthPresented) { IndexHealthSheet(indexing: state.indexing).environmentObject(state) }
+        .sheet(isPresented: Bindable(state).isNewFilePresented) { NewFileSheet().environment(state) }
+        .sheet(isPresented: Bindable(state).isHealthPresented) { IndexHealthSheet(indexing: state.indexing).environment(state) }
         .background(MakeProjectHost(model: state.agentProjects))
         .overlay {
             Rectangle()
@@ -106,8 +106,8 @@ private struct RootLayout: View {
             case .files, .ask:
                 // The morning inbox covers the window; the panes stay mounted underneath.
                 PreviewPane()
-                    .opacity(state.briefing.isPresented ? 0 : 1)
-                    .allowsHitTesting(!state.briefing.isPresented)
+                    .opacity(state.briefingShown ? 0 : 1)
+                    .allowsHitTesting(!state.briefingShown)
             case .graph:
                 GraphView(graph: state.graph, selected: state.selected, vault: state.vault, scope: state.selectedFolder,
                           arrangement: state.graphArrangement,
@@ -158,7 +158,7 @@ private struct IndexingHairline: View {
 
 /// The strip under the transparent title bar: mode switcher, current file, rail toggle.
 struct TopBar: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let height: CGFloat
 
     var body: some View {
@@ -169,7 +169,7 @@ struct TopBar: View {
                     Color.clear.frame(width: Sidebar.trafficLights - Ribbon.width - Theme.Space.m - Theme.Space.xs)
                     SidebarToggle()
                 }
-                SegmentedModes(selection: $state.mode)
+                SegmentedModes(selection: Bindable(state).mode)
                     .disabled(state.vault == nil)
                     .opacity(state.vault == nil ? Theme.Opacity.disabled : 1)
                 Spacer()
@@ -199,7 +199,7 @@ struct TopBar: View {
 /// File name and anchor, centred, like a window title that only shows the user's own data.
 /// ↩ (when nothing else takes it) or right-click ▸ Rename… edits the name here.
 struct CurrentFileTitle: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         if let f = state.selected {
@@ -276,7 +276,7 @@ private struct FolderStyleToggle: View {
 /// Appears only when something needs you: indexing failed, or rename tracking did.
 /// Opens Workspace Health.
 private struct AttentionButton: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var indexing: IndexingModel
 
     var body: some View {
@@ -291,7 +291,7 @@ private struct AttentionButton: View {
 
 /// Empty state: the mark, and the one way in.
 struct NoVault: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
 
     var body: some View {
         VStack(spacing: Theme.Space.xl) {

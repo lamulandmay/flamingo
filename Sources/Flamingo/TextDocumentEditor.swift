@@ -405,9 +405,9 @@ final class TextBuffer: ObservableObject {
     }
 }
 struct TextDocumentEditor: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     @ObservedObject var buffer: TextBuffer
-    @ObservedObject var pane: DocumentPane
+    var pane: DocumentPane
     var body: some View {
         VStack(spacing: 0) {
             // Saved is the normal state and says nothing. Unsaved is a dot at the top right;

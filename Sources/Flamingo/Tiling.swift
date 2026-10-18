@@ -292,17 +292,18 @@ enum TilePanels {
 /// The layout the content area is in. Observed by the shell; `geometry` is separate so a
 /// divider drag redraws only the container.
 @MainActor
-final class PaneTiling: ObservableObject {
-    @Published private(set) var arrangement = TileArrangement()
+@Observable
+final class PaneTiling {
+    private(set) var arrangement = TileArrangement()
     let geometry: TileGeometry
     /// Panels folded to make room, with the width each took. Not published: it only matters when the layout changes.
-    var autoHidden: [TilePanel: CGFloat] = Defaults.tileAutoHidden { didSet { if autoHidden != oldValue { Defaults.tileAutoHidden = autoHidden } } }
+    @ObservationIgnored var autoHidden: [TilePanel: CGFloat] = Defaults.tileAutoHidden { didSet { if autoHidden != oldValue { Defaults.tileAutoHidden = autoHidden } } }
     /// True while the shell itself folds or restores panels, so that isn't mistaken for the user opening one.
-    var applyingPanels = false
+    @ObservationIgnored var applyingPanels = false
     /// The user opened a panel by hand: it is theirs again, nothing will restore it later.
     func userOpened(_ panel: TilePanel) { if !applyingPanels { autoHidden[panel] = nil } }
     /// The window width the panels were last fitted for; a resize only folds when it narrows.
-    var lastFitWidth: CGFloat = 0
+    @ObservationIgnored var lastFitWidth: CGFloat = 0
 
     init(geometry: TileGeometry? = nil) { self.geometry = geometry ?? TileGeometry() }
 

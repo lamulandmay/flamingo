@@ -5,7 +5,7 @@ import FlamingoDesign
 /// The ••• on a pane: dim until the pointer is in that pane, full on hover or while its popover
 /// is open. Clicking offers the five layouts as small diagrams.
 struct TileHandle: View {
-    @EnvironmentObject var state: AppState
+    @Environment(AppState.self) var state
     let paneID: DocumentPaneID
     /// The pointer is somewhere in this pane.
     var paneHovering: Bool

@@ -21,16 +21,35 @@ final class PaneLauncherModel: ObservableObject {
     @Published private(set) var picks: [DocumentPaneID: [LauncherRow]] = [:]
     let tables = FileTableCache()
     private weak var state: AppState?
-    private var subscription: AnyCancellable?
+    private var pendingRefresh: Task<Void, Never>?
     private var task: Task<Void, Never>?
     private var signature = ""
     private var states: [DocumentPaneID: LauncherState] = [:]
 
     func attach(_ state: AppState) {
         self.state = state
-        subscription = state.objectWillChange
-            .debounce(for: .milliseconds(150), scheduler: RunLoop.main)
-            .sink { [weak self] _ in self?.refresh() }
+        observe()
+    }
+
+    /// Watches what `refresh` keys on (which panes show, their files, the active one,
+    /// connections) and refreshes 150 ms after the last change. Re-armed after each change.
+    private func observe() {
+        guard let state else { return }
+        withObservationTracking {
+            _ = state.vault; _ = state.activePaneID; _ = state.connectionsRevision
+            for id in state.tiling.arrangement.visible { _ = state.pane(id).file }
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.observe()
+                self.pendingRefresh?.cancel()
+                self.pendingRefresh = Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard !Task.isCancelled else { return }
+                    self?.refresh()
+                }
+            }
+        }
     }
 
     func launcherState(for id: DocumentPaneID) -> LauncherState {
@@ -169,16 +188,16 @@ final class LauncherState: ObservableObject {
 /// An empty pane in a tiled layout: a field with no placeholder, then the files most related to
 /// what is already on screen. Return opens the highlighted one here.
 struct PaneLauncher: View {
-    @EnvironmentObject var state: AppState
-    @ObservedObject var pane: DocumentPane
+    @Environment(AppState.self) var state
+    var pane: DocumentPane
     var body: some View {
         LauncherBody(pane: pane, launcher: state.launcher.launcherState(for: pane.id), model: state.launcher)
     }
 }
 
 private struct LauncherBody: View {
-    @EnvironmentObject var state: AppState
-    @ObservedObject var pane: DocumentPane
+    @Environment(AppState.self) var state
+    var pane: DocumentPane
     @ObservedObject var launcher: LauncherState
     @ObservedObject var model: PaneLauncherModel
     @State private var focused = false

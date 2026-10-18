@@ -9,25 +9,26 @@ enum DocumentPaneID: String, Codable, CaseIterable { case primary, secondary, th
 /// Navigation belongs to a document surface. The shell mirrors only the focused pane;
 /// scrolling, loading or playing media in its neighbour cannot change the capture target.
 @MainActor
-final class DocumentPane: ObservableObject, Identifiable {
+@Observable
+final class DocumentPane: Identifiable {
     let id: DocumentPaneID
-    @Published private(set) var file: FileRef?
-    @Published var anchor: FileAnchor? {
+    private(set) var file: FileRef?
+    var anchor: FileAnchor? {
         didSet {
             guard anchor != oldValue else { return }
             if let file, let anchor { anchors[file.relativePath] = anchor }
             onLocationChanged?(self)
         }
     }
-    @Published var jumpRequest: JumpRequest?
-    @Published var sourceHighlight = ""
-    @Published var readSource = false
-    weak var navigator: AnchorNavigator?
-    var anchors: [String: FileAnchor] = [:]
+    var jumpRequest: JumpRequest?
+    var sourceHighlight = ""
+    var readSource = false
+    @ObservationIgnored weak var navigator: AnchorNavigator?
+    @ObservationIgnored var anchors: [String: FileAnchor] = [:]
     /// Retained until startup identity reconciliation resolves an offline rename.
-    var pendingFile: FileRef?
-    private var focusPending = false
-    var requestFocus: (() -> Void)? { didSet { fulfillFocusRequest() } }
+    @ObservationIgnored var pendingFile: FileRef?
+    @ObservationIgnored private var focusPending = false
+    @ObservationIgnored var requestFocus: (() -> Void)? { didSet { fulfillFocusRequest() } }
     func focusWhenReady() { focusPending = true; fulfillFocusRequest() }
     func cancelFocusRequest() { focusPending = false }
     private func fulfillFocusRequest() {
@@ -38,8 +39,8 @@ final class DocumentPane: ObservableObject, Identifiable {
             focus()
         }
     }
-    var onLocationChanged: ((DocumentPane) -> Void)?
-    var onActivate: ((DocumentPaneID) -> Void)?
+    @ObservationIgnored var onLocationChanged: ((DocumentPane) -> Void)?
+    @ObservationIgnored var onActivate: ((DocumentPaneID) -> Void)?
 
     init(id: DocumentPaneID) { self.id = id }
     func activate() { onActivate?(id) }
