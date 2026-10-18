@@ -462,7 +462,8 @@ public struct IconButton: View {
 }
 
 /// Thin accent progress line, 2pt. `value` 0…1 fills left to right and fades out at 1;
-/// `nil` pulses for indeterminate work.
+/// `nil` pulses for indeterminate work. Put a pulsing one in the tree only while the work
+/// runs: hidden by opacity, it would still redraw the window every display frame.
 public struct ProgressHairline: View {
     public var value: Double?
     @State private var pulse = false
@@ -728,6 +729,8 @@ final class PointerPress {
         watchdog?.invalidate(); watchdog = nil
     }
 
+    /// Only while the button is down: checks ten times a second for an up nobody delivered,
+    /// and stops with the press, so an idle app never wakes for it.
     private func startWatchdog() {
         watchdog?.invalidate()
         // QA builds hold a press made of synthesized events, which the hardware never saw.
@@ -737,6 +740,8 @@ final class PointerPress {
                 if NSEvent.pressedMouseButtons & 1 == 0 { PointerPress.shared.releaseAll() }
             }
         }
+        // A late check only holds a press look a moment longer; let macOS batch the wakeups.
+        watchdog?.tolerance = 0.05
     }
 }
 

@@ -136,6 +136,31 @@ final class ModelTests: XCTestCase {
         XCTAssertLessThan(t, 1.0)
     }
 
+    // MARK: Helper process
+
+    /// The app reads ModelIO formats in a copy of itself; a script stands in for that copy.
+    func testHelperOutputIsDecodedAndAFailedHelperThrows() throws {
+        let dir = try Fixtures.tempDir(self)
+        let usda = Fixtures.url("scene.usda")
+        let expected = try ModelExtractor().extract(usda)
+        let json = dir.appendingPathComponent("out.json")
+        try JSONEncoder().encode(expected).write(to: json)
+        let good = dir.appendingPathComponent("good.sh"), bad = dir.appendingPathComponent("bad.sh")
+        try "#!/bin/sh\n[ \"$1\" = \(ModelExtractor.helperFlag) ] && [ \"$2\" = '\(usda.path)' ] && cat '\(json.path)'\n"
+            .write(to: good, atomically: true, encoding: .utf8)
+        try "#!/bin/sh\necho 'not json'\nexit 2\n".write(to: bad, atomically: true, encoding: .utf8)
+        for script in [good, bad] { try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path) }
+
+        XCTAssertEqual(try ModelExtractor.readInHelper(usda, executable: good.path), expected)
+        XCTAssertThrowsError(try ModelExtractor.readInHelper(usda, executable: bad.path)) {
+            XCTAssertEqual($0 as? ExtractError, .malformed(usda.path))
+        }
+        // A helper that can't start reads in this process instead.
+        XCTAssertNil(try ModelExtractor.readInHelper(usda, executable: dir.appendingPathComponent("missing").path))
+        // Without the flag, the app starts as usual.
+        ModelExtractor.runHelperIfAsked(["Flamingo", "-lastVault", "/tmp"])
+    }
+
     // MARK: glTF
 
     func testGLBNodesMeshesMaterials() throws {

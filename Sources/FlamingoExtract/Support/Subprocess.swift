@@ -23,6 +23,16 @@ enum Subprocess {
         p.standardOutput = out
         p.standardError = err
         p.standardInput = FileHandle.nullDevice
+        // The tool and the drains run at the caller's QoS: an importer the indexer runs stays on
+        // the efficiency cores (a process otherwise starts at default), one for a document being
+        // opened doesn't wait behind utility work.
+        let qos = qos_class_self()
+        switch qos {
+        case QOS_CLASS_USER_INTERACTIVE, QOS_CLASS_USER_INITIATED: p.qualityOfService = .userInitiated
+        case QOS_CLASS_UTILITY: p.qualityOfService = .utility
+        case QOS_CLASS_BACKGROUND: p.qualityOfService = .background
+        default: break
+        }
 
         let exited = DispatchSemaphore(value: 0)
         p.terminationHandler = { _ in exited.signal() }
@@ -30,9 +40,10 @@ enum Subprocess {
 
         let group = DispatchGroup()
         let stdout = Drain(), stderr = Drain()
+        let drains = DispatchQueue.global(qos: DispatchQoS.QoSClass(rawValue: qos) ?? .utility)
         for (pipe, sink) in [(out, stdout), (err, stderr)] {
             group.enter()
-            DispatchQueue.global(qos: .utility).async {
+            drains.async {
                 sink.read(pipe.fileHandleForReading, limit: maxOutput,
                           onLimit: stopAtMaxOutput && sink === stdout ? { p.terminate() } : nil)
                 group.leave()

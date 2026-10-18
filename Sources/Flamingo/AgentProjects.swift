@@ -83,8 +83,11 @@ final class AgentProjectsModel: ObservableObject {
             guard let self else { return }
             self.queued -= 1
             guard let vault = self.vault, self.isEnabled else { return }
-            let scanner = self.scanner, find = self.find, declined = ProjectsStore(vault: vault).declined()
-            let found = await Task.detached(priority: .utility) { find(vault, declined, scanner) }.value
+            let scanner = self.scanner, find = self.find
+            // The No list is a file read: with the scan, off the main thread, every 5 s.
+            let found = await Task.detached(priority: .utility) {
+                find(vault, ProjectsStore(vault: vault).declined(), scanner)
+            }.value
             if self.vault == vault { self.publish(found) }
         }
         last = task

@@ -17,7 +17,10 @@ import FlamingoCore
 ///     postnote com.flamingo.qa "radial origin 400 300"  where the next ring opens (window coordinates, y down)
 ///     postnote com.flamingo.qa "tile thirds"            a layout: single halves thirds mainPlusStack grid
 ///     postnote com.flamingo.qa "pane 2"                 focus the pane in slot 2 (1-based); "pane close 2" closes it
-///     postnote com.flamingo.qa "window 1000 600"       content size in points; "window full" fills the screen; "window away" moves it off screen
+///     postnote com.flamingo.qa "window 1000 600"       content size in points; "window full" fills the screen;
+///                                                       "window offscreen" (or "away") parks it off every display, still unoccluded
+///     postnote com.flamingo.qa "lag off"                stops the lag monitor's 20 Hz timer (idle measurements); "lag on"
+///     postnote com.flamingo.qa "connect quiver"         logs the ⌘J grid's tiles and their tilt and bob as drawn now
 ///     postnote com.flamingo.qa "launch 2 #0"            the launcher in slot 2 opens its pick 0; "launch 2 q3" types q3 into it
 ///     postnote com.flamingo.qa "results sort size"      the search results list: a header click; also status, menu, kind, query, field
 ///     postnote com.flamingo.qa "rclick 300 20 Rename…"  right-click at a point (as click), then pick that menu item
@@ -28,6 +31,7 @@ enum QAHook {
     /// `FLAMINGO_QA_CHANNEL` picks another name, so concurrent test builds don't hear each other.
     static let name = Notification.Name(ProcessInfo.processInfo.environment["FLAMINGO_QA_CHANNEL"] ?? "com.flamingo.qa")
     private static var observer: NSObjectProtocol?
+    private static var lagTimer: Timer?
 
     static func install() {
         guard Log.enabled, observer == nil else { return }
@@ -102,11 +106,17 @@ enum QAHook {
             guard let window = (NSApp.delegate as? AppDelegate)?.window else { return }
             let n = parts[1].split(whereSeparator: { $0 == " " || $0 == "x" }).compactMap { Double($0) }
             if parts[1] == "full", let screen = window.screen { window.setFrame(screen.visibleFrame, display: true) }
-            // `window away`: off every screen, so a QA copy never sits under the user's pointer.
-            else if parts[1] == "away" { window.setFrameOrigin(NSPoint(x: -6000, y: -6000)) }
+            // Off every display, so the user's pointer and clicks never reach a test build.
+            else if parts[1] == "offscreen" || parts[1] == "away" { window.setFrameOrigin(NSPoint(x: -6000, y: 200)) }
             else if n.count == 2 { window.setContentSize(NSSize(width: n[0], height: n[1])) }
             return
         }
+        if parts[0] == "lag" {
+            if parts[1] == "off" { lagTimer?.invalidate(); lagTimer = nil } else if lagTimer == nil { startLagMonitor() }
+            return
+        }
+        // `connect quiver`: the ⌘J grid's tiles and their motion as drawn now (ConnectGrid.swift).
+        if parts[0] == "connect", parts[1] == "quiver" { return Log.debug("qa: quiver " + ConnectGridQA.report()) }
         // `results status`, `results sort modified`, `results kind pdfs` (AppState+SearchResults.swift).
         if parts[0] == "results" {
             (NSApp.delegate as? AppDelegate)?.state.runResultsQA(parts[1])
@@ -369,7 +379,7 @@ enum QAHook {
     private static func startLagMonitor() {
         var expected = Date().addingTimeInterval(0.05)
         var worst = 0.0, windowStart = Date()
-        Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
+        lagTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
             let now = Date()
             worst = max(worst, now.timeIntervalSince(expected))
             expected = now.addingTimeInterval(0.05)

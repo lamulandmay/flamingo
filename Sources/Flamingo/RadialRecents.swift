@@ -232,7 +232,10 @@ final class RadialRecentsController {
     func reloadHoldDelay() { machine.holdDelay = Defaults.radialHoldDelay }
     private var monitor: Any?
     private var holdTimer: Timer?
-    private var pollTimer: Timer?
+    /// Reads the pointer once per display frame while the ring is open, and not at all after.
+    private lazy var pointerTicker = FrameTicker { [weak self] _ in self?.poll() }
+    /// The last offset fed to the machine, so a still pointer costs no work.
+    private var lastPointer: CGVector?
     private var observers: [NSObjectProtocol] = []
     /// The files of the open ring, frozen when it opened.
     private var ring: [RecentItem] = []
@@ -373,25 +376,33 @@ final class RadialRecentsController {
 
     // MARK: Pointer
 
+    /// In step with the window's display (120 Hz on ProMotion), so the highlight follows the
+    /// pointer as smoothly as the ring is drawn; the pointer may leave the window, so it is read
+    /// rather than tracked.
     private func startPolling() {
         stopPolling()
-        pollTimer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.poll() }
-        }
-        RunLoop.main.add(pollTimer!, forMode: .common)
+        if let window { pointerTicker.start(on: window) }
         poll()
     }
 
-    private func stopPolling() { pollTimer?.invalidate(); pollTimer = nil }
+    private func stopPolling() {
+        pointerTicker.stop()
+        lastPointer = nil
+    }
 
     /// The pointer's movement since the ring opened, not its distance from the drawn centre,
     /// which may have been shifted to fit the window.
     private func poll() {
         guard machine.phase == .open else { return }
-        if let qaPointer { run(.pointer(qaPointer)); return }
-        guard let window else { return }
-        let p = window.mouseLocationOutsideOfEventStream
-        run(.pointer(CGVector(dx: p.x - anchorPoint.x, dy: anchorPoint.y - p.y)))
+        let offset: CGVector
+        if let qaPointer { offset = qaPointer }
+        else if let window {
+            let p = window.mouseLocationOutsideOfEventStream
+            offset = CGVector(dx: p.x - anchorPoint.x, dy: anchorPoint.y - p.y)
+        } else { return }
+        guard offset != lastPointer else { return }
+        lastPointer = offset
+        run(.pointer(offset))
     }
 
     // MARK: QA

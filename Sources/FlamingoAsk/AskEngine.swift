@@ -153,7 +153,8 @@ public final class AskEngine: @unchecked Sendable {
 
     public func askStreaming(_ question: String, history: [ConversationTurn], file: FileRef? = nil, context: AskContext = .empty) -> AsyncThrowingStream<Delta, Error> {
         AsyncThrowingStream { continuation in
-            let task = Task.detached { [self] in
+            // Someone asked and watches the answer arrive.
+            let task = Task.detached(priority: .userInitiated) { [self] in
                 do {
                     let scoped: PassageSource
                     if let file { scoped = SelectedFileSource(base: self.source, file: file) }

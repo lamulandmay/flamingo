@@ -142,15 +142,19 @@ private struct IndexingHairline: View {
     @ObservedObject var indexing: IndexingModel
 
     var body: some View {
-        ProgressHairline(value: progress)
-            .opacity(indexing.status == nil ? 0 : 1)
-            .animation(Theme.Motion.normal, value: indexing.status == nil)
-            // A band a few points tall, so the tooltip can be found; only while indexing.
-            .padding(.vertical, 3)
-            .contentShape(Rectangle())
-            .help(indexing.status?.summary ?? "")
-            .allowsHitTesting(indexing.status != nil)
-            .padding(.vertical, -3)
+        // Only in the tree while indexing: an indeterminate hairline's pulse repeats forever,
+        // and at opacity 0 it still redrew the window at the display's rate, idle or not.
+        ZStack {
+            if indexing.status != nil { ProgressHairline(value: progress).transition(.opacity) }
+        }
+        .frame(maxWidth: .infinity, minHeight: 2, maxHeight: 2)
+        .animation(Theme.Motion.normal, value: indexing.status == nil)
+        // A band a few points tall, so the tooltip can be found; only while indexing.
+        .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .help(indexing.status?.summary ?? "")
+        .allowsHitTesting(indexing.status != nil)
+        .padding(.vertical, -3)
     }
 
     private var progress: Double? { indexing.status?.fraction.map { min(1, max(0, $0)) } }

@@ -48,7 +48,10 @@ public final class VaultWatcher: @unchecked Sendable {
         return CFUUIDCreateString(nil, uuid) as String
     }
 
-    private let queue = DispatchQueue(label: "com.flamingo.vaultwatcher")
+    /// Utility, like the index writes it feeds: on a home folder FSEvents calls back about twice
+    /// a second all day (caches, logs, other apps' state), and none of it is the user waiting.
+    /// Unspecified QoS ran it at default, beside the UI on the performance cores.
+    private let queue = DispatchQueue(label: "com.flamingo.vaultwatcher", qos: .utility)
     private let queueKey = DispatchSpecificKey<Void>()
     private let lock = NSLock()
     private var changeHandler: (([FileRef]) -> Void)?
