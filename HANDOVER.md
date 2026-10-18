@@ -198,3 +198,29 @@ Glue only; the engines are in FlamingoCore/Index/Ask/Thoughts. Privacy: thoughts
 - For the briefing: `AppState.nightShiftCatchUp(onEvent:)`, `AppState.qaNow` / `AppState.now` (QA clock).
 - QA: `reply`, `ai`, `nightshift now|plan`, `clock <ISO>|reset` verbs; `scripts/thoughts-qa.sh <scratch> [dark|light]`. `FLAMINGO_QA_STREAM_DELAY=<s>` paces canned answers word by word.
 - The fake review-conflict memo works end to end for the deck and model pair (`scripts/headline-qa.sh`); other thoughts in the fixture vault are rejected by the validator.
+
+## Feel, search results, navigation (2026-10-18)
+
+- **Motion is springs** (DESIGN.md rule 7). `Theme.Motion.fast` / `normal` are critically damped
+  springs; `press` / `release` / `glide` / `arrive` add the touch of overshoot where a hand let go
+  or something was earned. AppKit uses `Motion.curve` (a Bézier within 1.3% of the spring),
+  `Motion.spring(_:)` (a `CASpringAnimation`) or `Motion.settle(_:)` (frame loops, the graph).
+  Reduce Motion turns every token into a short ease-out.
+- **Every click is seen.** `.buttonStyle(.press)` replaces `.plain`: the label grows about 3.5pt
+  (at most 12%) over a `Color.pressed` squircle and springs back. `.pressFeedback` does the same
+  for `onTapGesture` views without adding a gesture (one `PointerPress` local monitor);
+  `flamingoRow` has it built in; `PressAnimator` wraps `super.mouseDown` in the AppKit lists
+  (explorer, columns, search results). Panels (palette, capture) arrive via `PanelMotion`.
+- **Haptics and sound** go through `Feedback`: `.detent` / `.threshold` taps at `.drawCompleted`,
+  at least 40ms apart, only on crossings; Finder's trash sound on delete, the Dock's poof on
+  removing a bookmark. `Chime` is now a D5/A5/D6 bell with three voices per note.
+- **Search results** (`SearchResults*.swift`, `AppState+SearchResults.swift`): ↩ in the palette
+  with several files and no row picked opens Finder's list view in the content area: sortable
+  headers, sort and Kind menus, live refine, Quick Look, its own History entry. QA: `scripts/results-qa.sh`.
+- **Navigation**: swipes commit (`SwipeGate` / `SwipeProgress` in SwipeNavigation.swift, decisions
+  logged as `swipe:` under `FLAMINGO_DEBUG`); the explorer's crosshair is a one-shot "Reveal
+  current file" (⌘⇧J) with a pulse; following the open file is the Settings toggle, reset to on
+  once (`autoRevealCrosshairReset`). QA: `scripts/nav-qa.sh`.
+- **QA and tests need `ANTHROPIC_API_KEY=qa-placeholder`**, or the Keychain read behind
+  `AskEngine.hasKey` / `AskRecoveryTests` puts a prompt on the screen and hangs the run.
+  `hover|press|release|click x y` QA verbs post real mouse events (SwiftUI hover doesn't follow them).

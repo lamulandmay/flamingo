@@ -80,17 +80,23 @@ struct SidebarToggle: View {
 /// Files, Search, Bookmarks.
 private struct SidebarTabs: View {
     @EnvironmentObject var state: AppState
+    @Namespace private var tabs
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(SidebarTab.allCases) { tab in
                 IconButton(tab.symbol, help: tab.title, isOn: state.sidebarTab == tab) { state.sidebarTab = tab }
-                    .background(Squircle(radius: Theme.Radius.s)
-                        .fill(Theme.Color.hover)
-                        .opacity(state.sidebarTab == tab ? 1 : 0))
+                    .background {
+                        // One raised tile that glides to the tab picked.
+                        if state.sidebarTab == tab {
+                            Squircle(radius: Theme.Radius.s)
+                                .fill(Theme.Color.hover)
+                                .matchedGeometryEffect(id: "tab", in: tabs)
+                        }
+                    }
             }
         }
-        .animation(Theme.Motion.fast, value: state.sidebarTab)
+        .animation(Theme.Motion.glide, value: state.sidebarTab)
     }
 }
 
@@ -189,16 +195,18 @@ struct IconMenu<Content: View>: View {
         .frame(width: 24, height: 24)
         .opacity(hovering ? 1 : Theme.Opacity.rest)
         .onHover { hovering = $0 }
+        .pressFeedback(shade: Theme.Radius.m - 2)
         .help(help)
         .accessibilityLabel(help)
     }
 }
 
-/// New note, new folder, sort order, auto-reveal, collapse all.
+/// New note, new folder, sort order, reveal the open file, collapse all.
 private struct FileExplorerHeader: View {
     @EnvironmentObject var state: AppState
 
     var body: some View {
+        let hasFile = state.selected != nil
         PaneActions {
             IconButton("square.and.pencil", help: "New note") { state.newNote() }
             IconButton("folder.badge.plus", help: "New folder") { state.newFolder() }
@@ -210,7 +218,12 @@ private struct FileExplorerHeader: View {
                     }
                 }
             }
-            IconButton("scope", help: "Auto-reveal current file", isOn: state.autoReveal) { state.autoReveal.toggle() }
+            // Goes to the open file: its folders open, the list scrolls to it, the row pulses.
+            // Whether the list follows by itself is a setting (Settings, General).
+            IconButton("scope", help: "Reveal current file") { state.revealCurrentFile() }
+                .disabled(!hasFile)
+                .allowsHitTesting(hasFile)
+                .opacity(hasFile ? 1 : Theme.Opacity.disabled / Theme.Opacity.rest)
             IconButton("arrow.down.right.and.arrow.up.left", help: "Collapse all") { state.collapseAll(in: .files) }
         }
     }
@@ -323,6 +336,8 @@ private struct FileExplorerOutline: NSViewRepresentable {
             window.makeFirstResponder(outline)
         }
         coordinator.apply(self)
+        // Back from Search or Bookmarks, or unfolded: the list starts where the open file is.
+        coordinator.showSelectionOnceLaidOut()
         return scroll
     }
 
@@ -415,6 +430,29 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
             return self.url(of: node)
         }
         outline.onActivity = { [weak self] in self?.noteActivity() }
+        if Log.enabled {
+            FileExplorerQA.status = { [weak self] in self?.qaStatus() ?? "unmounted" }
+            FileExplorerQA.collapseIdle = { [weak self] in self?.collapseIdle() }
+            FileExplorerQA.scroll = { [weak self] y in
+                guard let self else { return }
+                self.scroll.contentView.setBoundsOrigin(NSPoint(x: 0, y: y))
+                self.scroll.reflectScrolledClipView(self.scroll.contentView)
+            }
+        }
+    }
+
+    /// For `sidebar status`: the selected row, and whether it is fully inside the visible area.
+    private func qaStatus() -> String {
+        let row = outline.selectedRow
+        let clip = scroll.contentView.bounds, insets = scroll.contentInsets
+        var place = "none"
+        if row >= 0 {
+            let r = outline.rect(ofRow: row)
+            let top = clip.minY + insets.top, bottom = clip.maxY - insets.bottom
+            let shown = r.minY >= top - 0.5 && r.maxY <= bottom + 0.5
+            place = (shown ? "visible" : "hidden") + String(format: " at=%.2f", (r.midY - top) / max(1, bottom - top))
+        }
+        return "row=\(row) id=\(selectedNode?.id ?? "-") \(place) rows=\(outline.numberOfRows) y=\(Int(clip.minY)) h=\(Int(clip.height)) docH=\(Int(outline.frame.height)) window=\(outline.window != nil)"
     }
 
     /// Where a row is on disk.
@@ -438,7 +476,10 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         if let collapse = v.collapse, state.take(collapse) { collapseAll() }
         if let reveal = v.reveal, state.take(reveal.id), reveal.force || v.autoReveal {
             selectionCleared = false
-            self.reveal(reveal.file, scroll: true, expand: reveal.expand)
+            // Asked for: about the middle unless it already sits comfortably, and a pulse.
+            // Following: only if hidden.
+            self.reveal(reveal.file, placement: reveal.pulse ? .centredIfCramped : .centredIfHidden,
+                        expand: reveal.expand, pulse: reveal.pulse)
             noteActivity()
         }
         if v.selected != lastSelected || v.selectedFolder != lastFolder || v.columnsSelection != lastColumns {
@@ -448,16 +489,15 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
             lastColumns = v.columnsSelection
             quickLookNode = nil
             func place(_ path: String) -> Bool {
-                if selectedNode?.id == path { return true }
                 let ref = FileRef(relativePath: path)
-                return v.autoReveal ? self.reveal(ref, scroll: true) : selectIfVisible(ref)
+                return v.autoReveal ? self.reveal(ref, placement: .centredIfHidden) : selectIfVisible(ref)
             }
             if let path = v.selected?.relativePath ?? v.columnsSelection ?? v.selectedFolder {
                 // Something the columns show that the tree leaves out (an ignored file):
                 // its folder instead.
                 var shown = place(path)
                 if !shown, v.selected == nil, path == v.columnsSelection, let folder = v.selectedFolder { shown = place(folder) }
-                if !shown { deselectFile() }
+                if !shown { deselectStale(keeping: v.selectedFolder) }
             } else {
                 deselectFile()
             }
@@ -477,6 +517,15 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
             outline.deselectAll(nil)
             suppressSelection = false
         }
+    }
+
+    /// With the place not in the list (auto-reveal off and its folder closed, or an ignored
+    /// file): no row stays highlighted for somewhere else, except the sidebar's own folder.
+    private func deselectStale(keeping folder: String?) {
+        guard let node = selectedNode, !(node.isFolder && node.id == folder) else { return }
+        suppressSelection = true
+        outline.deselectAll(nil)
+        suppressSelection = false
     }
 
     private var selectedNode: FileNode? {
@@ -521,7 +570,7 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         }
         if !selectionCleared, let path = selectionPath {
             let ref = FileRef(relativePath: path)
-            if revealSelection { _ = reveal(ref, scroll: false) }
+            if revealSelection { _ = reveal(ref, placement: nil) }
             else { _ = selectIfVisible(ref) }
         } else { outline.deselectAll(nil) }
         suppressSelection = wasSuppressed
@@ -618,15 +667,23 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         restoring = false
         expanded.formIntersection(keepPaths)
         persistExpansion()
-        if outline.selectedRow >= 0 { outline.scrollRowIntoView(outline.selectedRow) }
+        if outline.selectedRow >= 0 { outline.bringRowIntoView(outline.selectedRow, placement: .centredIfHidden) }
     }
 
-    /// Expands the file's ancestors (outermost first), selects its row and, if asked,
-    /// scrolls it into view. Never calls back into `state.select`. `false` when the file
-    /// isn't in the tree.
+    /// The tree's node for `path`. A file made a moment ago may be missing from a listing the
+    /// watcher hasn't refreshed yet: that folder is listed again, and the rows with it.
+    private func node(for path: String) -> FileNode? {
+        let (node, relisted) = tree.nodeRelisting(for: path)
+        if relisted { reloadRows(revealSelection: false) }
+        return node
+    }
+
+    /// Expands the file's ancestors (outermost first), selects its row and, with a
+    /// `placement`, scrolls to it (and pulses it, if asked) once the list is laid out. Never
+    /// calls back into `state.select`. `false` when the file isn't in the tree.
     @discardableResult
-    private func reveal(_ ref: FileRef, scroll shouldScroll: Bool, expand: Bool = false) -> Bool {
-        guard let node = tree.node(for: ref) else { return false }
+    private func reveal(_ ref: FileRef, placement: SidebarOutlineView.RowPlacement?, expand: Bool = false, pulse: Bool = false) -> Bool {
+        guard let node = node(for: ref.relativePath) else { return false }
         var top = node
         while let parent = top.parent, parent.depth >= 0 { top = parent }
         if top.depth >= 0, !rootItems.contains(where: { $0 === top }) {
@@ -654,8 +711,33 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
         suppressSelection = true
         outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         suppressSelection = wasSuppressed
-        if shouldScroll { outline.scrollRowIntoView(row) }
+        if let placement { show(node, placement: placement, pulse: pulse) }
         return true
+    }
+
+    /// Scrolls to `node`'s row and pulses it. A list that has only just appeared (back from
+    /// another tab, unfolded) has no size yet: it waits for one, then is put in place rather
+    /// than scrolled.
+    private func show(_ node: FileNode, placement: SidebarOutlineView.RowPlacement, pulse: Bool, attempt: Int = 0) {
+        guard outline.window != nil, scroll.contentView.bounds.height > 1 else {
+            guard attempt < 30 else { return }
+            DispatchQueue.main.async { [weak self] in self?.show(node, placement: placement, pulse: pulse, attempt: attempt + 1) }
+            return
+        }
+        let row = outline.row(forItem: node)
+        guard row >= 0 else { return }
+        outline.bringRowIntoView(row, placement: placement, animated: attempt == 0) { [weak self] in
+            guard pulse, let self else { return }
+            let row = self.outline.row(forItem: node)
+            guard row >= 0 else { return }
+            (self.outline.rowView(atRow: row, makeIfNecessary: false) as? SidebarRowView)?.pulse()
+        }
+    }
+
+    /// For a list that was just made: its selected row in view once it has a size.
+    func showSelectionOnceLaidOut() {
+        guard let node = selectedNode else { return }
+        show(node, placement: .centredIfHidden, pulse: false, attempt: 1)
     }
 
     /// With auto-reveal off: highlight the file only if its row is already in the tree.
@@ -669,8 +751,8 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     }
 
     private func beginRename(_ path: String) {
-        guard let node = tree.node(for: path) else { return }
-        reveal(FileRef(relativePath: path), scroll: true)
+        guard let node = node(for: path) else { return }
+        reveal(FileRef(relativePath: path), placement: .nearestEdge)
         beginRename(node)
     }
 
@@ -910,6 +992,14 @@ private final class FileExplorerCoordinator: NSObject, NSOutlineViewDataSource, 
     func menuDidClose(_ menu: NSMenu) {
         outline.endContextMenu()
     }
+}
+
+/// The mounted explorer, for the QA hook (NavigationQA.swift); set only with FLAMINGO_DEBUG.
+@MainActor
+enum FileExplorerQA {
+    static var status: (() -> String)?
+    static var collapseIdle: (() -> Void)?
+    static var scroll: ((CGFloat) -> Void)?
 }
 
 /// Non-filesystem rows in the explorer; neither can be selected, renamed, or dropped onto.

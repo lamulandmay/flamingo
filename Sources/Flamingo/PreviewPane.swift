@@ -69,7 +69,9 @@ private struct DocumentPaneColumn: View {
                 DocumentSurface(file: file, url: url, pane: pane, paneHovering: hovering)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if tiled {
-                PaneLauncher(pane: pane)
+                // A results list opened while tiled shows in the pane that asked for it.
+                if active, state.shownResults != nil { SearchResultsSurface(model: state.searchResults) }
+                else { PaneLauncher(pane: pane) }
             } else {
                 HStack {
                     TileHandle(paneID: pane.id, paneHovering: hovering)
@@ -98,7 +100,7 @@ private struct DocumentPaneColumn: View {
                             .foregroundStyle(Theme.Color.textTertiary).lineLimit(1)
                     }
                 }.contentShape(Rectangle())
-            }.buttonStyle(.plain)
+            }.buttonStyle(.press)
                 .help(pane.file?.relativePath ?? "")
             if narrow { TileHandle(paneID: pane.id, paneHovering: hovering) }
             IconButton("xmark", help: "Close Pane") { state.closePane(pane.id) }

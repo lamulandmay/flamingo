@@ -326,7 +326,7 @@ struct SessionRow: View {
                 .rotationEffect(.degrees(expanded ? 90 : 0))
                 .frame(width: M.chevron, height: M.header)
                 .contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityLabel(expanded ? "Collapse session" : "Expand session")
+            }.buttonStyle(.press).accessibilityLabel(expanded ? "Collapse session" : "Expand session")
             Text(range)
                 .font(Theme.Font.monoSmall)
                 .foregroundStyle(Theme.Color.textTertiary)
@@ -481,6 +481,7 @@ struct TrailFileStop: View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             HStack(spacing: TrailMetrics.gap) {
                 TrailThumb(file: file, vaultRoot: vaultRoot)
+                    .pressFeedback(shade: nil)
                     .onTapGesture { onOpen(file, anchor) }
                 if links { Hairline() } else { Spacer(minLength: 0) }
             }
@@ -491,11 +492,11 @@ struct TrailFileStop: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .help(file.relativePath)
-            }.buttonStyle(.plain).accessibilityLabel("Open " + file.relativePath)
+            }.buttonStyle(.press(shade: nil)).accessibilityLabel("Open " + file.relativePath)
             ForEach(notes) { note in
                 VStack(alignment: .leading, spacing: 3) {
                     Button(note.anchor?.label ?? "Open note location") { onOpen(file, note.anchor ?? anchor) }
-                        .font(.caption).buttonStyle(.plain).foregroundStyle(Theme.Color.textSecondary)
+                        .font(.caption).buttonStyle(.press(shade: nil)).foregroundStyle(Theme.Color.textSecondary)
                     TrailNoteText(note: note, source: file)
                 }
                 .padding(.leading, Theme.Space.s)
@@ -559,6 +560,7 @@ struct TrailCompactChain: View {
                     }
                     .fixedSize()
                     .contentShape(Rectangle())
+                    .pressFeedback(shade: Theme.Radius.s)
                     .onTapGesture { onOpen(file, anchor) }
                 case let .search(query):
                     Text("⌕ \(query)")

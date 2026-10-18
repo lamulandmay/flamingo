@@ -96,7 +96,7 @@ struct SearchResultDetail: View {
                                     .font(Theme.Font.monoSmall)
                                     .foregroundStyle(hit?.id == match.id ? Theme.Color.accent : Theme.Color.textTertiary)
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(.press)
                                 .help(match.snippet.replacingOccurrences(of: "«", with: "").replacingOccurrences(of: "»", with: ""))
                             }
                         }
@@ -164,7 +164,7 @@ struct SearchResultDetail: View {
                         HStack(alignment: .top, spacing: Theme.Space.s) {
                             FileGlyph(ext: member.file.ext)
                             VStack(alignment: .leading, spacing: 2) {
-                                Button(member.file.name) { openMember(member) }.buttonStyle(.plain).font(Theme.Font.body)
+                                Button(member.file.name) { openMember(member) }.buttonStyle(.press(shade: nil)).font(Theme.Font.body)
                                 Text(member.kind.label + " · " + member.reason).font(Theme.Font.small)
                                     .foregroundStyle(Theme.Color.textSecondary).fixedSize(horizontal: false, vertical: true)
                                 Text(member.file.directory).font(Theme.Font.small).foregroundStyle(Theme.Color.textTertiary).lineLimit(1)
@@ -174,7 +174,7 @@ struct SearchResultDetail: View {
                                 Button { comparison = member } label: { Image(systemName: "rectangle.split.2x1") }.help("Compare extracted sections")
                             }
                             Button { _ = FileHandoff.copy(urls: [vault.url(for: member.file)]) } label: { Image(systemName: "doc.on.doc") }.help("Copy this file")
-                        }.buttonStyle(.plain)
+                        }.buttonStyle(.press)
                             .onDrag { FileHandoff.itemProvider(url: vault.url(for: member.file), relativePath: member.file.relativePath) }
                     }
                 }
@@ -196,7 +196,7 @@ struct SearchResultDetail: View {
                 Text(label + (evidence.anchor.map { " · " + $0.label } ?? "")).font(Theme.Font.small).foregroundStyle(Theme.Color.accent)
                 Text(evidence.excerpt).font(Theme.Font.small).foregroundStyle(Theme.Color.textSecondary).lineLimit(2)
             }.frame(maxWidth: .infinity, alignment: .leading)
-        }.buttonStyle(.plain)
+        }.buttonStyle(.press)
     }
 }
 

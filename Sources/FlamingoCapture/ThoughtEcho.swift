@@ -148,6 +148,7 @@ private struct EchoRow: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
+        .pressFeedback(shade: Theme.Radius.s)
         .onTapGesture(perform: action)
         .pointingHandCursor()
         .accessibilityElement(children: .combine)

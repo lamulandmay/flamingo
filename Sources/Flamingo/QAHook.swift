@@ -19,6 +19,7 @@ import FlamingoCore
 ///     postnote com.flamingo.qa "pane 2"                 focus the pane in slot 2 (1-based); "pane close 2" closes it
 ///     postnote com.flamingo.qa "window 1000 600"       content size in points; "window full" fills the screen
 ///     postnote com.flamingo.qa "launch 2 #0"            the launcher in slot 2 opens its pick 0; "launch 2 q3" types q3 into it
+///     postnote com.flamingo.qa "results sort size"      the search results list: a header click; also status, menu, kind, query, field
 @MainActor
 enum QAHook {
     /// `FLAMINGO_QA_CHANNEL` picks another name, so concurrent test builds don't hear each other.
@@ -78,6 +79,8 @@ enum QAHook {
             state.jump(to: FileRef(relativePath: pieces[0]), anchor: pieces.count > 1 ? FileAnchor(parsing: pieces[1]) : nil)
             return
         }
+        // `nav graph decks/q3.pptx`, `sidebar status`, `swipe sim back 0.5,1.05`: NavigationQA.swift.
+        if ["nav", "sidebar", "swipe"].contains(parts[0]) { return NavigationQA.run(parts[0], parts[1]) }
         // Thoughts v2 QA verbs
         // `reply <text>`, `ai <question>`, `nightshift now|plan`, `clock <ISO>|reset` (AppState+Thoughts.swift).
         if ["reply", "ai", "nightshift", "clock"].contains(parts[0]) {
@@ -95,6 +98,11 @@ enum QAHook {
             let n = parts[1].split(whereSeparator: { $0 == " " || $0 == "x" }).compactMap { Double($0) }
             if parts[1] == "full", let screen = window.screen { window.setFrame(screen.visibleFrame, display: true) }
             else if n.count == 2 { window.setContentSize(NSSize(width: n[0], height: n[1])) }
+            return
+        }
+        // `results status`, `results sort modified`, `results kind pdfs` (AppState+SearchResults.swift).
+        if parts[0] == "results" {
+            (NSApp.delegate as? AppDelegate)?.state.runResultsQA(parts[1])
             return
         }
         // `tile thirds`, `pane 2`, `pane close 2`, `launch 2 #0`, `launch 2 q3`.
@@ -128,6 +136,30 @@ enum QAHook {
                 RadialRecentsController.shared?.qaOrigin(x: x, y: y)
             } else if let degrees = args.first.flatMap(Double.init) {
                 RadialRecentsController.shared?.qaPointer(degrees: degrees, distance: args.count > 1 ? Double(args[1]) ?? 80 : 80)
+            }
+            return
+        }
+        // `hover 120 80`, `press 120 80`, `release 120 80`, `click 120 80`: the pointer at a point
+        // in the main window's content (points, y down), queued as real events are, so hover,
+        // press states and taps can be seen and checked.
+        if ["hover", "press", "release", "click"].contains(parts[0]) {
+            let n = parts[1].split(separator: " ").compactMap { Double($0) }
+            guard n.count == 2, let window = (NSApp.delegate as? AppDelegate)?.window, let content = window.contentView else { return }
+            let point = content.convert(NSPoint(x: n[0], y: n[1]), to: nil)
+            func post(_ type: NSEvent.EventType) {
+                guard let e = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                 context: nil, eventNumber: 0, clickCount: 1,
+                                                 pressure: type == .leftMouseDown ? 1 : 0) else { return }
+                NSApp.postEvent(e, atStart: false)
+            }
+            switch parts[0] {
+            case "hover": post(.mouseMoved)
+            case "press": post(.mouseMoved); post(.leftMouseDown)
+            case "release": post(.leftMouseUp)
+            default:
+                post(.mouseMoved); post(.leftMouseDown)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { post(.leftMouseUp) }
             }
             return
         }

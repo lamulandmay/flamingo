@@ -6,11 +6,18 @@ import FlamingoDesign
 
 /// A folder, when no file is open: Finder's column view (`ColumnBrowser`) or its icon view,
 /// ⌥⌘3 / ⌥⌘1. Either shows the place `AppState.browser` holds, which follows the sidebar's
-/// folder and can also be a Finder favorite outside the vault.
+/// folder and can also be a Finder favorite outside the vault. A list of search results
+/// (SearchResultsView.swift) takes its place while history is on one.
 struct FolderSurface: View {
     @EnvironmentObject var state: AppState
 
-    var body: some View { FolderSurfaceContent(browser: state.browser) }
+    var body: some View {
+        if state.shownResults != nil {
+            SearchResultsSurface(model: state.searchResults)
+        } else {
+            FolderSurfaceContent(browser: state.browser)
+        }
+    }
 }
 
 private struct FolderSurfaceContent: View {
@@ -46,6 +53,9 @@ private struct IconSurface: View {
     @State private var items: [Item] = []
     @State private var failure: String?
     @State private var filter = ""
+    /// When the listing last arrived: tiles drawn within moments of it rise in one after
+    /// another; tiles scrolled to later are simply there.
+    @State private var loadedAt = Date.distantPast
     @FocusState private var filterFocused: Bool
     private var directory: URL? { browser.folder ?? browser.root }
     /// The folder's vault-relative path, nil outside the vault.
@@ -66,6 +76,8 @@ private struct IconSurface: View {
                     .font(Theme.Font.small)
                     .foregroundStyle(Theme.Color.textTertiary)
                     .monospacedDigit()
+                    .contentTransition(.numericText(value: Double(items.count)))
+                    .animation(Theme.Motion.normal, value: items.count)
                 Spacer(minLength: Theme.Space.m)
                 SearchField(text: $filter, focused: $filterFocused, onExit: { filter = "" })
                     .frame(width: 180)
@@ -83,8 +95,12 @@ private struct IconSurface: View {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 118, maximum: 150), spacing: Theme.Space.m)],
                               alignment: .leading, spacing: Theme.Space.l) {
-                        ForEach(visible) { item in FolderTile(item: item) }
+                        let arriving = Date().timeIntervalSince(loadedAt) < 0.5
+                        ForEach(Array(visible.enumerated()), id: \.element.id) { i, item in
+                            FolderTile(item: item, arrival: arriving && i < 24 ? i : nil)
+                        }
                     }
+                    .animation(Theme.Motion.normal, value: filter)
                     .padding(.horizontal, Theme.Space.xl)
                     .padding(.bottom, Theme.Space.xl)
                 }
@@ -128,6 +144,7 @@ private struct IconSurface: View {
                 return entries.filter(\.folder).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
                     + entries.filter { !$0.folder }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             }.value
+            loadedAt = Date()
         } catch { failure = error.localizedDescription; items = [] }
     }
 }
@@ -138,6 +155,15 @@ private struct FolderTile: View {
     let item: IconSurface.Item
     @State private var thumbnail: NSImage?
     @State private var hovering = false
+    /// Its place in the run of tiles rising in as the folder opens; nil when it's simply there.
+    private let arrival: Int?
+    @State private var shown: Bool
+
+    init(item: IconSurface.Item, arrival: Int? = nil) {
+        self.item = item
+        self.arrival = arrival
+        _shown = State(initialValue: arrival == nil)
+    }
 
     private var ref: FileRef? { item.path.map(FileRef.init(relativePath:)) }
 
@@ -150,7 +176,7 @@ private struct FolderTile: View {
                         .aspectRatio(contentMode: .fit)
                         .clipShape(Squircle(radius: 3))
                         .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
-                        .transition(.opacity)
+                        .transition(.blurReplace)
                 } else if item.folder {
                     FolderGlyph(size: 40)
                 } else {
@@ -173,6 +199,7 @@ private struct FolderTile: View {
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
         .animation(Theme.Motion.normal, value: thumbnail != nil)
+        .pressFeedback(shade: Theme.Radius.m)
         .onTapGesture { open() }
         .help(item.path ?? item.url.path)
         .onDrag { FileHandoff.itemProvider(url: item.url, relativePath: item.path) }
@@ -189,6 +216,13 @@ private struct FolderTile: View {
             Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
         }
         .task(id: item.id) { await loadThumbnail() }
+        .opacity(shown ? 1 : 0)
+        .scaleEffect(shown ? 1 : 0.94)
+        .offset(y: shown ? 0 : 6)
+        .onAppear {
+            guard let arrival, !shown else { return }
+            withAnimation(Theme.Motion.stagger(arrival)) { shown = true }
+        }
     }
 
     private func open() {

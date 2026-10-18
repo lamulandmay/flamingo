@@ -127,7 +127,7 @@ public struct Chip: View {
     public var body: some View {
         if let action {
             Button(action: action) { label }
-                .buttonStyle(.plain)
+                .buttonStyle(.press(shade: Theme.Radius.s))
                 .onHover { hovering = $0 }
                 .pointingHandCursor()
         } else {
@@ -268,7 +268,7 @@ public struct Toast: View {
             Spacer(minLength: 0)
             if let actionTitle {
                 Button(actionTitle) { action?() }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.press(shade: nil))
                     .font(Theme.Font.small.weight(.medium))
                     .foregroundStyle(Theme.Color.accent)
                     .pointingHandCursor()
@@ -279,7 +279,10 @@ public struct Toast: View {
         .background(Squircle(radius: Theme.Radius.m).fill(Theme.Color.bgRaised))
         .overlay(Squircle(radius: Theme.Radius.m)
             .strokeBorder(Theme.Color.hairline, lineWidth: Theme.Size.hairline))
-        .transition(.opacity)
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+        // Rises from the edge it lives on and settles; leaves by fading where it is.
+        .transition(.asymmetric(insertion: .offset(y: 14).combined(with: .scale(scale: 0.96, anchor: .bottom)).combined(with: .opacity),
+                                removal: .opacity.combined(with: .scale(scale: 0.98, anchor: .bottom))))
     }
 }
 
@@ -315,6 +318,7 @@ public enum FlamingoMode: Int, CaseIterable, Identifiable, Hashable, Sendable {
 /// Four SF Symbols, no text. Selected mode is accent on a raised segment.
 public struct SegmentedModes: View {
     @Binding public var selection: FlamingoMode
+    @Namespace private var segment
     public init(selection: Binding<FlamingoMode>) { self._selection = selection }
     /// `0` files, `1` graph, `2` trail, `3` ask, so a shell enum's `rawValue` binds directly.
     public init(selection: Binding<Int>) {
@@ -326,18 +330,20 @@ public struct SegmentedModes: View {
     public var body: some View {
         HStack(spacing: 2) {
             ForEach(FlamingoMode.views) { m in
-                ModeSegment(mode: m, selected: selection == m) { selection = m }
+                ModeSegment(mode: m, selected: selection == m, segment: segment) { selection = m }
             }
         }
         .padding(2)
         .background(Squircle(radius: Theme.Radius.m).fill(Theme.Color.hover))
-        .animation(Theme.Motion.fast, value: selection)
+        // The raised segment glides to the one picked, as a segmented control's thumb does.
+        .animation(Theme.Motion.glide, value: selection)
     }
 }
 
 private struct ModeSegment: View {
     let mode: FlamingoMode
     let selected: Bool
+    let segment: Namespace.ID
     let action: () -> Void
     @State private var hovering = false
 
@@ -348,12 +354,16 @@ private struct ModeSegment: View {
                 .foregroundStyle(selected ? Theme.Color.accent : Theme.Color.textSecondary)
                 .opacity(selected || hovering ? 1 : Theme.Opacity.rest)
                 .frame(width: 32, height: 22)
-                .background(ConcentricSquircle(parentRadius: Theme.Radius.m, padding: 2)
-                    .fill(Theme.Color.fill)
-                    .opacity(selected ? 1 : 0))
+                .background {
+                    if selected {
+                        ConcentricSquircle(parentRadius: Theme.Radius.m, padding: 2)
+                            .fill(Theme.Color.fill)
+                            .matchedGeometryEffect(id: "thumb", in: segment)
+                    }
+                }
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press(shade: Theme.Radius.m - 2))
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
         .help(mode.title)
@@ -401,7 +411,7 @@ public struct SearchField: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.Color.textTertiary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.press(shade: nil))
                 .accessibilityLabel("Clear")
                 .transition(.opacity)
             }
@@ -415,16 +425,20 @@ public struct SearchField: View {
 }
 
 /// A plain icon button: 13pt symbol, secondary, full opacity on hover, accent when `isOn`.
+/// Pressed, it swells on a spring over a shaded squircle and springs back on release. Each
+/// change of `bounce` makes the glyph hop once, for something that just happened behind it.
 /// `help` becomes the tooltip and the VoiceOver label; it is never drawn.
 public struct IconButton: View {
     public let systemName: String
     public var help: String
     public var isOn: Bool
+    public var bounce: Int
     public let action: () -> Void
     @State private var hovering = false
+    @Environment(\.isEnabled) private var enabled
 
-    public init(_ systemName: String, help: String, isOn: Bool = false, action: @escaping () -> Void) {
-        self.systemName = systemName; self.help = help; self.isOn = isOn; self.action = action
+    public init(_ systemName: String, help: String, isOn: Bool = false, bounce: Int = 0, action: @escaping () -> Void) {
+        self.systemName = systemName; self.help = help; self.isOn = isOn; self.bounce = bounce; self.action = action
     }
 
     public var body: some View {
@@ -432,13 +446,16 @@ public struct IconButton: View {
             Image(systemName: systemName)
                 .font(.system(size: Theme.Size.iconSmall))
                 .foregroundStyle(isOn ? Theme.Color.accent : Theme.Color.textSecondary)
+                .contentTransition(.symbolEffect(.replace))
+                .symbolEffect(.bounce, value: bounce)
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .opacity(hovering || isOn ? 1 : Theme.Opacity.rest)
+        .buttonStyle(.press(shade: Theme.Radius.m - 2))
+        .opacity(!enabled ? Theme.Opacity.disabled : hovering || isOn ? 1 : Theme.Opacity.rest)
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
+        .animation(Theme.Motion.fast, value: isOn)
         .help(help)
         .accessibilityLabel(help)
     }
@@ -505,6 +522,19 @@ extension View {
         )
     }
 
+    /// The press `PressStyle` gives a button, for a view that takes its clicks through gestures
+    /// (a row with `onTapGesture`, a tile, a card): it grows a little while the pointer is down
+    /// on it, over a shaded squircle of `shade` radius (`nil`: no shade, the view draws its own).
+    /// It watches the pointer instead of adding a gesture, so taps, double-clicks, context menus
+    /// and drags behave exactly as before.
+    public func pressFeedback(shade: CGFloat? = nil) -> some View { modifier(PressFeedback(shade: shade)) }
+
+    /// Sets `down` while the pointer is pressed on this view (and, with `grow`, swells it as
+    /// `pressFeedback` does). For views that shade the press themselves, like `flamingoRow`.
+    public func trackPress(_ down: Binding<Bool>, grow: Bool = false) -> some View {
+        modifier(PressTracking(down: down, grow: grow))
+    }
+
     /// Pointing-hand cursor while hovering. For chips and inline links.
     public func pointingHandCursor() -> some View { modifier(PointingHand()) }
 }
@@ -529,6 +559,7 @@ private struct PointingHand: ViewModifier {
 private struct FlamingoRow: ViewModifier {
     let selected: Bool
     @State private var hovering = false
+    @State private var down = false
 
     func body(content: Content) -> some View {
         content
@@ -538,13 +569,197 @@ private struct FlamingoRow: ViewModifier {
             .padding(.horizontal, Theme.Space.s)
             .frame(maxWidth: .infinity, minHeight: Theme.Size.row, alignment: .leading)
             .background(Squircle(radius: Theme.Radius.s)
-                .fill(selected ? Theme.Color.selection : hovering ? Theme.Color.hover : .clear))
+                .fill(selected ? Theme.Color.selection : down ? Theme.Color.pressed : hovering ? Theme.Color.hover : .clear))
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
+            .trackPress($down, grow: true)
             .environment(\.flamingoRowSelected, selected)
             .animation(Theme.Motion.fast, value: hovering)
             .animation(Theme.Motion.fast, value: selected)
             .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+// MARK: - Press
+
+/// A click you can see. While the pointer is down the control grows a little on a quick
+/// spring (`Motion.press`) and its shade deepens; let go and it settles back with a small
+/// overshoot (`Motion.release`). Growth is about 3.5pt across the longest side, at most 12%,
+/// so a glyph button visibly swells and a full-width row only breathes. Reduce Motion keeps
+/// the shade and drops the growth. `.buttonStyle(.press)` for every custom button.
+public struct PressStyle: ButtonStyle {
+    /// Radius of the shade drawn behind the label while pressed. `nil` draws none, for labels
+    /// that draw their own background; they brighten or darken a touch instead.
+    public var shade: CGFloat?
+    public init(shade: CGFloat? = Theme.Radius.s) { self.shade = shade }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        PressBody(label: configuration.label, pressed: configuration.isPressed, shade: shade)
+    }
+}
+
+extension ButtonStyle where Self == PressStyle {
+    /// `PressStyle` with a `Radius.s` shade.
+    public static var press: PressStyle { PressStyle() }
+    public static func press(shade: CGFloat?) -> PressStyle { PressStyle(shade: shade) }
+}
+
+public enum Press {
+    /// About 3.5pt of growth across the longest side, capped at 12%; 1 under Reduce Motion.
+    public static func grow(for size: CGSize) -> CGFloat {
+        let side = max(size.width, size.height)
+        guard !Theme.Motion.reduced, side > 1 else { return 1 }
+        return 1 + min(0.12, 3.5 / side)
+    }
+}
+
+private struct PressBody: View {
+    let label: ButtonStyleConfiguration.Label
+    let pressed: Bool
+    let shade: CGFloat?
+    @Environment(\.isEnabled) private var enabled
+
+    var body: some View {
+        label.modifier(PressLook(down: pressed && enabled, shade: shade))
+    }
+}
+
+/// The look of a press: shade behind (or, with no shade and `tint`, a touch brighter in dark
+/// and darker in light), growth, and the two springs.
+private struct PressLook: ViewModifier {
+    let down: Bool
+    let shade: CGFloat?
+    var tint = true
+    @State private var size: CGSize = .zero
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                if let shade { Squircle(radius: shade).fill(Theme.Color.pressed).opacity(down ? 1 : 0) }
+            }
+            .brightness(shade == nil && tint && down ? (scheme == .dark ? 0.08 : -0.06) : 0)
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
+            .scaleEffect(down ? Press.grow(for: size) : 1)
+            .animation(down ? Theme.Motion.press : Theme.Motion.release, value: down)
+    }
+}
+
+private struct PressFeedback: ViewModifier {
+    let shade: CGFloat?
+    @State private var down = false
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(PressLook(down: down, shade: shade))
+            .trackPress($down)
+    }
+}
+
+private struct PressTracking: ViewModifier {
+    @Binding var down: Bool
+    let grow: Bool
+    @State private var id = UUID()
+    @Environment(\.isEnabled) private var enabled
+
+    func body(content: Content) -> some View {
+        content
+            .modifier(PressLook(down: grow && down, shade: nil, tint: false))
+            .onHover { inside in
+                if inside, enabled {
+                    let binding = $down
+                    PointerPress.shared.enter(id) { binding.wrappedValue = $0 }
+                } else {
+                    PointerPress.shared.exit(id)
+                }
+            }
+            .onDisappear { PointerPress.shared.exit(id) }
+    }
+}
+
+/// One local monitor for the whole app: on a left mouse-down it tells every view under the
+/// pointer (the ones that registered on hover) that it is pressed, and on mouse-up, a drag of
+/// more than 4pt or the button found released (a menu or drag session can swallow the up),
+/// that it no longer is. Nothing is consumed.
+@MainActor
+final class PointerPress {
+    static let shared = PointerPress()
+    private var hovered: [UUID: (Bool) -> Void] = [:]
+    private var pressed: Set<UUID> = []
+    private var monitor: Any?
+    private var origin: NSPoint = .zero
+    private var watchdog: Timer?
+
+    func enter(_ id: UUID, _ set: @escaping (Bool) -> Void) {
+        install()
+        hovered[id] = set
+    }
+
+    func exit(_ id: UUID) {
+        if pressed.remove(id) != nil { hovered[id]?(false) }
+        hovered.removeValue(forKey: id)
+    }
+
+    private func install() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged]) { event in
+            MainActor.assumeIsolated { PointerPress.shared.handle(event) }
+            return event
+        }
+    }
+
+    private func handle(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            origin = NSEvent.mouseLocation
+            for (id, set) in hovered { pressed.insert(id); set(true) }
+            if !pressed.isEmpty { startWatchdog() }
+        case .leftMouseDragged:
+            let p = NSEvent.mouseLocation
+            if hypot(p.x - origin.x, p.y - origin.y) > 4 { releaseAll() }
+        default:
+            releaseAll()
+        }
+    }
+
+    private func releaseAll() {
+        for id in pressed { hovered[id]?(false) }
+        pressed.removeAll()
+        watchdog?.invalidate(); watchdog = nil
+    }
+
+    private func startWatchdog() {
+        watchdog?.invalidate()
+        // QA builds hold a press made of synthesized events, which the hardware never saw.
+        guard ProcessInfo.processInfo.environment["FLAMINGO_QA_CHANNEL"] == nil else { return }
+        watchdog = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                if NSEvent.pressedMouseButtons & 1 == 0 { PointerPress.shared.releaseAll() }
+            }
+        }
+    }
+}
+
+/// The same press for AppKit rows and cells: `press` as the mouse goes down, `release` once
+/// it comes up. Scales the view's layer about its centre on a real Core Animation spring.
+@MainActor
+public enum PressAnimator {
+    public static func press(_ view: NSView) { animate(view, to: Press.grow(for: view.bounds.size), bounce: 0, duration: 0.16) }
+    public static func release(_ view: NSView) { animate(view, to: 1, bounce: 0.3, duration: 0.42) }
+
+    private static func animate(_ view: NSView, to scale: CGFloat, bounce: CGFloat, duration: TimeInterval) {
+        view.wantsLayer = true
+        guard let layer = view.layer else { return }
+        let b = view.bounds
+        var t = CATransform3DMakeTranslation(b.midX, b.midY, 0)
+        t = CATransform3DScale(t, scale, scale, 1)
+        t = CATransform3DTranslate(t, -b.midX, -b.midY, 0)
+        let from = layer.presentation()?.transform ?? layer.transform
+        let anim = Theme.Motion.spring("transform", bounce: bounce, duration: duration)
+        anim.fromValue = NSValue(caTransform3D: from)
+        anim.toValue = NSValue(caTransform3D: t)
+        layer.transform = t
+        layer.add(anim, forKey: "flamingo.press")
     }
 }
 

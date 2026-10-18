@@ -202,6 +202,7 @@ private struct LauncherBody: View {
                 VStack(spacing: 0) {
                     ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
                         launcherRow(row, selected: i == launcher.selection && state.activePaneID == pane.id, folder: proxy.size.width >= 300, reasons: proxy.size.width >= 340)
+                            .pressFeedback(shade: Theme.Radius.s)
                             .onTapGesture { launcher.open(at: i, in: state) }
                     }
                 }

@@ -76,11 +76,7 @@ final class CapturePanelHost {
         window.alphaValue = 0
         window.makeKeyAndOrderFront(nil)
         window.invalidateShadow()
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = Self.fade
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            window.animator().alphaValue = 1
-        }
+        PanelMotion.arrive(window, fade: Self.fade)
     }
 
     /// Brings a panel that lost focus back to the front with its text intact.
@@ -102,9 +98,10 @@ final class CapturePanelHost {
         dismissing = true
         generation += 1
         let gen = generation
+        PanelMotion.leave(window)
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = Self.fade
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.timingFunction = Theme.Motion.curve
             window.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {

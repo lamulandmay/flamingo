@@ -2,7 +2,7 @@ import Foundation
 import FlamingoCore
 
 /// Back/forward over places: a file (with anchor), the mode it was seen in, and the sidebar
-/// folder. ⌘[ ⌘] and two-finger swipes. Plan 01 owns.
+/// folder, or a list of search results. ⌘[ ⌘] and two-finger swipes. Plan 01 owns.
 struct History {
     struct Entry: Equatable {
         var file: FileRef?
@@ -12,6 +12,10 @@ struct History {
         /// A folder outside the vault the folder surface showed (a Finder favorite such as
         /// /Applications), when that is where the user was.
         var place: URL?
+        /// A list of search results (SearchResults.swift). The list writes its query, order,
+        /// filter and selection into this one object as they change, so coming back to the
+        /// entry finds the list as it was left.
+        var results: SearchResultsPlace?
         /// When it was pushed and whether it came from scrubbing the sidebar, so a run of
         /// arrow-key hops collapses into the file the user rested on.
         var pushedAt = Date()
@@ -32,7 +36,8 @@ struct History {
     /// Records a new place. Drops any forward entries. Consecutive duplicates collapse, and a
     /// transient entry that was pushed moments ago is replaced rather than kept.
     mutating func push(_ entry: Entry) {
-        if let c = current, c.file == entry.file, c.mode == entry.mode, c.folder == entry.folder, c.place == entry.place {
+        if let c = current, c.file == entry.file, c.mode == entry.mode, c.folder == entry.folder, c.place == entry.place,
+           c.results === entry.results {
             entries[index].anchor = entry.anchor ?? c.anchor
             entries[index].transient = false
             return

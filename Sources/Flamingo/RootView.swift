@@ -41,19 +41,20 @@ private struct RootLayout: View {
                     WorkingFilesBar()
                     content
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .offset(x: layout.swipeAmount * 24)
-                        .overlay(alignment: .leading) { SwipeChevron(amount: layout.swipeAmount, back: true) }
-                        .overlay(alignment: .trailing) { SwipeChevron(amount: layout.swipeAmount, back: false) }
+                        .modifier(SwipeFollow(layout: layout))
                         .overlay(alignment: .bottom) {
-                            if let toast = state.toast {
-                                Toast(toast.text, action: toast.action, perform: toast.perform)
-                                    .frame(maxWidth: 360)
-                                    .padding(Theme.Space.l)
-                                    .id(toast.id)
+                            ZStack {
+                                if let toast = state.toast {
+                                    Toast(toast.text, action: toast.action, perform: toast.perform)
+                                        .frame(maxWidth: 360)
+                                        .padding(Theme.Space.l)
+                                        .id(toast.id)
+                                }
                             }
+                            .animation(Theme.Motion.arrive, value: state.toast?.id)
                         }
                         .overlay {
-                            if let deck = state.wander { WanderPanel(deck: deck).transition(.opacity) }
+                            if let deck = state.wander { WanderPanel(deck: deck).transition(.opacity.combined(with: .scale(0.97))) }
                         }
                         .overlay {
                             if state.connectGridShown { ConnectGrid().transition(.opacity) }
@@ -169,7 +170,7 @@ struct TopBar: View {
                     .disabled(state.vault == nil)
                     .opacity(state.vault == nil ? Theme.Opacity.disabled : 1)
                 Spacer()
-                if state.vault != nil, state.mode == .files, state.selected == nil, !state.splitVisible {
+                if state.vault != nil, state.mode == .files, state.selected == nil, !state.splitVisible, state.shownResults == nil {
                     FolderStyleToggle(browser: state.browser)
                         .transition(.opacity)
                 }
@@ -213,7 +214,7 @@ struct CurrentFileTitle: View {
                 }
             }
             .animation(Theme.Motion.fast, value: state.anchor)
-        } else if state.vault != nil, state.mode == .files {
+        } else if state.vault != nil, state.mode == .files, state.shownResults == nil {
             BrowsedFolderTitle(browser: state.browser)
         }
     }

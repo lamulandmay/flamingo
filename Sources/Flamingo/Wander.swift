@@ -176,7 +176,7 @@ struct WanderPanel: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press)
         .help(file.relativePath)
     }
 

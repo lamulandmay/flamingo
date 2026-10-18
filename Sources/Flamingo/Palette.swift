@@ -54,6 +54,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
         model.queryDidChange = { [weak self] in self?.refreshItems() }
         model.onItems = { [weak self] in self?.layout() }
         model.onRun = { [weak self] item, externally in self?.run(item, externally: externally) }
+        model.onList = { [weak self] in self?.showList() }
         model.onCancel = { [weak self] in self?.hide() }
     }
 
@@ -123,11 +124,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
         focusAttempts = 0
         focusField()
         installMonitors()
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = Theme.Motion.fastSeconds
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().alphaValue = 1
-        }
+        PanelMotion.arrive(panel)
     }
 
     func showResult(_ result: UnifiedSearchResult, query: String, state: AppState) {
@@ -144,6 +141,7 @@ final class PaletteController: NSObject, NSWindowDelegate {
     func hide() {
         guard isVisible, let panel else { return }
         isVisible = false
+        model.submitPending = false
         generation += 1
         let gen = generation
         searchTask?.cancel()
@@ -156,9 +154,10 @@ final class PaletteController: NSObject, NSWindowDelegate {
         // Hand key status back only if we still hold it; another panel may have taken it.
         if panel.isKeyWindow, let host, host.isVisible { host.makeKey() }
         if NSApp.isActive {
+            PanelMotion.leave(panel)
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = Theme.Motion.fastSeconds
-                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                ctx.timingFunction = Theme.Motion.curve
                 panel.animator().alphaValue = 0
             }, completionHandler: { [weak self] in
                 MainActor.assumeIsolated {
@@ -328,6 +327,12 @@ final class PaletteController: NSObject, NSWindowDelegate {
                 self.model.setItems(PaletteItem.merged(results, response.thoughts))
                 if let requested = self.requestedResult, let index = results.firstIndex(where: { $0.id == requested.id }) { self.model.select(index) }
                 self.requestedResult = nil
+                // ↩ pressed before these landed: decide now, on what it was asking for.
+                if self.model.submitPending {
+                    self.model.submitPending = false
+                    self.model.submit()
+                    if !self.isVisible { return }
+                }
                 // Meaning-based matches arrive later; the fast results remain usable and a
                 // keyboard/mouse selection is preserved if additional evidence arrives.
                 if !UnifiedSearchQuery(raw: query).text.isEmpty {
@@ -344,10 +349,24 @@ final class PaletteController: NSObject, NSWindowDelegate {
             } catch {
                 guard !Task.isCancelled, let self else { return }
                 self.model.searching = false
+                self.model.submitPending = false
                 self.model.notice = "Search unavailable: " + error.localizedDescription
                 self.model.setItems([])
             }
         }
+    }
+
+    /// ↩ with several files found and none picked: the palette gives way to the list of them
+    /// all in the content area (SearchResultsView.swift), which keeps what was shown here.
+    private func showList() {
+        let query = model.query
+        let seed = model.items.compactMap { item -> UnifiedSearchResult? in
+            if case .result(let result) = item { return result }
+            return nil
+        }
+        model.query = ""
+        hide()
+        state?.showSearchResults(query, seed: seed)
     }
 
     /// Enter, ⌘↩, or a click. The typed text is consumed; Esc keeps it for next time.
@@ -441,6 +460,10 @@ final class PaletteModel: ObservableObject {
         guard items.indices.contains(highlight), case .result(let result) = items[highlight] else { return nil }
         return result
     }
+    /// Files and folders among the rows; thoughts and commands aren't counted.
+    var resultCount: Int { items.reduce(0) { if case .result = $1 { return $0 + 1 } else { return $0 } } }
+    /// ↩ came while a search was in flight; `submit` runs again when its rows land.
+    var submitPending = false
     func select(_ index: Int) { if items.indices.contains(index) { highlight = index; highlightMoved = true } }
     /// The highlight was moved by hand since the results last changed. Only then does a
     /// late, better-ranked pass (meaning, after keywords) keep it; otherwise the new best
@@ -452,6 +475,8 @@ final class PaletteModel: ObservableObject {
     var queryDidChange: (() -> Void)?
     var onItems: (() -> Void)?
     var onRun: ((PaletteItem, Bool) -> Void)?
+    /// Shows every file found as a list (`PaletteController.showList`).
+    var onList: (() -> Void)?
     var onCancel: (() -> Void)?
 
     func setItems(_ new: [PaletteItem], preservingSelection: Bool = false) {
@@ -481,6 +506,19 @@ final class PaletteModel: ObservableObject {
     func runHighlighted(externally: Bool) {
         guard items.indices.contains(highlight) else { return }
         onRun?(items[highlight], externally)
+    }
+
+    /// ↩ in the field. A row picked by hand (arrows or a click), a command, or a lone file
+    /// opens as it always has. Several files found and none picked: the list of them all.
+    /// While the search is still running, the answer waits for its rows.
+    func submit() {
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if highlightMoved || text.isEmpty || text.hasPrefix(">") || vault == nil {
+            runHighlighted(externally: false)
+            return
+        }
+        if searching { submitPending = true; Log.debug("palette: return waits for results"); return }
+        if resultCount > 1, let onList { onList() } else { runHighlighted(externally: false) }
     }
 
     func run(_ item: PaletteItem) { onRun?(item, false) }

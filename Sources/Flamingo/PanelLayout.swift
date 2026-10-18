@@ -11,6 +11,8 @@ final class PanelLayout: ObservableObject {
     @Published var rightWidth = Defaults.inspectorWidth
     @Published var windowWidth: CGFloat = 1200
     @Published var swipeAmount: CGFloat = 0
+    /// After a swipe commits: where the new place starts, -1 left of its rest, 1 right; eases to 0.
+    @Published var swipeArrival: CGFloat = 0
 
     static let left: ClosedRange<CGFloat> = 180...480
     static let right: ClosedRange<CGFloat> = 260...720
@@ -55,13 +57,30 @@ struct ResizeHandle: View {
                             .onChanged { v in
                                 if start == nil { start = width }
                                 let delta = edge == .leading ? v.translation.width : -v.translation.width
-                                width = min(max(((start ?? defaultWidth) + delta).rounded(), range.lowerBound), range.upperBound)
+                                let next = Detent.width((start ?? defaultWidth) + delta, home: defaultWidth, in: range)
+                                if next == defaultWidth, width != defaultWidth { Feedback.haptic(.detent) }
+                                width = next
                             }
                             .onEnded { _ in start = nil; onEnd() }
                     )
-                    .onTapGesture(count: 2) { width = defaultWidth; onEnd() }
+                    .onTapGesture(count: 2) {
+                        Feedback.haptic(.detent)
+                        withAnimation(Theme.Motion.normal) { width = defaultWidth }
+                        onEnd()
+                    }
             }
             .zIndex(1)
+    }
+}
+
+/// A divider's one detent: within 6pt of its default size a drag holds there, so the size it
+/// was designed at is easy to find again by feel (a tick on a Force Touch trackpad as it catches).
+enum Detent {
+    static let reach: CGFloat = 6
+
+    static func width(_ proposed: CGFloat, home: CGFloat, in range: ClosedRange<CGFloat>) -> CGFloat {
+        let w = abs(proposed - home) < reach ? home : proposed.rounded()
+        return min(max(w, range.lowerBound), range.upperBound)
     }
 }
 
@@ -89,11 +108,17 @@ struct HeightHandle: View {
                 DragGesture(minimumDistance: 1, coordinateSpace: .global)
                     .onChanged { v in
                         if start == nil { start = height }
-                        height = min(max(((start ?? defaultHeight) + v.translation.height).rounded(), range.lowerBound), range.upperBound)
+                        let next = Double(Detent.width(CGFloat((start ?? defaultHeight) + v.translation.height), home: CGFloat(defaultHeight),
+                                                       in: CGFloat(range.lowerBound)...CGFloat(range.upperBound)))
+                        if next == defaultHeight, height != defaultHeight { Feedback.haptic(.detent) }
+                        height = next
                     }
                     .onEnded { _ in start = nil }
             )
-            .onTapGesture(count: 2) { height = defaultHeight }
+            .onTapGesture(count: 2) {
+                Feedback.haptic(.detent)
+                withAnimation(Theme.Motion.normal) { height = defaultHeight }
+            }
             .help("Drag to resize")
     }
 }

@@ -117,7 +117,7 @@ public struct CaptureInboxView: View {
                                         .fill(model.selected == item.id ? Theme.Color.selection : .clear))
                                     .contentShape(Rectangle())
                                 }
-                                .buttonStyle(.plain)
+                                .buttonStyle(.press)
                             }
                         }
                     }
@@ -152,7 +152,7 @@ public struct CaptureInboxView: View {
                                             }
                                             .contentShape(Rectangle())
                                         }
-                                        .buttonStyle(.plain)
+                                        .buttonStyle(.press)
                                         .flamingoRow(selected: model.target == file)
                                         .simultaneousGesture(TapGesture(count: 2).onEnded { onOpen(file, nil) })
                                     }

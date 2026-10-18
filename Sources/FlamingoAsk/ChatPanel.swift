@@ -204,7 +204,7 @@ struct ChatThread: View {
                 .strokeBorder(on ? Theme.Color.accent : Theme.Color.hairline, lineWidth: 1))
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press)
         .help(on ? "Asking about \(file.name) only" : "Ask about \(file.name) only")
         .animation(Theme.Motion.fast, value: on)
     }
@@ -253,7 +253,7 @@ struct ChatThread: View {
                 .frame(width: 22, height: 22)
                 .background(Self.cornerShape.fill(busy || !empty ? Theme.Color.accent : Theme.Color.hover))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press(shade: nil))
         .disabled(!busy && (empty || !session.hasKey))
         .help(busy ? "Stop" : "Send")
         .animation(Theme.Motion.fast, value: empty)
@@ -425,7 +425,7 @@ private struct CitedFile: View {
             .frame(height: 20)
             .background(Squircle(radius: Theme.Radius.s).fill(Theme.Color.fill))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press)
         .onHover { hovering = $0 }
         .help(citation.file.relativePath + (citation.anchor.map { " · " + $0.label } ?? ""))
     }

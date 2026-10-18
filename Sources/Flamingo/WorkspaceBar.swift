@@ -54,7 +54,7 @@ private struct WorkingFileTab: View {
                     .frame(width: 14, height: 14)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.press)
             .opacity(hovering ? 1 : 0)
             .help("Close Tab")
         }
@@ -66,6 +66,7 @@ private struct WorkingFileTab: View {
                 .opacity(selected || elsewhere ? 1 : 0)
         }
         .contentShape(Rectangle())
+        .pressFeedback(shade: nil)
         .onTapGesture { state.reveal(file) }
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
@@ -170,7 +171,7 @@ struct IndexHealthSheet: View {
                                 }
                                 .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.press)
                             .flamingoRow(selected: false)
                         }
                     }

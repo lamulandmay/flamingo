@@ -53,7 +53,7 @@ struct MemoReader: View {
                                 }
                                 .contentShape(Rectangle())
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(.press)
                             .pointingHandCursor()
                         }
                     }

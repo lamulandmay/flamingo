@@ -27,6 +27,8 @@ struct RevealRequest: Equatable {
     /// The user asked for it (rather than the selection moving), so it reveals even with
     /// auto-reveal off.
     var force = false
+    /// "Reveal current file": the row is brought to the middle and pulses.
+    var pulse = false
 }
 
 /// A row to rename in place: a vault-relative path in the file explorer, a bookmark's
@@ -140,6 +142,8 @@ final class AppState: ObservableObject {
     @Published private(set) var renameRequest: RenameRequest?
     /// The search tab's query and results; kept here so they survive switching tabs.
     let sidebarSearch = SidebarSearchModel()
+    /// The search results list in the content area (SearchResults.swift).
+    let searchResults = SearchResultsModel()
     /// Where the folder surface is, and Finder's favorites above the file tree (ColumnBrowser.swift).
     let browser = ColumnBrowserModel()
     let favorites = FinderFavoritesModel()
@@ -198,7 +202,8 @@ final class AppState: ObservableObject {
     @Published private(set) var graphRevision = 0
     /// The newest connection for the graph to show off; a new `id` plays it.
     @Published private(set) var graphCelebration: GraphCelebration?
-    private var celebrationCount = 0
+    /// Thoughts and connections celebrated so far; the Thoughts tab's glyph hops on each.
+    @Published private(set) var celebrationCount = 0
     /// Bumped to start the graph's Replay History.
     @Published private(set) var graphReplayRequest = 0
     @Published private(set) var jumpRequest: JumpRequest? { didSet {
@@ -580,6 +585,7 @@ final class AppState: ObservableObject {
         var new = bookmarks
         guard let gone = new.remove(at: path) else { return }
         guard let id = saveBookmarks(new, actionName: "Remove Bookmark") else { return }
+        Feedback.play(.poof)
         showToast(ToastMessage(text: "Removed " + gone.displayName, action: "Undo", perform: { [weak self] in self?.undoAction(id) }))
     }
 
@@ -680,7 +686,7 @@ final class AppState: ObservableObject {
     func revealCurrentFile() {
         guard let f = selected else { NSSound.beep(); return }
         showSidebarTab(.files)
-        revealRequest = RevealRequest(file: f, force: true)
+        revealRequest = RevealRequest(file: f, force: true, pulse: true)
     }
 
     /// Shows a folder in the file explorer, opened, and scopes the graph to it.
@@ -1019,6 +1025,8 @@ final class AppState: ObservableObject {
             requestTrash(path, in: hostWindow)
             return false
         } catch { report(error); return false }
+        // Finder's own sound, for a delete the user asked for (not an undo replaying one).
+        if !actionHistory.isApplying { Feedback.play(.trash) }
 
         for pane in allPanes where pane.id != activePaneID { pane.remove(path) }
         openFiles.removeAll { FileTree.contains(path, $0.relativePath) }
@@ -1572,7 +1580,9 @@ final class AppState: ObservableObject {
         if e.file == nil {
             // The folder surface goes back to where it was: a place outside the vault, or
             // the sidebar's folder (keeping the columns' selection when it is still inside).
-            if let place = e.place { browser.browse(place, following: sidebarFolderURL) }
+            // A results list comes back as it was left.
+            if let results = e.results { restoreResults(results) }
+            else if let place = e.place { browser.browse(place, following: sidebarFolderURL) }
             else if let folder = sidebarFolderURL { browser.follow(folder, force: true) }
         }
         if let f = e.file {
@@ -1597,6 +1607,11 @@ final class AppState: ObservableObject {
     /// A folder outside the vault shown in the folder surface gets a history entry of its own.
     func recordPlace(_ url: URL) {
         history.push(History.Entry(file: nil, anchor: nil, mode: mode, folder: selectedFolder, place: url))
+    }
+
+    /// A search results list gets an entry of its own (AppState+SearchResults.swift).
+    func recordResults(_ results: SearchResultsPlace) {
+        history.push(History.Entry(file: nil, anchor: nil, mode: mode, folder: selectedFolder, results: results))
     }
 
     /// Trail "resume": the files of a session become the history, oldest first.
@@ -2141,7 +2156,7 @@ final class AppState: ObservableObject {
             PaletteCommand(id: "explorer", title: "Files: Show File Explorer", keys: nil, symbol: "folder", enabled: hasVault) { [weak self] in self?.showSidebarTab(.files) },
             PaletteCommand(id: "searchall", title: "Search in All Files", keys: "⌘⇧F", symbol: "magnifyingglass", enabled: hasVault) { [weak self] in self?.showSidebarSearch() },
             PaletteCommand(id: "bookmarks", title: "Bookmarks: Show Bookmarks", keys: nil, symbol: "bookmark", enabled: hasVault) { [weak self] in self?.showSidebarTab(.bookmarks) },
-            PaletteCommand(id: "revealnav", title: "Reveal Current File in Navigation", keys: nil, symbol: "scope", enabled: hasFile) { [weak self] in self?.revealCurrentFile() },
+            PaletteCommand(id: "revealnav", title: "Reveal Current File in Navigation", keys: "⌘⇧J", symbol: "scope", enabled: hasFile) { [weak self] in self?.revealCurrentFile() },
             PaletteCommand(id: "random", title: "Open Random File", keys: nil, symbol: "dice", enabled: hasVault && !files.isEmpty) { [weak self] in self?.openRandomFile() },
             PaletteCommand(id: "reindex", title: "Reindex Vault", keys: nil, symbol: "arrow.clockwise", enabled: hasVault && indexStatus == nil) { [weak self] in self?.reindex(force: true) },
             PaletteCommand(id: "global", title: captureGlobal ? "Stop Capturing From Other Apps" : "Capture From Other Apps", keys: captureGlobalKeys, symbol: "keyboard") { [weak self] in

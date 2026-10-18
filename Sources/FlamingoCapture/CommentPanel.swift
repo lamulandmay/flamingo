@@ -112,7 +112,7 @@ public struct CommentPanel: View {
                 }
                 Spacer(minLength: Theme.Space.s)
                 if let onDiscard, !model.text.isEmpty {
-                    Button("Discard draft", action: onDiscard).buttonStyle(.plain).disabled(saving)
+                    Button("Discard draft", action: onDiscard).buttonStyle(.press(shade: nil)).disabled(saving)
                 }
             }
                 .font(Theme.Font.mono)

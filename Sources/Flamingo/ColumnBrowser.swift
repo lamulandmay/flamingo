@@ -683,7 +683,7 @@ final class ColumnBrowserView: NSView, NSTableViewDataSource, NSTableViewDelegat
         guard abs(x - visible.minX) > 0.5 else { return }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = Theme.Motion.fastSeconds
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.timingFunction = Theme.Motion.curve
             scroll.contentView.animator().setBoundsOrigin(NSPoint(x: x, y: 0))
         }
         scroll.reflectScrolledClipView(scroll.contentView)
@@ -1248,7 +1248,11 @@ private final class ColumnTableView: NSTableView {
         let renames = event.clickCount == 1 && event.modifierFlags.intersection([.command, .shift, .option]).isEmpty
             && window?.firstResponder === self && row >= 0 && row == selectedRow && isOnName(point, row: row)
         let down = NSEvent.mouseLocation
+        // The row swells under the pointer while the button is down, as a SwiftUI press does.
+        let pressed = row >= 0 ? rowView(atRow: row, makeIfNecessary: false) : nil
+        if let pressed { PressAnimator.press(pressed) }
         super.mouseDown(with: event)   // tracks until the button comes up
+        if let pressed { PressAnimator.release(pressed) }
         guard renames else { return }
         let up = NSEvent.mouseLocation
         guard hypot(up.x - down.x, up.y - down.y) < 4, NSEvent.pressedMouseButtons == 0 else { return }

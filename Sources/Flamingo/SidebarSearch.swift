@@ -50,7 +50,8 @@ final class SidebarSearchModel: ObservableObject {
     /// Runs a search; set by `AppState`.
     var run: ((String, String?) async throws -> [SearchHit])?
     var runUnified: ((String) async throws -> UnifiedSearchResponse)?
-    private var unifiedResults: [UnifiedSearchResult]?
+    /// What the last search found, best first; ↩ hands them to the results list.
+    private(set) var unifiedResults: [UnifiedSearchResult]?
     private var hits: [SearchHit] = []
     private var task: Task<Void, Never>?
 
@@ -183,7 +184,7 @@ struct SidebarSearchPane: View {
                     .disabled(model.query.trimmingCharacters(in: .whitespaces).isEmpty)
             }
             SidebarSearchInput(text: $model.query, focused: $focused, focusToken: model.focusToken,
-                        onSubmit: { state.recordSearch(model.query) },
+                        onSubmit: { state.submitSidebarSearch() },
                         onExit: { focused = false; state.focusSidebar?() })
                 .padding(.horizontal, Theme.Space.s)
                 .padding(.bottom, Theme.Space.s)
@@ -256,24 +257,29 @@ struct SidebarSearchPane: View {
 
 /// Takes focus as soon as AppKit attaches the field, before the next keyboard event.
 /// A timer or delayed FocusState reset can drop the first letters after the shortcut.
-private struct SidebarSearchInput: View {
+/// The search tab's field, and the results list's (SearchResultsView.swift), which waits for
+/// `focusToken` (`focusOnAppear: false`) and hands ↑ ↓ to the list through `onMove`.
+struct SidebarSearchInput: View {
     @Binding var text: String
     var focused: FocusState<Bool>.Binding
     var focusToken: Int
+    var focusOnAppear = true
     var onSubmit: () -> Void
     var onExit: () -> Void
+    /// ↑ (-1) or ↓ (1); true when it was used.
+    var onMove: ((Int) -> Bool)? = nil
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").font(.system(size: 12))
                 .foregroundStyle(Theme.Color.textTertiary).accessibilityHidden(true)
-            NativeSidebarSearchInput(text: $text, focusToken: focusToken,
-                                     onFocus: { focused.wrappedValue = $0 }, onSubmit: onSubmit, onExit: onExit)
+            NativeSidebarSearchInput(text: $text, focusToken: focusToken, focusOnAppear: focusOnAppear,
+                                     onFocus: { focused.wrappedValue = $0 }, onSubmit: onSubmit, onExit: onExit, onMove: onMove)
                 .frame(maxWidth: .infinity)
             if !text.isEmpty {
                 Button { text = "" } label: {
                     Image(systemName: "xmark.circle.fill").font(.system(size: 12)).foregroundStyle(Theme.Color.textTertiary)
-                }.buttonStyle(.plain).accessibilityLabel("Clear")
+                }.buttonStyle(.press(shade: nil)).accessibilityLabel("Clear")
             }
         }
         .padding(.horizontal, Theme.Space.s).frame(height: Theme.Size.row)
@@ -285,9 +291,11 @@ private struct SidebarSearchInput: View {
 struct NativeSidebarSearchInput: NSViewRepresentable {
     @Binding var text: String
     var focusToken: Int
+    var focusOnAppear = true
     var onFocus: (Bool) -> Void
     var onSubmit: () -> Void
     var onExit: () -> Void
+    var onMove: ((Int) -> Bool)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> ImmediateSearchTextField {
@@ -300,7 +308,7 @@ struct NativeSidebarSearchInput: NSViewRepresentable {
         field.delegate = context.coordinator
         field.stringValue = text
         context.coordinator.token = focusToken
-        field.requestFocus()
+        if focusOnAppear { field.requestFocus() }
         return field
     }
     func updateNSView(_ field: ImmediateSearchTextField, context: Context) {
@@ -329,6 +337,8 @@ struct NativeSidebarSearchInput: NSViewRepresentable {
         func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
             if selector == #selector(NSResponder.insertNewline(_:)) { parent.onSubmit(); return true }
             if selector == #selector(NSResponder.cancelOperation(_:)) { parent.onExit(); return true }
+            if selector == #selector(NSResponder.moveDown(_:)), let onMove = parent.onMove { return onMove(1) }
+            if selector == #selector(NSResponder.moveUp(_:)), let onMove = parent.onMove { return onMove(-1) }
             return false
         }
     }
@@ -427,7 +437,7 @@ private struct ResultMatch: View {
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
       }
-      .buttonStyle(.plain)
+      .buttonStyle(.press)
       .help((hit.commentID == nil ? "Open source: " : "Open thought: ") + hit.file.relativePath + (hit.anchor.map { " · " + $0.label } ?? ""))
     }
 }

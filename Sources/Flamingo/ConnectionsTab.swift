@@ -276,7 +276,7 @@ struct ConnectPicker: View {
                     }
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.press)
                 .flamingoRow(selected: i == highlight)
             }
         }

@@ -89,7 +89,7 @@ private struct Breadcrumb: View {
 
     private func crumb(_ name: String, path: String) -> some View {
         Button { open(path) } label: { Text(name).foregroundStyle(Theme.Color.textTertiary) }
-            .buttonStyle(.plain)
+            .buttonStyle(.press(shade: nil))
             .pointingHandCursor()
             .help("Show " + (path.isEmpty ? name : path))
     }
@@ -154,7 +154,7 @@ struct ExactSourceReader: View {
                     Text(failure ?? "No text").font(Theme.Font.body).foregroundStyle(Theme.Color.textTertiary)
                         .multilineTextAlignment(.center)
                     Button("Open in " + (state.defaultAppName(for: file) ?? "Default App")) { state.openExternally(file) }
-                        .buttonStyle(.plain).foregroundStyle(Theme.Color.accent).font(Theme.Font.body)
+                        .buttonStyle(.press(shade: nil)).foregroundStyle(Theme.Color.accent).font(Theme.Font.body)
                 }.padding(Theme.Space.xl).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }

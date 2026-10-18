@@ -63,6 +63,7 @@ struct PaletteView: View {
                         if case .result(let result) = item, let vault = model.vault {
                             UnifiedSearchRow(result: result, selected: index == model.highlight)
                                 .contentShape(Rectangle())
+                                .pressFeedback(shade: Theme.Radius.s)
                                 .onTapGesture(count: 2) { model.run(item) }
                                 .onTapGesture { model.select(index) }
                                 .onDrag { FileHandoff.itemProvider(url: vault.url(for: result.file), relativePath: result.file.relativePath) }
@@ -309,6 +310,7 @@ private struct PaletteField: NSViewRepresentable {
         func controlTextDidChange(_ notification: Notification) {
             guard let field = notification.object as? NSTextField else { return }
             model.query = field.stringValue
+            model.submitPending = false
             model.queryDidChange?()
         }
 
@@ -319,7 +321,9 @@ private struct PaletteField: NSViewRepresentable {
             case #selector(NSResponder.moveDown(_:)):
                 model.moveHighlight(1)
             case #selector(NSResponder.insertNewline(_:)):
-                model.runHighlighted(externally: NSApp.currentEvent?.modifierFlags.contains(.command) == true)
+                // ⌘↩ opens the highlighted file outside; ↩ may show every file found (`submit`).
+                if NSApp.currentEvent?.modifierFlags.contains(.command) == true { model.runHighlighted(externally: true) }
+                else { model.submit() }
             case #selector(NSResponder.cancelOperation(_:)):
                 model.cancel()
             default:

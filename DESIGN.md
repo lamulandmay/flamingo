@@ -21,8 +21,11 @@ Premiere's panel system. Dark-first. Content fills the window. Chrome recedes.
 5. **System type, three weights.** SF Pro via `.system`. 13pt body, 11pt secondary, 15pt
    semibold for the rare title. Regular, medium, semibold. Monospace for paths and anchors.
 6. **4pt grid.** Spacing from `Theme.Space`. Radii from `Theme.Radius`.
-7. **Motion is 150–220ms ease-out.** Nothing springs, bounces, or slides in from offscreen.
-   Hover states change opacity, not size.
+7. **Motion is springs, and every click is seen.** Springs are critically damped, so nothing
+   wobbles. They can be interrupted, so a reversed hover or a second click never jumps. Overshoot
+   only where a hand let go or something was earned. Things arrive from where they live, never
+   from offscreen. A pressed control swells a little over a deeper shade and springs back. Hover
+   changes opacity, not size. Under Reduce Motion there is a short ease-out and nothing grows.
 8. **Keyboard first.** Every action has a key. Key hints are shown in menus and the command
    palette only, never as on-screen badges.
 9. **Density like Finder, not like a web app.** 24–28pt rows. Sidebar uses the sidebar
@@ -56,8 +59,12 @@ same values through `Theme.NS`, never `NSColor.labelColor` and friends.
 | `Font.caps` + `capsTracking` | The rare section marker. Use `SectionMarker("Pinned")` or `.capsStyle()`. |
 | `Space` xs 4 · s 8 · m 12 · l 16 · xl 24 · xxl 32 | Everything. |
 | `Radius` s 4 · m 8 · l 12 | Rows and chips, fields and toasts, panels. Draw every rounded shape as `Squircle(radius:)` (continuous curvature: cubic Béziers, zero curvature at the edges, peak at the 45° apex), never `RoundedRectangle`, `cornerRadius` or an arc. A shape nested with uniform padding inside another is `ConcentricSquircle(parentRadius:padding:)`, the parent's outline offset along its normals, never a smaller copy. AppKit uses `NSBezierPath(squircleIn:radius:)` and `CALayer.applySquircle`. |
-| `Motion.fast` 150ms, `normal` 220ms | Ease-out. `fastSeconds` / `normalSeconds` for AppKit. |
-| `Motion.stagger(_:)` / `staggerSeconds` 40ms | Neighbours that fade in one after another. Opacity only; nothing moves. |
+| `Motion.fast` / `normal` | Critically damped springs, 0.24 s and 0.38 s. `fast` is for hover, tint and selection; `normal` is for panels, layout and anything that travels. |
+| `Motion.press` / `release` | The pointer going down (quick, firm); letting go (0.3 bounce, like a key coming back up). |
+| `Motion.arrive` | 0.22 bounce. Something put in place by hand or earned: a thought, a connection, a drop. |
+| `Motion.fastSeconds` / `normalSeconds` + `curve` | The same springs for `NSAnimationContext`: settle times and a Bézier within 1.3% of the spring. `Motion.spring(_:)` is a real `CASpringAnimation`; `Motion.settle(_:)` is for frame loops (the graph). |
+| `Motion.stagger(_:)` / `staggerSeconds` 40ms | Neighbours that arrive one after another. |
+| `Color.pressed` | The shade under a pointer that is down. Deeper than `fill`, never colored. |
 | `Size.thumbnail` 44 · `tile` 96×64 | Memo source thumbnails (`Radius.s`); resume tiles (`Radius.m`). |
 | `Size.row` 26 · `sidebar` 240 · `rail` 280 · `panel` 560 · `icon` 14 · `iconSmall` 13 | Layout. |
 | `Opacity.rest` .75 · `dimmed` .3 · `disabled` .35 | Hover raises `rest` to 1. Graph and faded history use `dimmed`. |
@@ -75,7 +82,7 @@ in light and dark. Screenshot it and you have the style guide.
 | `Chip(text:mono:action:)` | Anchors and tags: `slide 7`. Mono by default. With `action` it's clickable. |
 | `KindGlyph(kind:state:)` | A thought's kind as one monochrome secondary glyph: question, to do (open or checked), intent. An idea draws nothing. At the head of a rail row's timestamp line. |
 | `ThoughtEcho` (FlamingoCapture) | Up to two earlier, similar thoughts above the composer: kind glyph, first line, file, date. All user data. Fades in over 150ms; click jumps, ⌥-click replies. |
-| `Chime.tick(level:)` | One soft note and a tap, for a small decision such as marking a thought done. |
+| `Chime.tick(level:)` | One soft bell note (D5, A5 or D6) and a tap, for a small decision such as marking a thought done. `Chime.play(level:)` is the rising run for a thought kept. Sounds play only while macOS interface sounds are on; nothing sounds on navigation. |
 | `KeyHint("⌘K")` | Menus and the command palette only. |
 | `EmptyState("No vault open")` | One tertiary line, centered. |
 | `SectionMarker("Pinned")` | 11pt medium, tracked, uppercase, tertiary. Rare. |
@@ -83,7 +90,12 @@ in light and dark. Screenshot it and you have the style guide.
 | `VisualEffect(material:blending:state:)` | `NSVisualEffectView` for SwiftUI. Sidebar background. |
 | `SegmentedModes(selection:)` | Three symbols (`FlamingoMode.views`: files, graph, trail), no text, accent when selected. `.ask` is the inspector's Chat tab. `FlamingoMode.title` and `.key` feed menus. |
 | `SearchField(text:focused:onSubmit:onExit:)` | No placeholder. Accent focus ring. |
-| `IconButton(_:help:isOn:action:)` | 13pt symbol. `help` is the tooltip and VoiceOver label, never drawn. |
+| `IconButton(_:help:isOn:action:)` | 13pt symbol. `help` is the tooltip and VoiceOver label, never drawn. Swells over a shaded squircle while pressed. |
+| `.buttonStyle(.press)` / `.press(shade:)` | Every custom button. While the pointer is down, the label grows about 3.5pt across its longest side (at most 12%) on `Motion.press`, over a `Color.pressed` squircle; it springs back on `Motion.release`. Pass `shade: nil` for labels with their own fill or plain text links: they brighten (dark) or darken (light) a touch instead. Never `.plain`. |
+| `.pressFeedback(shade:)` / `.trackPress(_:)` | The same press for views that take clicks through `onTapGesture` (tiles, cards, rows). They watch the pointer and add no gesture, so taps, double-clicks and drags are untouched. `flamingoRow` has it built in. |
+| `PressAnimator.press/release(_:)` | The same press for AppKit rows, on a real Core Animation spring, around `super.mouseDown`. |
+| `Feedback.haptic(.detent / .threshold)` | Trackpad taps, synced to the next frame and spaced at least 40ms apart. Use `.detent` for passing a detent or snapping, and `.threshold` for crossing the point where letting go commits. Never on a plain click. |
+| `Feedback.play(.trash / .poof)` | Finder's own sounds, for the same acts. |
 | `ProgressHairline(value:)` | 2pt accent line. Fades at 1. `nil` pulses. |
 | `Toast(_:action:perform:)` | One line, at most one action (`Undo`). |
 | `.focusRing(_:radius:)`, `.pointingHandCursor()`, `.capsStyle()`, `.appearance(_:)` | Small modifiers. `.appearance(.dark)` pins a subtree for previews. |

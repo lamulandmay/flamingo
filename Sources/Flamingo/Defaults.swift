@@ -114,7 +114,16 @@ enum Defaults {
 
     /// On unless turned off: the explorer has always followed the selection.
     static var autoReveal: Bool {
-        get { d.object(forKey: "autoReveal") as? Bool ?? true }
+        get {
+            // Until 2026-10-17 the explorer's crosshair toggled this, and clicking it to go to
+            // the open file switched following off unseen. The crosshair goes to the file now;
+            // following comes back on once, and only Settings changes it after that.
+            if !d.bool(forKey: "autoRevealCrosshairReset") {
+                d.set(true, forKey: "autoRevealCrosshairReset")
+                d.removeObject(forKey: "autoReveal")
+            }
+            return d.object(forKey: "autoReveal") as? Bool ?? true
+        }
         set { d.set(newValue, forKey: "autoReveal") }
     }
 

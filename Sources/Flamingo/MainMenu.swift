@@ -151,7 +151,9 @@ enum MainMenu {
         globalSearch.toolTip = "Show search with Control-Option-F"
         let searchAll = goMenu.addItem(withTitle: "Search in All Files", action: #selector(AppDelegate.searchInSidebar(_:)), keyEquivalent: "f")
         searchAll.keyEquivalentModifierMask = [.command, .shift]
-        goMenu.addItem(withTitle: "Reveal in File Explorer", action: #selector(AppDelegate.revealInExplorer(_:)), keyEquivalent: "")
+        // ⌘⇧J, as Xcode's Reveal in Project Navigator.
+        let revealInExplorer = goMenu.addItem(withTitle: "Reveal in File Explorer", action: #selector(AppDelegate.revealInExplorer(_:)), keyEquivalent: "j")
+        revealInExplorer.keyEquivalentModifierMask = [.command, .shift]
         goMenu.addItem(withTitle: "Random File", action: #selector(AppDelegate.openRandomFile(_:)), keyEquivalent: "")
         let recentFiles = NSMenuItem(title: RecentFilesMenu.title, action: nil, keyEquivalent: "")
         recentFiles.submenu = NSMenu(title: RecentFilesMenu.title)   // filled when opened (RecentFilesMenu)

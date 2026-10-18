@@ -121,7 +121,7 @@ public final class ConnectionPiP {
         panel.invalidateShadow()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = Theme.Motion.fastSeconds
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.timingFunction = Theme.Motion.curve
             panel.animator().alphaValue = 1
         }
     }
@@ -158,7 +158,7 @@ public final class ConnectionPiP {
         let gen = generation
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = Theme.Motion.normalSeconds
-            ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            ctx.timingFunction = Theme.Motion.curve
             panel.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
             MainActor.assumeIsolated {

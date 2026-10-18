@@ -90,7 +90,7 @@ public struct GraphView: View {
                                 .font(Theme.Font.body)
                                 .foregroundStyle(Theme.Color.textTertiary)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.press(shade: nil))
                     }
                 }
             VStack(alignment: .leading, spacing: Theme.Space.s) {
@@ -207,7 +207,7 @@ public struct GraphView: View {
                         }
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.press)
                     .flamingoRow(selected: model.selectionPath == model.topology.ids[i])
                     .accessibilityLabel("Select " + model.topology.ids[i])
                     .accessibilityAction(named: "Open") { model.activate(i); model.showsNodeList = false }

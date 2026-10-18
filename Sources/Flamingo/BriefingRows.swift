@@ -116,6 +116,7 @@ struct BriefingThoughtRow: View {
         .background(Squircle(radius: Theme.Radius.s).fill(selected ? Theme.Color.selection : hovering ? Theme.Color.hover : .clear))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        .pressFeedback(shade: Theme.Radius.s)
         .onTapGesture { model.select(item.id); model.open(item) }
         .animation(Theme.Motion.fast, value: hovering)
         .animation(Theme.Motion.fast, value: selected)
@@ -217,6 +218,7 @@ struct BriefingAttentionRow: View {
         .background(Squircle(radius: Theme.Radius.s).fill(selected ? Theme.Color.selection : hovering ? Theme.Color.hover : .clear))
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        .pressFeedback(shade: Theme.Radius.s)
         .onTapGesture { model.select(item.id); model.open(item) }
         .environment(\.flamingoRowSelected, selected)
         .animation(Theme.Motion.fast, value: hovering)
@@ -297,7 +299,7 @@ private struct AttachField: View {
                     }
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.press)
                 .flamingoRow(selected: false)
             }
         }
@@ -337,6 +339,7 @@ struct BriefingResumeTile: View {
         }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
+        .pressFeedback(shade: Theme.Radius.m)
         .onTapGesture { model.select(item.id); model.open(item) }
         .animation(Theme.Motion.fast, value: hovering)
         .animation(Theme.Motion.fast, value: selected)

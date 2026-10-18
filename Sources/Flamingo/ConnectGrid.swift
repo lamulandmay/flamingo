@@ -50,6 +50,7 @@ struct ConnectGrid: View {
                     ForEach(tiles, id: \.self) { file in
                         ConnectTile(file: file, url: state.vault?.url(for: file), picked: group.contains(file), moving: !reduceMotion)
                             .anchorPreference(key: TileBounds.self, value: .bounds) { [file: $0] }
+                            .pressFeedback(shade: nil)
                             .onTapGesture { toggle(file) }
                     }
                 }
@@ -124,7 +125,7 @@ struct ConnectGrid: View {
         guard group.count > 1 else { Chime.depart(); return }
         // Inserted at nothing drawn, then drawn on the next pass, so the line visibly travels.
         drawn[file] = 0
-        DispatchQueue.main.async { withAnimation(.easeOut(duration: 0.32)) { drawn[file] = 1 } }
+        DispatchQueue.main.async { withAnimation(Theme.Motion.normal) { drawn[file] = 1 } }
         made += state.connect(group)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { Chime.arrive(level: 1) }
     }

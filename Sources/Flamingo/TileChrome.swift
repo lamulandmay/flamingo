@@ -20,7 +20,7 @@ struct TileHandle: View {
                 .frame(width: 32, height: 20)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press)
         .opacity(open || hovering ? 1 : paneHovering ? Theme.Opacity.rest : Theme.Opacity.dimmed)
         .onHover { hovering = $0 }
         .animation(Theme.Motion.fast, value: hovering)
@@ -61,7 +61,7 @@ struct TileLayoutPicker: View {
                         .background(Squircle(radius: Theme.Radius.s).fill(Theme.Color.hover).opacity(layout == highlighted ? 1 : 0))
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.press)
                 .onHover { if $0 { highlighted = layout } }
                 .help(layout.title)
                 .accessibilityLabel(layout.title)

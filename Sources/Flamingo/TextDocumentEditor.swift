@@ -420,7 +420,7 @@ struct TextDocumentEditor: View {
                         Button("Save a Copy…") { buffer.saveCopy() }
                         Button("Reload From Disk") { Task { await buffer.reloadDisk() } }
                     }
-                    .buttonStyle(.plain).font(Theme.Font.small).foregroundStyle(Theme.Color.accent)
+                    .buttonStyle(.press(shade: nil)).font(Theme.Font.small).foregroundStyle(Theme.Color.accent)
                 }
                 .padding(Theme.Space.m).frame(maxWidth: .infinity, alignment: .leading)
                 .background(Theme.Color.bgRaised)

@@ -66,7 +66,7 @@ struct NewFileSheet: View {
             HStack(spacing: Theme.Space.s) {
                 if let chosen {
                     Button { back() } label: { FileGlyph(ext: chosen.ext, size: 18) }
-                        .buttonStyle(.plain).focusable(false).help(chosen.title)
+                        .buttonStyle(.press).focusable(false).help(chosen.title)
                 } else {
                     glyph(kinds.indices.contains(highlight) ? kinds[highlight] : nil, size: 18)
                 }

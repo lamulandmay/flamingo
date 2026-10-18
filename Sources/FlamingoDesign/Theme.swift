@@ -29,6 +29,8 @@ public enum Theme {
         public static let fill = SwiftUI.Color(nsColor: Theme.NS.fill)
         /// Row hover. Lighter than `fill`, never colored.
         public static let hover = SwiftUI.Color(nsColor: Theme.NS.hover)
+        /// The shade under a pointer that is down: deeper than `fill`, never colored.
+        public static let pressed = SwiftUI.Color(nsColor: Theme.NS.pressed)
         /// Text and glyphs drawn on a solid `accent` fill.
         public static let onAccent = SwiftUI.Color(nsColor: Theme.NS.onAccent)
         /// The tint a saved thought lands with, by strength (0 spark, 1 solid, 2 woven): blush,
@@ -72,14 +74,71 @@ public enum Theme {
 
     public enum Radius { public static let s: CGFloat = 4, m: CGFloat = 8, l: CGFloat = 12 }
 
-    /// 150–220ms ease-out. Nothing springs.
+    /// Springs, the way Apple's own interface moves. Every token is critically damped, so
+    /// nothing wobbles. A spring can be retargeted mid-flight and keeps its velocity, so a
+    /// reversed hover or a second click never jumps. Only `release` and `arrive` overshoot, and
+    /// only a little: something a hand let go of, or something earned. Under Reduce Motion each
+    /// token is a short ease-out and nothing grows on press.
     public enum Motion {
-        public static let fast = Animation.easeOut(duration: 0.15), normal = Animation.easeOut(duration: 0.22)
-        /// Same durations for `NSAnimationContext` and Core Animation.
-        public static let fastSeconds: TimeInterval = 0.15, normalSeconds: TimeInterval = 0.22
-        /// Gap between neighbours that fade in one after another: 40ms. Opacity only, never movement.
+        public static var reduced: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+        /// Hover, tint, selection: small state. Settles in about a quarter of a second.
+        public static var fast: Animation { reduced ? .easeOut(duration: 0.15) : .spring(duration: 0.24, bounce: 0) }
+        /// Panels, layout, anything that travels.
+        public static var normal: Animation { reduced ? .easeOut(duration: 0.22) : .spring(duration: 0.38, bounce: 0) }
+        /// The pointer going down: quick and firm.
+        public static var press: Animation { reduced ? .easeOut(duration: 0.1) : .spring(duration: 0.16, bounce: 0) }
+        /// Letting go: back to rest with a small overshoot, like a key coming back up.
+        public static var release: Animation { reduced ? .easeOut(duration: 0.18) : .spring(duration: 0.42, bounce: 0.3) }
+        /// A selection gliding to the neighbour that was clicked: a touch of overshoot, then rest.
+        public static var glide: Animation { reduced ? .easeOut(duration: 0.18) : .spring(duration: 0.34, bounce: 0.14) }
+        /// Something put in place by hand or earned landing: a thought, a connection, a drop.
+        public static var arrive: Animation { reduced ? .easeOut(duration: 0.22) : .spring(duration: 0.5, bounce: 0.22) }
+
+        /// How far a pressed control grows: a glyph button, a tile or card, a full-width row.
+        /// 1 under Reduce Motion, where the shade alone shows the press.
+        public enum Grow {
+            public static var icon: CGFloat { reduced ? 1 : 1.12 }
+            public static var card: CGFloat { reduced ? 1 : 1.035 }
+            public static var row: CGFloat { reduced ? 1 : 1.012 }
+        }
+
+        /// `fast` and `normal` for `NSAnimationContext` and Core Animation: the time the spring
+        /// takes to come within 0.5% of rest. Pair with `curve`.
+        public static var fastSeconds: TimeInterval { reduced ? 0.15 : 0.28 }
+        public static var normalSeconds: TimeInterval { reduced ? 0.22 : 0.45 }
+        /// A critically damped spring from rest as one cubic Bézier (within 1.3% of the real
+        /// curve), for AppKit animations that can't take a spring.
+        public static var curve: CAMediaTimingFunction {
+            reduced ? CAMediaTimingFunction(name: .easeOut) : CAMediaTimingFunction(controlPoints: 0.25, 0.25, 0.12, 1)
+        }
+        /// A real Core Animation spring with the same feel as `normal` (or `arrive` with bounce).
+        public static func spring(_ keyPath: String, bounce: CGFloat = 0, duration: TimeInterval = 0.38) -> CABasicAnimation {
+            guard !reduced else {
+                let a = CABasicAnimation(keyPath: keyPath)
+                a.duration = 0.22
+                a.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                return a
+            }
+            let a = CASpringAnimation(perceptualDuration: duration, bounce: bounce)
+            a.keyPath = keyPath
+            a.duration = a.settlingDuration
+            return a
+        }
+
+        /// Progress `p` (0…1 of `fastSeconds`/`normalSeconds`) along the same critically damped
+        /// spring, for hand-driven frame loops (the graph's camera and fades). 0 → 0, 1 → 1,
+        /// leaving as fast as a spring does and easing into rest with no overshoot.
+        public static func settle(_ p: Double) -> Double {
+            let x = min(max(p, 0), 1)
+            guard !reduced else { return 1 - (1 - x) * (1 - x) * (1 - x) }
+            let w = 7.43, end = 1 - (1 + w) * exp(-w)
+            return (1 - (1 + w * x) * exp(-w * x)) / end
+        }
+
+        /// Gap between neighbours that arrive one after another: 40ms.
         public static let staggerSeconds: TimeInterval = 0.04
-        /// `normal`, delayed by `index` steps of `staggerSeconds`. For sequential fades.
+        /// `normal`, delayed by `index` steps of `staggerSeconds`. For sequential arrivals.
         public static func stagger(_ index: Int) -> Animation { normal.delay(staggerSeconds * Double(max(index, 0))) }
     }
 
@@ -145,6 +204,9 @@ public enum Theme {
             lightHC: NSColor(white: 0, alpha: 0.1), darkHC: NSColor(white: 1, alpha: 0.14))
         public static let hover = NSColor.flamingo("hover",
             light: NSColor(white: 0, alpha: 0.035), dark: NSColor(white: 1, alpha: 0.045))
+        public static let pressed = NSColor.flamingo("pressed",
+            light: NSColor(white: 0, alpha: 0.09), dark: NSColor(white: 1, alpha: 0.11),
+            lightHC: NSColor(white: 0, alpha: 0.16), darkHC: NSColor(white: 1, alpha: 0.2))
         public static let onAccent = NSColor.flamingo("onAccent",
             light: NSColor(hex: 0xFFFFFF), dark: NSColor(hex: 0x1C1C1E))
         public static let thoughtSpark = NSColor.flamingo("thoughtSpark",

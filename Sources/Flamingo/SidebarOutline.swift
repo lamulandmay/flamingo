@@ -183,35 +183,73 @@ final class SidebarOutlineView: NSOutlineView, QLPreviewPanelDataSource {
         return frame
     }
 
-    /// `scrollRowToVisible` ignores the content insets; this keeps the row clear of them,
-    /// with a short ease-out when the distance is small enough to follow.
-    func scrollRowIntoView(_ row: Int) {
-        guard let scroll = enclosingScrollView else { return }
+    /// Keeps the row clear of the content insets (`scrollRowToVisible` ignores them), moving
+    /// only as far as the nearest edge. For rows the list's own keys and renames reach.
+    func scrollRowIntoView(_ row: Int) { bringRowIntoView(row, placement: .nearestEdge) }
+
+    /// How far `bringRowIntoView` moves the list.
+    enum RowPlacement {
+        /// Just inside the nearest edge, only if the row is hidden.
+        case nearestEdge
+        /// About the middle, only if the row is hidden: the list following the open file.
+        case centredIfHidden
+        /// About the middle unless the row already sits comfortably inside: "reveal".
+        case centredIfCramped
+    }
+
+    /// The scroll position that shows `row` the way `placement` asks, or nil to stay put.
+    /// `visible` is the clip's bounds; `insets` the scroll view's content insets.
+    static func scrollTarget(row rowRect: NSRect, visible: NSRect, insets: NSEdgeInsets, contentHeight: CGFloat,
+                             placement: RowPlacement) -> CGFloat? {
+        let top = visible.minY + insets.top, bottom = visible.maxY - insets.bottom
+        let usable = max(rowRect.height, bottom - top)
+        let shown = rowRect.minY >= top - 0.5 && rowRect.maxY <= bottom + 0.5
+        let margin = min(rowRect.height * 1.5, usable / 4)
+        let roomy = rowRect.minY >= top + margin - 0.5 && rowRect.maxY <= bottom - margin + 0.5
+        var y: CGFloat
+        switch placement {
+        case .nearestEdge:
+            if shown { return nil }
+            y = rowRect.minY < top ? rowRect.minY - insets.top : rowRect.maxY + insets.bottom - visible.height
+        case .centredIfHidden, .centredIfCramped:
+            if placement == .centredIfHidden ? shown : roomy { return nil }
+            // A little above the middle, where the eye starts reading a list.
+            y = rowRect.midY - insets.top - usable * 0.45
+        }
+        let lowest = max(-insets.top, contentHeight + insets.bottom - visible.height)
+        y = min(max(y, -insets.top), lowest)
+        return abs(y - visible.minY) < 0.5 ? nil : y
+    }
+
+    /// Scrolls `row` into view as `placement` asks: smoothly, a long way by jumping to a screen
+    /// short of it first. `completion` runs once it rests (at once when nothing moves).
+    func bringRowIntoView(_ row: Int, placement: RowPlacement, animated: Bool = true, completion: (() -> Void)? = nil) {
+        guard row >= 0, row < numberOfRows, let scroll = enclosingScrollView else { completion?(); return }
         let clip = scroll.contentView
-        let insets = scroll.contentInsets
-        let rowRect = rect(ofRow: row)
         let visible = clip.bounds
-        let usableTop = visible.minY + insets.top
-        let usableBottom = visible.maxY - insets.bottom
-        var y = visible.origin.y
-        if rowRect.minY < usableTop {
-            y = rowRect.minY - insets.top
-        } else if rowRect.maxY > usableBottom {
-            y = rowRect.maxY + insets.bottom - visible.height
-        } else {
+        guard let y = Self.scrollTarget(row: rect(ofRow: row), visible: visible, insets: scroll.contentInsets,
+                                        contentHeight: bounds.height, placement: placement) else { completion?(); return }
+        let target = NSPoint(x: visible.origin.x, y: y)
+        guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            clip.setBoundsOrigin(target)
+            scroll.reflectScrolledClipView(clip)
+            completion?()
             return
         }
-        let lowest = max(-insets.top, bounds.height + insets.bottom - visible.height)
-        y = min(max(y, -insets.top), lowest)
-        let target = NSPoint(x: visible.origin.x, y: y)
-        if abs(y - visible.origin.y) < visible.height * 2 {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = Theme.Motion.fastSeconds
-                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                clip.animator().setBoundsOrigin(target)
+        let distance = y - visible.minY
+        if abs(distance) > visible.height * 2 {
+            clip.setBoundsOrigin(NSPoint(x: target.x, y: y - (distance > 0 ? 1 : -1) * visible.height))
+            scroll.reflectScrolledClipView(clip)
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Theme.Motion.normalSeconds
+            context.timingFunction = SidebarMotion.timing
+            clip.animator().setBoundsOrigin(target)
+        } completionHandler: {
+            MainActor.assumeIsolated {
+                scroll.reflectScrolledClipView(clip)
+                completion?()
             }
-        } else {
-            clip.setBoundsOrigin(target)
         }
         scroll.reflectScrolledClipView(clip)
     }
@@ -254,7 +292,12 @@ final class SidebarOutlineView: NSOutlineView, QLPreviewPanelDataSource {
     override func mouseDown(with event: NSEvent) {
         if editor != nil { finishEditing(commit: true) }
         if event.modifierFlags.contains(.control), showContextMenu(for: event) { return }
+        // The row swells under the pointer while the button is down, as a SwiftUI press does.
+        let row = row(at: convert(event.locationInWindow, from: nil))
+        let pressed = row >= 0 ? rowView(atRow: row, makeIfNecessary: false) : nil
+        if let pressed { PressAnimator.press(pressed) }
         super.mouseDown(with: event)
+        if let pressed { PressAnimator.release(pressed) }
     }
 
     private func showContextMenu(for event: NSEvent) -> Bool {
@@ -343,6 +386,56 @@ final class SidebarRowView: NSTableRowView {
         guard let cell = view as? SidebarSelectableCell, cell.rowSelected != isSelected else { return }
         cell.rowSelected = isSelected
     }
+
+    /// An accent squircle in the selection's shape that blooms a little past it and fades, so
+    /// the eye lands on a row the list was just led to. Under the name and glyph, over the fill.
+    func pulse() {
+        wantsLayer = true
+        guard let layer else { return }
+        layer.sublayers?.filter { $0.name == SidebarMotion.pulseName }.forEach { $0.removeFromSuperlayer() }
+        let rect = bounds.insetBy(dx: Theme.Space.s, dy: 0)
+        let bloom = CAShapeLayer()
+        bloom.name = SidebarMotion.pulseName
+        bloom.frame = rect
+        bloom.path = SquircleGeometry.path(in: CGRect(origin: .zero, size: rect.size), radius: Theme.Radius.s)
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            bloom.fillColor = Theme.NS.accent.withAlphaComponent(0.5).cgColor
+        }
+        bloom.opacity = 0
+        layer.insertSublayer(bloom, at: 0)
+
+        let fade = CAKeyframeAnimation(keyPath: "opacity")
+        fade.values = [0, 1, 0]
+        fade.keyTimes = [0, 0.2, 1]
+        fade.timingFunctions = [CAMediaTimingFunction(name: .easeOut), CAMediaTimingFunction(name: .easeIn)]
+        var animations: [CAAnimation] = [fade]
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let grow = CABasicAnimation(keyPath: "transform.scale")
+            grow.fromValue = 0.97
+            grow.toValue = 1.05
+            grow.timingFunction = SidebarMotion.timing
+            animations.append(grow)
+        }
+        let group = CAAnimationGroup()
+        group.animations = animations
+        group.duration = SidebarMotion.pulseSeconds
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { bloom.removeFromSuperlayer() }
+        bloom.add(group, forKey: "pulse")
+        CATransaction.commit()
+    }
+}
+
+/// The sidebar's AppKit motion: one curve for scrolling to a row and the reveal pulse. Theme's
+/// SwiftUI tokens can't drive `NSAnimationContext`, so the curve lives here, beside
+/// `Theme.Motion.normalSeconds`, until Theme has an AppKit one.
+enum SidebarMotion {
+    static var timing: CAMediaTimingFunction { Theme.Motion.curve }
+    /// About 0.6 s: long enough to be seen after the list settles, gone before it is read.
+    static var pulseSeconds: TimeInterval { 0.6 * slowdown }
+    static let pulseName = "flamingo.pulse"
+    /// `FLAMINGO_SLOWMO=6` plays the pulse six times slower, for screenshots.
+    static let slowdown = max(1, Double(ProcessInfo.processInfo.environment["FLAMINGO_SLOWMO"] ?? "") ?? 1)
 }
 
 /// Hosts one `SidebarRow`. Transparent to hit-testing, so clicks, double-clicks and

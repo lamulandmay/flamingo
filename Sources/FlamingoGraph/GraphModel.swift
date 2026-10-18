@@ -14,7 +14,7 @@ final class GraphRedraw: ObservableObject {
     @Published var isAnimating = false
 }
 
-/// An eased 0...1 value. Motion is 150ms ease-out per DESIGN.md.
+/// An eased 0...1 value, on the same spring as `Theme.Motion.fast`.
 struct Fade {
     var from: Double = 0
     var to: Double = 0
@@ -23,7 +23,7 @@ struct Fade {
 
     func value(at t: TimeInterval) -> Double {
         let p = duration > 0 ? min(max((t - start) / duration, 0), 1) : 1
-        return from + (to - from) * (1 - pow(1 - p, 3))
+        return from + (to - from) * Theme.Motion.settle(p)
     }
     func isDone(at t: TimeInterval) -> Bool { t >= start + duration }
     mutating func retarget(_ target: Double, at t: TimeInterval) {
@@ -652,7 +652,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
 
         if let anim = cameraAnimation {
             let p = min(max((now - anim.start) / anim.duration, 0), 1)
-            storedCamera = anim.from.interpolated(to: anim.to, CGFloat(1 - pow(1 - p, 3)))
+            storedCamera = anim.from.interpolated(to: anim.to, CGFloat(Theme.Motion.settle(p)))
             if p >= 1 { cameraAnimation = nil }
         } else if autoFit, size.width > 0 {
             let target = fitCamera()
@@ -807,7 +807,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         guard let draft = linkDraft else { return }
         let target = linkable(node).flatMap { $0 == draft.from ? nil : $0 }
         if target != nil, target != draft.over {
-            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+            Feedback.haptic(.detent)
         }
         linkDraft = (draft.from, p, target)
         invalidate()
@@ -818,7 +818,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         linkDraft = nil
         invalidate()
         guard let target = linkable(target ?? over), target != node, linkable(node) != nil else { return }
-        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+        Feedback.haptic(.threshold)
         connectPair(node, target)
     }
 
@@ -1061,7 +1061,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         } else if !additive { chosenIDs = [] }
         selectedIndex = node
         publishSelection(node, notify: !additive)
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        Feedback.haptic(.detent)
         pulse = (node, CACurrentMediaTime())
         autoFit = false
         let zoom = max(storedCamera.zoom, clickZoom)
@@ -1071,7 +1071,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     func activate(_ node: Int) {
         guard topology.ids.indices.contains(node) else { return }
         selectedIndex = node
-        NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
+        Feedback.haptic(.threshold)
         open(node)
     }
 

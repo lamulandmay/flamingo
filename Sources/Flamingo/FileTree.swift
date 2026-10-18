@@ -188,6 +188,37 @@ final class FileTree {
 
     func node(for ref: FileRef) -> FileNode? { node(for: ref.relativePath) }
 
+    /// `node(for:)`, but a loaded folder whose listing lacks the next step on the way is listed
+    /// again first: a file made a moment ago, before the watcher said so, is still found.
+    /// `relisted` says a listing changed (the outline must reload). A path that isn't there
+    /// even so (ignored, or gone) is remembered until the next listing, so it isn't re-listed
+    /// for on every visit.
+    func nodeRelisting(for path: String) -> (node: FileNode?, relisted: Bool) {
+        if let found = node(for: path) { return (found, false) }
+        guard let vault, !path.isEmpty, relistMisses[path] != listingGeneration,
+              FileManager.default.fileExists(atPath: vault.root.appendingPathComponent(path).path) else { return (nil, false) }
+        var relisted = false
+        let starts = pinnedRoots.filter { Self.contains($0.id, path) }.sorted { $0.id.count > $1.id.count } + [root]
+        for start in starts {
+            var node = start, current = start.id
+            let suffix = start.id.isEmpty ? path : String(path.dropFirst(start.id.count + 1))
+            var found = true
+            for comp in suffix.split(separator: "/") {
+                current = current.isEmpty ? String(comp) : current + "/" + comp
+                if let next = load(node).first(where: { $0.id == current }) { node = next; continue }
+                if refresh(node) { relisted = true }
+                guard let next = node.children.first(where: { $0.id == current }) else { found = false; break }
+                node = next
+            }
+            if found { return (node, relisted) }
+        }
+        relistMisses[path] = listingGeneration
+        return (nil, relisted)
+    }
+
+    /// Paths `nodeRelisting` couldn't find, with the listing generation they were missed in.
+    private var relistMisses: [String: Int] = [:]
+
     /// `true` when `path` is `folder` or inside it. `""` contains everything.
     static func contains(_ folder: String, _ path: String) -> Bool {
         folder.isEmpty || path == folder || path.hasPrefix(folder + "/")

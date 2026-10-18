@@ -65,18 +65,26 @@ struct Inspector: View {
 private struct InspectorHeader: View {
     @EnvironmentObject var state: AppState
     @State private var connecting = false
+    @Namespace private var tabs
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(InspectorTab.allCases) { tab in
-                IconButton(tab.symbol, help: tab.title, isOn: state.inspectorTab == tab) {
+                IconButton(tab.symbol, help: tab.title, isOn: state.inspectorTab == tab,
+                           bounce: tab == .thoughts ? state.celebrationCount : 0) {
                     if tab == .chat { state.focusChat() } else { state.inspectorTab = tab }
                 }
-                .background(Squircle(radius: Theme.Radius.s)
-                    .fill(Theme.Color.hover)
-                    .opacity(state.inspectorTab == tab ? 1 : 0))
+                .background {
+                    // One raised tile that glides to the tab picked.
+                    if state.inspectorTab == tab {
+                        Squircle(radius: Theme.Radius.s)
+                            .fill(Theme.Color.hover)
+                            .matchedGeometryEffect(id: "tab", in: tabs)
+                    }
+                }
                 .overlay(alignment: .topTrailing) { badge(for: tab) }
             }
+            .animation(Theme.Motion.glide, value: state.inspectorTab)
             Spacer(minLength: Theme.Space.s)
             switch state.inspectorTab {
             case .thoughts:
@@ -166,7 +174,7 @@ private struct OutlineRow: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.press)
         .flamingoRow(selected: current)
         .help(section.anchor.displayLabel)
     }
