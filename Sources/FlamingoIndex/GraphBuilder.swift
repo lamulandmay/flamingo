@@ -2,7 +2,8 @@ import Foundation
 import FlamingoCore
 
 extension IndexStore {
-    /// Builds the link graph from sidecars (and trail edges if present) and writes graph.json.
+    /// Builds the link graph from sidecars (and trail edges if present) and writes graph.json
+    /// when it differs from what this process last wrote there.
     ///
     /// Nodes are every indexed file, every sidecar target whose file is gone, and every
     /// wikilink target that resolves to nothing (so each link in each sidecar is an edge).
@@ -25,6 +26,7 @@ extension IndexStore {
              try db.query("SELECT path, text FROM comments WHERE instr(text, '[[') > 0 AND origin = 'ai' ORDER BY rowid") { ($0.string(0), $0.string(1)) })
         }
         var nodes: [String: Graph.Node] = [:]
+        nodes.reserveCapacity(paths.count + counts.count)
         for p in paths { nodes[p] = Self.node(p) }
         // A thought on a folder (`.flamingo/notes/<folder>.md`) counts on the folder's node (`folder/`),
         // which is where the graph draws folders; anything else without a file keeps its own node.
@@ -34,7 +36,7 @@ extension IndexStore {
             if !fileSet.contains(p), !FileRef(relativePath: p).isVirtual, isDirectory(p) {
                 let id = p + "/"
                 folderNotes.insert(p)
-                nodes[id, default: Graph.Node(id: id, name: (p as NSString).lastPathComponent, ext: "")].commentCount += n
+                nodes[id, default: Graph.Node(id: id, name: FileRef(relativePath: p).name, ext: "")].commentCount += n
             } else {
                 nodes[p, default: Self.node(p)].commentCount = n
             }
@@ -73,14 +75,63 @@ extension IndexStore {
         }
 
         let graph = Graph(
-            nodes: nodes.values.sorted { $0.id < $1.id },
+            nodes: Self.sortedNodes(nodes, files: paths, fileSet: fileSet),
             edges: weights.map { Graph.Edge(source: $0.key.source, target: $0.key.target, kind: $0.key.kind, weight: $0.value) }
                 .sorted { ($0.source, $0.target, $0.kind.rawValue) < ($1.source, $1.target, $1.kind.rawValue) })
+        try writeGraphFile(graph)
+        return graph
+    }
+
+    /// `nodes` by ID. `files` come from SQLite already in order (byte order, which is Swift's
+    /// for normalized text), so the sort mostly confirms runs instead of shuffling a whole disk.
+    private static func sortedNodes(_ nodes: [String: Graph.Node], files: [String], fileSet: Set<String>) -> [Graph.Node] {
+        guard fileSet.count == files.count else { return nodes.values.sorted { $0.id < $1.id } }
+        var ids = files
+        ids.reserveCapacity(nodes.count)
+        if nodes.count > files.count { ids += nodes.keys.filter { !fileSet.contains($0) }.sorted() }
+        ids.sort()
+        return ids.map { nodes[$0]! }
+    }
+
+    /// Writes graph.json unless it already holds this graph. On a whole disk the file is tens
+    /// of megabytes and most rebuilds change nothing in it; one changed or removed since it
+    /// was written here is written again.
+    private func writeGraphFile(_ graph: Graph) throws {
+        let path = graphURL.path, fingerprint = Self.fingerprint(graph)
+        if let last = Self.graphFilesLock.withLock({ Self.graphFiles[path] }),
+           last.fingerprint == fingerprint, last.stamp == Self.stamp(path) { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted, .withoutEscapingSlashes]
         try FileManager.default.createDirectory(at: vault.stateDir, withIntermediateDirectories: true)
         try encoder.encode(graph).write(to: graphURL, options: .atomic)
-        return graph
+        let written = (fingerprint: fingerprint, stamp: Self.stamp(path))
+        Self.graphFilesLock.withLock { Self.graphFiles[path] = written }
+    }
+
+    /// What each graph.json was last written with, in this process.
+    nonisolated(unsafe) private static var graphFiles: [String: (fingerprint: Int, stamp: [Int])] = [:]
+    private static let graphFilesLock = NSLock()
+
+    /// The file as it sits on disk: inode, size and modification time. Empty when it's gone.
+    private static func stamp(_ path: String) -> [Int] {
+        var st = stat()
+        guard stat(path, &st) == 0 else { return [] }
+        return [Int(truncatingIfNeeded: st.st_ino), Int(st.st_size), st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec]
+    }
+
+    /// A hash of everything graph.json says, over the exact bytes of every string.
+    private static func fingerprint(_ graph: Graph) -> Int {
+        var h = Hasher()
+        func add(_ s: String) {
+            var s = s
+            s.withUTF8 { h.combine(bytes: UnsafeRawBufferPointer($0)) }
+            h.combine(0xFF as UInt8)   // never in UTF-8: keeps "ab"+"c" apart from "a"+"bc"
+        }
+        h.combine(graph.nodes.count)
+        for n in graph.nodes { add(n.id); add(n.name); add(n.ext); h.combine(n.commentCount) }
+        h.combine(graph.edges.count)
+        for e in graph.edges { add(e.source); add(e.target); add(e.kind.rawValue); h.combine(e.weight) }
+        return h.finalize()
     }
 
     /// Comments on other files whose wikilinks resolve to `ref`, newest first.

@@ -24,6 +24,13 @@ final class Flag: @unchecked Sendable {
     func set() { lock.lock(); value = true; lock.unlock() }
 }
 
+/// The graph queue's memory of its last build: the graph drawn, and the files indexed then.
+/// Only touched on that serial queue.
+final class GraphMemo: @unchecked Sendable {
+    var drawn: Graph?
+    var files = 0
+}
+
 /// Everything that exists only while a vault is open: the stores, the watcher,
 /// and the queues that keep their work off the main thread. Plan 01 owns.
 @MainActor
@@ -121,6 +128,11 @@ final class VaultSession {
     /// Graph builds read the whole index; on a disk-sized vault they take seconds, so they
     /// get their own queue rather than holding up searches and comment reads.
     private let graphQueue = DispatchQueue(label: "com.flamingo.graph", qos: .utility)
+    /// What the last build drew, read and written only on `graphQueue`.
+    private let graphMemo = GraphMemo()
+    /// When the last build finished, and how long it took. Nil before the first.
+    private(set) var lastGraphBuild: (finished: ContinuousClock.Instant, took: Duration)?
+    private var graphBuildsRunning = 0
 
     private func onGraph<T>(_ work: @escaping () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { cont in
@@ -720,8 +732,9 @@ final class VaultSession {
         let connections = connections, dismissed = dismissed
         let worker = Task.detached(priority: .userInitiated) {
             try Task.checkCancellation()
+            let floor = index.similarityFloor()
             let similar = ((try? index.similarFiles(to: ref, limit: 8)) ?? []).map {
-                (file: $0.file, score: index.relatedness($0.score), passage: $0.passage)
+                (file: $0.file, score: IndexStore.relatedness($0.score, floor: floor), passage: $0.passage)
             }
             return try index.fileConnections(of: ref, connections: connections.all(), edges: edges, similar: similar,
                                              dismissed: dismissed.keys(), checkCancellation: { try Task.checkCancellation() })
@@ -746,12 +759,13 @@ final class VaultSession {
             let all = ((try? trail.edges()) ?? []) + edges
             let manual = try connections.all(), hidden = dismissed.keys()
             var out: [FileRef: FileConnectionsSnapshot] = [:]
+            let floor = index.similarityFloor()
             for seed in seeds {
                 try Task.checkCancellation()
                 let related = try index.relatedFiles(to: seed, connections: manual, limit: 40,
                                                      checkCancellation: { try Task.checkCancellation() })
                 let similar = ((try? index.similarFiles(to: seed, limit: 12)) ?? []).map {
-                    (file: $0.file, score: index.relatedness($0.score), passage: nil as String?)
+                    (file: $0.file, score: IndexStore.relatedness($0.score, floor: floor), passage: nil as String?)
                 }
                 out[seed] = FileConnections.merge(for: seed, related: related, edges: all, similar: similar, dismissed: hidden)
             }
@@ -784,37 +798,68 @@ final class VaultSession {
         return await Task.detached(priority: .userInitiated) { try? index.resurfaceableThought() }.value
     }
 
-    func buildGraph() async -> Graph {
+    /// Builds the graph as drawn, off the main thread. Nil when it came out exactly as the last
+    /// one this session built: most of a disk's churn (caches, logs) changes nothing drawn, and
+    /// an unchanged graph must not be published again.
+    func buildGraph() async -> Graph? {
         let trail = trail
         let connections = connections
         let dismissed = dismissed
         guard let index else {
             return Graph(nodes: [], edges: (try? trail.edges()) ?? [])
         }
-        let started = Date()
-        let g = (try? await onGraph {
-            let extra = ((try? trail.edges()) ?? []) + ((try? connections.edges()) ?? [])
-                + ((try? index.similarEdges()) ?? [])
-            let built = try index.buildGraph(extraEdges: extra)
-            // A dismissed suggestion is gone from the graph too; explicit edges always stay.
-            let hidden = dismissed.keys()
-            let kept = hidden.isEmpty ? built : Graph(nodes: built.nodes, edges: built.edges.filter {
-                !$0.kind.isInferred || !hidden.contains(DismissedConnection.key($0.source, $0.target))
-            })
-            return Self.drawable(kept)
-        }) ?? Graph()
-        Log.debug("graph: \(g.nodes.count) nodes, \(g.edges.count) edges in \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
+        let started = ContinuousClock.now
+        graphBuildsRunning += 1
+        let memo = graphMemo, bigVault = AppState.bigVault
+        let g = (try? await onGraph { () -> Graph? in
+            var drawn = Graph()
+            do {
+                // Similar content is quadratic in the files embedded: a disk reuses it a while.
+                let reuse = memo.files > bigVault ? Self.similarReuse : 0
+                let extra = ((try? trail.edges()) ?? []) + ((try? connections.edges()) ?? [])
+                    + ((try? index.similarEdges(reuseFor: reuse)) ?? [])
+                let built = try index.buildGraph(extraEdges: extra)
+                memo.files = built.nodes.count
+                // A dismissed suggestion is gone from the graph too; explicit edges always stay.
+                let hidden = dismissed.keys()
+                let kept = hidden.isEmpty ? built : Graph(nodes: built.nodes, edges: built.edges.filter {
+                    !$0.kind.isInferred || !hidden.contains(DismissedConnection.key($0.source, $0.target))
+                })
+                drawn = Self.drawable(kept)
+            } catch {}
+            guard memo.drawn != drawn else { return nil }
+            memo.drawn = drawn
+            return drawn
+        }) ?? nil
+        graphBuildsRunning -= 1
+        let took = ContinuousClock.now - started
+        lastGraphBuild = (ContinuousClock.now, took)
+        Log.debug("graph: \(g.map { "\($0.nodes.count) nodes, \($0.edges.count) edges" } ?? "unchanged") in \(took)")
         return g
     }
+
+    /// How long a rebuild for files changing on disk should still wait, so builds on a disk
+    /// never run back to back: `minimum` after the last one finished, or three times as long
+    /// as it took, whichever is longer.
+    func graphRebuildWait(minimum: Duration) -> Duration {
+        if graphBuildsRunning > 0 { return minimum }
+        guard let last = lastGraphBuild else { return .zero }
+        let rest = max(minimum, last.took * 3), elapsed = ContinuousClock.now - last.finished
+        return elapsed >= rest ? .zero : rest - elapsed
+    }
+
+    /// Seconds a disk's similar-content edges are reused before they are worked out again.
+    nonisolated static let similarReuse: TimeInterval = 120
 
     /// Past `orphanLimit` files, files with no relationship and no thought are dropped.
     /// Keep their folder ancestry so zooming can still reveal every indexed folder.
     nonisolated static func drawable(_ g: Graph) -> Graph {
-        let fileCount = g.nodes.lazy.filter { !$0.id.hasSuffix("/") }.count
+        let slash = UInt8(ascii: "/")
+        let fileCount = g.nodes.reduce(0) { $0 + ($1.id.utf8.last == slash ? 0 : 1) }
         guard fileCount > orphanLimit else { return GraphFolders.addingAncestors(to: g) }
         var linked = Set<String>()
         for e in g.edges where e.kind != .folder { linked.insert(e.source); linked.insert(e.target) }
-        let retained = Graph(nodes: g.nodes.filter { $0.id.hasSuffix("/") || $0.commentCount > 0 || linked.contains($0.id) }, edges: g.edges)
+        let retained = Graph(nodes: g.nodes.filter { $0.id.utf8.last == slash || $0.commentCount > 0 || linked.contains($0.id) }, edges: g.edges)
         return GraphFolders.addingAncestors(to: retained, from: g.nodes)
     }
 

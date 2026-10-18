@@ -482,6 +482,25 @@ final class EmbeddingState: @unchecked Sendable {
     var lastSweep: [String: Date] = [:]
     /// `similarFiles` answers by file, limit and file-vector generation.
     var similar: [String: [(file: FileRef, score: Double, passage: String?)]] = [:]
+    /// The last `similarPairs` answer and what it was worked out from.
+    var pairs: SimilarPairsMemo?
+}
+
+/// A `similarPairs` answer: the same file vectors and arguments give the same pairs.
+final class SimilarPairsMemo: @unchecked Sendable {
+    let model: String
+    weak var vectors: FileVectors?
+    let minScore: Double
+    let perFile: Int
+    let made: Date
+    let pairs: [(a: String, b: String, score: Double)]
+
+    init(model: String, vectors: FileVectors, minScore: Double, perFile: Int, pairs: [(a: String, b: String, score: Double)]) {
+        self.model = model; self.vectors = vectors; self.minScore = minScore; self.perFile = perFile
+        self.made = Date(); self.pairs = pairs
+    }
+
+    func answers(minScore: Double, perFile: Int) -> Bool { self.minScore == minScore && self.perFile == perFile }
 }
 
 /// Reciprocal rank fusion: each list contributes weight / (k + rank) for the items it has.

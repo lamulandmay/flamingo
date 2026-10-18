@@ -351,6 +351,28 @@ final class CommentIndexTests: IndexTestCase {
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("\\/"))
     }
 
+    func testGraphFileIsWrittenOnlyWhenTheGraphChanges() throws {
+        try write("notes/plan.fltest", "plan")
+        try write("notes/sync.md", "See [[plan.fltest]].")
+        try store.reindex()
+        let url = vault.stateDir.appendingPathComponent("graph.json")
+        func fileNumber() throws -> Int? { try FileManager.default.attributesOfItem(atPath: url.path)[.systemFileNumber] as? Int }
+        let first = try store.buildGraph()
+        let written = try fileNumber()
+        XCTAssertEqual(try store.buildGraph(), first)
+        XCTAssertEqual(try fileNumber(), written, "an unchanged graph leaves graph.json alone")
+
+        try FileManager.default.removeItem(at: url)
+        _ = try store.buildGraph()
+        XCTAssertEqual(try JSONDecoder().decode(Graph.self, from: Data(contentsOf: url)), first, "a removed graph.json is written again")
+
+        try write("notes/more.md", "And [[sync.md]].")
+        try store.reindex()
+        let changed = try store.buildGraph()
+        XCTAssertNotEqual(changed, first)
+        XCTAssertEqual(try JSONDecoder().decode(Graph.self, from: Data(contentsOf: url)), changed)
+    }
+
     func testMarkdownBodyLinksAreEdges() throws {
         try write("decks/q3.fltest", deck)
         try write("notes/sync.md", "# Sync\n== line 3: Board\nFinal pass on [[q3.fltest]] and [[q3.fltest|the deck]], then [[Ghost Note]].")
