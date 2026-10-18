@@ -17,7 +17,7 @@ import FlamingoCore
 ///     postnote com.flamingo.qa "radial origin 400 300"  where the next ring opens (window coordinates, y down)
 ///     postnote com.flamingo.qa "tile thirds"            a layout: single halves thirds mainPlusStack grid
 ///     postnote com.flamingo.qa "pane 2"                 focus the pane in slot 2 (1-based); "pane close 2" closes it
-///     postnote com.flamingo.qa "window 1000 600"       content size in points; "window full" fills the screen
+///     postnote com.flamingo.qa "window 1000 600"       content size in points; "window full" fills the screen; "window away" moves it off screen
 ///     postnote com.flamingo.qa "launch 2 #0"            the launcher in slot 2 opens its pick 0; "launch 2 q3" types q3 into it
 ///     postnote com.flamingo.qa "results sort size"      the search results list: a header click; also status, menu, kind, query, field
 ///     postnote com.flamingo.qa "rclick 300 20 Rename…"  right-click at a point (as click), then pick that menu item
@@ -102,6 +102,8 @@ enum QAHook {
             guard let window = (NSApp.delegate as? AppDelegate)?.window else { return }
             let n = parts[1].split(whereSeparator: { $0 == " " || $0 == "x" }).compactMap { Double($0) }
             if parts[1] == "full", let screen = window.screen { window.setFrame(screen.visibleFrame, display: true) }
+            // `window away`: off every screen, so a QA copy never sits under the user's pointer.
+            else if parts[1] == "away" { window.setFrameOrigin(NSPoint(x: -6000, y: -6000)) }
             else if n.count == 2 { window.setContentSize(NSSize(width: n[0], height: n[1])) }
             return
         }
