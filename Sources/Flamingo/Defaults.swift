@@ -1,5 +1,6 @@
 import Foundation
 import FlamingoCore
+import FlamingoGraph
 
 /// Every UserDefaults key the shell touches, in one place. Plan 01 owns.
 enum Defaults {
@@ -90,6 +91,12 @@ enum Defaults {
     static var folderStyle: FolderStyle {
         get { d.string(forKey: "folderStyle").flatMap(FolderStyle.init(rawValue:)) ?? .columns }
         set { d.set(newValue.rawValue, forKey: "folderStyle") }
+    }
+
+    /// How the graph is laid out: organic (the force layout) unless chosen otherwise.
+    static var graphArrangement: GraphArrangement {
+        get { d.string(forKey: "graphArrangement").flatMap(GraphArrangement.init(rawValue:)) ?? .organic }
+        set { d.set(newValue.rawValue, forKey: "graphArrangement") }
     }
 
     static var inspectorTab: InspectorTab {

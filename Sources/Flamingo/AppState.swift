@@ -206,6 +206,8 @@ final class AppState: ObservableObject {
     @Published private(set) var celebrationCount = 0
     /// Bumped to start the graph's Replay History.
     @Published private(set) var graphReplayRequest = 0
+    /// How the graph is laid out. From View ▸ Graph Layout, the palette, or the graph's own menu.
+    @Published var graphArrangement = Defaults.graphArrangement { didSet { Defaults.graphArrangement = graphArrangement } }
     @Published private(set) var jumpRequest: JumpRequest? { didSet {
         if !synchronizingPane { activePane.jumpRequest = jumpRequest }
     } }
@@ -1678,6 +1680,12 @@ final class AppState: ObservableObject {
         graphReplayRequest &+= 1
     }
 
+    /// Graph mode, laid out as `arrangement`.
+    func showGraphArrangement(_ arrangement: GraphArrangement) {
+        graphArrangement = arrangement
+        if mode != .graph { mode = .graph }
+    }
+
     /// The chat, from anywhere: opens the right sidebar on it and puts the keys in its field.
     func focusChat() {
         // Request first: opening the sidebar can mount the chat synchronously, and it reads
@@ -2131,6 +2139,9 @@ final class AppState: ObservableObject {
         list += paneCommands
         list += thoughtCommands
         list += briefingCommands
+        list += GraphArrangement.allCases.map { a in
+            PaletteCommand(id: "graph-" + a.rawValue, title: "Graph Layout: " + a.title, keys: nil, symbol: a.symbol, enabled: hasVault) { [weak self] in self?.showGraphArrangement(a) }
+        }
         list += [
             PaletteCommand(id: "split", title: splitVisible ? "Close Split View" : "Split View", keys: "⌘\\", symbol: "rectangle.split.2x1", enabled: hasVault) { [weak self] in self?.toggleSplit() },
             PaletteCommand(id: "open-beside", title: "Open Beside", keys: nil, symbol: "rectangle.split.2x1", enabled: hasFile) { [weak self] in if let self, let file = self.selected { self.openBeside(file, anchor: self.anchor) } },

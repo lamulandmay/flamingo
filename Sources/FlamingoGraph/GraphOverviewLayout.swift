@@ -15,6 +15,36 @@ enum GraphOverviewLayout {
     static func initial(for topology: GraphTopology, saved: SavedLayout?) -> LayoutStore.Initial {
         let n = topology.count
         guard n > 0 else { return .init(positions: [], pinned: [], restored: 0, alpha: 0) }
+        let (baseline, children, order) = pack(topology)
+        // Preserve the user's map. New descendants follow the nearest restored ancestor's
+        // translation instead of appearing at unrelated global coordinates.
+        var positions = baseline
+        var translation = [CGPoint](repeating: .zero, count: n + 1)
+        let savedPins = Set(saved?.pinned ?? [])
+        var pinned = Set<Int>(), restored = 0
+        for i in order {
+            if i < n {
+                if let xy = saved?.nodes[topology.ids[i]], xy.count >= 2, xy[0].isFinite, xy[1].isFinite {
+                    positions[i] = CGPoint(x: xy[0], y: xy[1])
+                    translation[i] = CGPoint(x: positions[i].x - baseline[i].x, y: positions[i].y - baseline[i].y)
+                    restored += 1
+                    if savedPins.contains(topology.ids[i]) { pinned.insert(i) }
+                } else {
+                    positions[i] = CGPoint(x: baseline[i].x + translation[i].x, y: baseline[i].y + translation[i].y)
+                }
+            }
+            for child in children[i] { translation[child] = translation[i] }
+        }
+        return .init(positions: positions, pinned: pinned, restored: restored, alpha: 0)
+    }
+
+    /// The packing alone, with nothing restored: the Grid arrangement.
+    static func baseline(for topology: GraphTopology) -> [CGPoint] {
+        topology.count > 0 ? pack(topology).baseline : []
+    }
+
+    private static func pack(_ topology: GraphTopology) -> (baseline: [CGPoint], children: [[Int]], order: [Int]) {
+        let n = topology.count
         // A virtual parent packs disconnected roots, including synthetic notes, identically.
         let virtualRoot = n
         var children = [[Int]](repeating: [], count: n + 1)
@@ -76,29 +106,10 @@ enum GraphOverviewLayout {
             }
         }
 
-        // Preserve the user's map. New descendants follow the nearest restored ancestor's
-        // translation instead of appearing at unrelated global coordinates.
-        var positions = baseline
-        var translation = [CGPoint](repeating: .zero, count: n + 1)
-        let savedPins = Set(saved?.pinned ?? [])
-        var pinned = Set<Int>(), restored = 0
-        for i in order {
-            if i < n {
-                if let xy = saved?.nodes[topology.ids[i]], xy.count >= 2, xy[0].isFinite, xy[1].isFinite {
-                    positions[i] = CGPoint(x: xy[0], y: xy[1])
-                    translation[i] = CGPoint(x: positions[i].x - baseline[i].x, y: positions[i].y - baseline[i].y)
-                    restored += 1
-                    if savedPins.contains(topology.ids[i]) { pinned.insert(i) }
-                } else {
-                    positions[i] = CGPoint(x: baseline[i].x + translation[i].x, y: baseline[i].y + translation[i].y)
-                }
-            }
-            for child in children[i] { translation[child] = translation[i] }
-        }
-        return .init(positions: positions, pinned: pinned, restored: restored, alpha: 0)
+        return (baseline, children, order)
     }
 
-    private static func parentIndex(of i: Int, in topology: GraphTopology) -> Int? {
+    static func parentIndex(of i: Int, in topology: GraphTopology) -> Int? {
         let id = topology.ids[i]
         guard id != "/" else { return nil }
         let path = topology.isFolder[i] ? String(id.dropLast()) : id

@@ -64,6 +64,18 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     /// Folder budget for a scoped graph so `~` doesn't become ten thousand dots.
     var scopeBudget = 400
     private var neighborBudget = 120
+    /// See `GraphArrangement`. Anything but organic is worked out from the folders and never
+    /// saved, which leaves the saved force layout as it was for when organic comes back.
+    @Published private(set) var arrangement: GraphArrangement
+    var onArrangementChange: (GraphArrangement) -> Void = { _ in }
+    private var arrangementGeneration = 0
+    /// Where the arrangement puts each node; nil while organic.
+    private(set) var slots: [CGPoint]?
+    /// Nodes on their way somewhere: the whole canvas after a change of arrangement or a new
+    /// graph in one.
+    private var glide: Glide?
+    /// In an arrangement, the node just let go, springing back to its place.
+    private var drop: (node: Int, from: CGPoint, start: TimeInterval)?
 
     var onSelect: (FileRef) -> Void = { _ in }
     var onSelectionChange: (FileRef?) -> Void = { _ in }
@@ -137,11 +149,13 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     // MARK: Lifecycle
 
     /// Live graph. Positions come from the in-memory cache, then `graph-layout.json`, then seeds.
-    init(graph: Graph, vault: Vault?) {
+    init(graph: Graph, vault: Vault?, arrangement: GraphArrangement = .organic) {
         mode = .live
+        self.arrangement = arrangement
         self.source = graph
-        // Whole-Mac catalogs, including layout, are prepared off the UI actor.
-        let deferred = graph.nodes.count > GraphOverviewLayout.threshold
+        // Whole-Mac catalogs, including layout, are prepared off the UI actor; so is every
+        // arrangement, which needs the folders the scoped graph adds.
+        let deferred = graph.nodes.count > GraphOverviewLayout.threshold || arrangement != .organic
         let displayed = deferred ? Graph() : graph
         self.graph = displayed
         graphFingerprint = Self.fingerprint(displayed)
@@ -167,6 +181,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     /// Fixed positions (local graph). Call `setFixed` to replace them.
     init(fixedGraph graph: Graph, positions: [CGPoint]) {
         mode = .fixed
+        arrangement = .organic
         self.graph = graph
         topology = GraphTopology(graph)
         self.positions = positions
@@ -193,7 +208,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         engine = nil
         // Hidden folder detail must not become a hundred-thousand-body simulation.
         // Large maps use a stable folder layout; small scopes retain force layout.
-        guard topology.count <= GraphOverviewLayout.threshold else { return }
+        guard arrangement == .organic, topology.count <= GraphOverviewLayout.threshold else { return }
         let e = LayoutEngine(topology: topology, positions: positions, pinned: pinned, alpha: alpha)
         let topo = topology, key = Self.layoutKey(vault), vault = vault
         e.onSettle = { positions, pinned in
@@ -227,22 +242,26 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         scopeGeneration += 1
         let generation = scopeGeneration, source = source, scope = scope, vault = vault
         let budget = scopeBudget, selected = requestedSelection, neighborBudget = neighborBudget
-        let oldTopology = topology, oldPositions = engine?.snapshot().positions ?? positions, oldPins = pinned
+        let oldTopology = topology, oldPositions = engine?.snapshot().positions ?? restingPositions, oldPins = pinned
         let key = Self.layoutKey(vault), cached = LayoutStore.cached(Self.layoutKey(vault))
+        let arrangement = arrangement
         Task { [weak self] in
             let prepared = await Task.detached(priority: .userInitiated) {
                 let result = Self.scopedResult(source, to: scope, in: vault, budget: budget,
                                                including: selected.map { [$0.relativePath] } ?? [], neighborBudget: neighborBudget)
                 let topology = Self.topology(for: result.graph, vault: vault)
                 let fingerprint = Self.fingerprint(result.graph)
-                let snapshot = LayoutStore.layout(for: oldTopology, positions: oldPositions, pinned: oldPins)
+                // An arrangement's places are not the force layout's, so they are never carried.
+                let snapshot = arrangement == .organic
+                    ? LayoutStore.layout(for: oldTopology, positions: oldPositions, pinned: oldPins)
+                    : SavedLayout(nodes: [:], pinned: [])
                 let carried = LayoutStore.merging(snapshot, into: cached ?? vault.flatMap(LayoutStore.load(from:)))
-                let initial = topology.count > GraphOverviewLayout.threshold
-                    ? GraphOverviewLayout.initial(for: topology, saved: carried)
-                    : LayoutStore.initial(for: topology, saved: carried)
+                let initial = Self.initialLayout(for: topology, arrangement: arrangement, saved: carried)
                 return (result.graph, topology, result.truncated, initial, carried, fingerprint)
             }.value
             guard let self, generation == self.scopeGeneration else { return }
+            // Laid out for an arrangement that has since changed: lay it out again.
+            guard arrangement == self.arrangement else { return self.refreshScope() }
             self.isPreparing = false
             self.scopeIsTruncated = prepared.2
             LayoutStore.setCached(prepared.4, for: key)
@@ -272,9 +291,13 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
             return
         }
         if let engine { positions = engine.snapshot().positions }
-        let old = topology
+        // Organic was gliding back to its saved places: those are the ones to keep. An
+        // arrangement carries on from wherever its nodes have got to.
+        if arrangement == .organic { positions = restingPositions }
+        glide = nil; drop = nil
+        let old = topology, oldPositions = positions
         var carried: SavedLayout?
-        if preparedLayout == nil {
+        if preparedLayout == nil, arrangement == .organic {
             let snapshot = LayoutStore.layout(for: old, positions: positions, pinned: pinned)
             carried = mode == .live ? LayoutStore.remember(snapshot, key: Self.layoutKey(vault), vault: vault) : snapshot
         }
@@ -286,10 +309,15 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         dragging = nil
         hoverTarget = nil; hoverShown = nil; hoverFade = Fade()
         switch mode {
+        case .live where arrangement != .organic:
+            let initial = preparedLayout ?? Self.initialLayout(for: topology, arrangement: arrangement, saved: nil)
+            pinned = []
+            arrange(initial.positions, after: old, at: oldPositions)
         case .live:
-            let initial = preparedLayout ?? LayoutStore.initial(for: topology, saved: carried)
+            let initial = preparedLayout ?? Self.initialLayout(for: topology, arrangement: arrangement, saved: carried)
             positions = initial.positions
             pinned = initial.pinned
+            slots = nil
             // New edges among files already placed don't stir the layout: the graph stays put
             // under you while the index works. Only newcomers need room made for them.
             let nodesAdded = topology.ids.contains { old.index[$0] == nil }
@@ -318,7 +346,8 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         self.vault = vault
         self.source = graph
         chosenIDs = []; connectionMode = .browse; manualConnections = []; connectionError = nil
-        let deferred = graph.nodes.count > GraphOverviewLayout.threshold
+        glide = nil; drop = nil; slots = nil
+        let deferred = graph.nodes.count > GraphOverviewLayout.threshold || arrangement != .organic
         let displayed = deferred ? Graph() : graph
         self.graph = displayed
         graphFingerprint = Self.fingerprint(displayed)
@@ -375,9 +404,9 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
 
     /// Writes the current layout to the in-memory cache and, off the main thread, to disk.
     func persist() {
-        guard mode == .live else { return }
+        guard mode == .live, arrangement == .organic else { return }
         if let engine { positions = engine.snapshot().positions }
-        let saved = LayoutStore.layout(for: topology, positions: positions, pinned: pinned)
+        let saved = LayoutStore.layout(for: topology, positions: restingPositions, pinned: pinned)
         let key = Self.layoutKey(vault)
         LayoutStore.remember(saved, key: key, vault: vault)
     }
@@ -592,6 +621,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     }
 
     func resetVisibleLayout() {
+        guard arrangement == .organic else { return }
         finishCameraChange()
         let before = layoutSnapshot()
         pinned = []
@@ -617,6 +647,208 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         selectionPath = topology.ids[node]
         requestedSelection = topology.isFolder[node] ? nil : FileRef(relativePath: topology.ids[node])
         if notify, connectionMode == .browse { onSelectionChange(requestedSelection) }
+    }
+
+    // MARK: Arrangement
+
+    /// Where a layout starts: an arrangement worked out from the folders, or for organic the
+    /// saved force layout (a whole-disk map packs its hierarchy instead of simulating).
+    nonisolated static func initialLayout(for topology: GraphTopology, arrangement: GraphArrangement,
+                                          saved: SavedLayout?) -> LayoutStore.Initial {
+        if arrangement != .organic { return ArrangedLayout.initial(for: topology, arrangement: arrangement) }
+        return topology.count > GraphOverviewLayout.threshold
+            ? GraphOverviewLayout.initial(for: topology, saved: saved)
+            : LayoutStore.initial(for: topology, saved: saved)
+    }
+
+    /// Where everything is headed: a glide's destination while one runs. What gets saved.
+    private var restingPositions: [CGPoint] {
+        if let glide, glide.to.count == positions.count { return glide.to }
+        return positions
+    }
+
+    /// Lays the canvas out another way. Every node glides to its new place, and organic comes
+    /// back exactly as it was left, pins and all.
+    func setArrangement(_ new: GraphArrangement, notify: Bool = true) {
+        guard new != arrangement else { return }
+        if mode == .live {
+            finishCameraChange()
+            // Leaving organic: remember the force layout first, while it is still on screen.
+            persist()
+            engine?.onSettle = nil; engine?.stop(); engine = nil
+        }
+        arrangement = new
+        if mode == .live { rearrange() }
+        if notify { onArrangementChange(new) }
+    }
+
+    private func rearrange() {
+        arrangementGeneration += 1
+        let generation = arrangementGeneration, topology = topology, arrangement = arrangement
+        let fingerprint = graphFingerprint?.all, key = Self.layoutKey(vault), vault = vault
+        Task { [weak self] in
+            let initial = await Task.detached(priority: .userInitiated) {
+                let saved = arrangement == .organic ? LayoutStore.cached(key) ?? vault.flatMap(LayoutStore.load(from:)) : nil
+                return Self.initialLayout(for: topology, arrangement: arrangement, saved: saved)
+            }.value
+            // A new graph in the meantime was laid out for this arrangement when it was shown.
+            guard let self, generation == self.arrangementGeneration, fingerprint == self.graphFingerprint?.all,
+                  initial.positions.count == self.topology.count else { return }
+            self.rearranged(initial)
+        }
+    }
+
+    private func rearranged(_ initial: LayoutStore.Initial) {
+        // Mid-glide, nodes turn toward the new places from wherever they have got to.
+        glide = nil; drop = nil
+        pinned = initial.pinned
+        autoFit = false
+        if arrangement == .organic {
+            slots = nil
+            guard initial.alpha < 1 else {
+                // No force layout saved yet: it grows out of the arrangement on screen.
+                makeEngine(alpha: 1)
+                autoFit = true
+                invalidate()
+                return
+            }
+            startGlide(to: initial.positions, engineAlpha: initial.alpha)
+        } else {
+            slots = initial.positions
+            startGlide(to: initial.positions, engineAlpha: nil)
+        }
+        guard size.width > 0 else { return }
+        let now = CACurrentMediaTime()
+        cameraAnimation = (storedCamera, fitCamera(initial.positions), now, max((glide?.end ?? now) - now, Theme.Motion.normalSeconds))
+        startFrames()
+    }
+
+    /// A new graph in an arrangement: what was already on the canvas glides to its new place
+    /// and newcomers leave from their folder, so a new file is seen joining it.
+    private func arrange(_ target: [CGPoint], after old: GraphTopology, at oldPositions: [CGPoint]) {
+        makeEngine(alpha: 0)
+        slots = target
+        autoFit = false
+        guard old.count > 0 else {
+            positions = target
+            if size.width > 0 { storedCamera = fitCamera(); hasFitted = true }
+            return
+        }
+        positions = target.indices.map { i in
+            if let j = old.index[topology.ids[i]], oldPositions.indices.contains(j) { return oldPositions[j] }
+            if let parent = GraphOverviewLayout.parentIndex(of: i, in: topology),
+               let j = old.index[topology.ids[parent]], oldPositions.indices.contains(j) { return oldPositions[j] }
+            return target[i]
+        }
+        startGlide(to: target, engineAlpha: nil)
+    }
+
+    static let glideSeconds: TimeInterval = 0.6
+    /// The outermost node leaves this much after the innermost, so a new layout opens outward.
+    static let glideStagger: TimeInterval = 0.18
+    static let dropSeconds: TimeInterval = 0.8
+
+    /// Glides every node from where it is to `target`. Organic simulates again once everything
+    /// has arrived, from `engineAlpha`.
+    private func startGlide(to target: [CGPoint], engineAlpha: Double?) {
+        let from = positions
+        let moved = from.count == target.count
+            && zip(from, target).contains { abs($0.x - $1.x) > 0.5 || abs($0.y - $1.y) > 0.5 }
+        guard moved else {
+            positions = target
+            if let engineAlpha { makeEngine(alpha: engineAlpha) }
+            invalidate()
+            return
+        }
+        let now = CACurrentMediaTime(), reduced = Theme.Motion.reduced
+        var delay = [Double](repeating: 0, count: target.count)
+        if !reduced {
+            var cx: CGFloat = 0, cy: CGFloat = 0
+            for p in target { cx += p.x; cy += p.y }
+            cx /= CGFloat(target.count); cy /= CGFloat(target.count)
+            let distance = target.map { Double(hypot($0.x - cx, $0.y - cy)) }
+            let farthest = max(distance.max() ?? 0, 1)
+            delay = distance.map { Self.glideStagger * $0 / farthest }
+        }
+        let duration = reduced ? Theme.Motion.normalSeconds : Self.glideSeconds
+        glide = Glide(from: from, to: target, start: now, delay: delay, duration: duration,
+                      end: now + duration + (delay.max() ?? 0), engineAlpha: engineAlpha, reduced: reduced)
+        startFrames()
+        invalidate()
+    }
+
+    /// Steps a glide and a dropped node's spring home. Called while drawing, so starting the
+    /// simulation after an organic glide waits for the next turn.
+    private func advanceGlide(to now: TimeInterval) {
+        if let g = glide {
+            if now >= g.end || g.to.count != topology.count {
+                glide = nil
+                if g.to.count == topology.count { positions = g.to }
+                if let alpha = g.engineAlpha {
+                    let token = topology.token
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.topology.token == token, self.arrangement == .organic,
+                              self.engine == nil, self.glide == nil else { return }
+                        self.makeEngine(alpha: alpha)
+                    }
+                }
+            } else {
+                positions = g.positions(at: now)
+            }
+        }
+        if let d = drop {
+            guard let slots, slots.indices.contains(d.node), positions.indices.contains(d.node),
+                  slots.count == positions.count else { drop = nil; return }
+            let t = now - d.start
+            guard t < Self.dropSeconds else { positions[d.node] = slots[d.node]; drop = nil; return }
+            let k = CGFloat(Self.arrive(t))
+            positions[d.node] = CGPoint(x: d.from.x + (slots[d.node].x - d.from.x) * k,
+                                        y: d.from.y + (slots[d.node].y - d.from.y) * k)
+        }
+    }
+
+    /// Ends a glide now, every node where it was going.
+    private func finishGlide() {
+        guard let g = glide else { return }
+        glide = nil
+        if g.to.count == positions.count { positions = g.to }
+        if let alpha = g.engineAlpha, arrangement == .organic, engine == nil { makeEngine(alpha: alpha) }
+    }
+
+    /// `Theme.Motion.arrive` (0.5 s, bounce 0.22) for a frame loop, `t` seconds in: something
+    /// let go by hand overshoots its place a touch and settles. Under Reduce Motion, the plain
+    /// settle.
+    static func arrive(_ t: TimeInterval) -> Double {
+        guard !Theme.Motion.reduced else { return Theme.Motion.settle(t / Theme.Motion.normalSeconds) }
+        let w = 2 * Double.pi / 0.5, z = 1 - 0.22, wd = w * (1 - z * z).squareRoot()
+        return 1 - exp(-z * w * t) * (cos(wd * t) + z * w / wd * sin(wd * t))
+    }
+
+    /// Every node from `from` to `to` on the settle curve, each leaving after its `delay`.
+    private struct Glide {
+        var from: [CGPoint]
+        var to: [CGPoint]
+        var start: TimeInterval
+        var delay: [Double]
+        var duration: TimeInterval
+        var end: TimeInterval
+        var engineAlpha: Double?
+        /// Read once: `Theme.Motion.settle` asks the system on every call.
+        var reduced: Bool
+
+        func positions(at now: TimeInterval) -> [CGPoint] {
+            let elapsed = now - start
+            // `Theme.Motion.settle`, inlined.
+            let w = 7.43, end = 1 - (1 + w) * exp(-w)
+            return [CGPoint](unsafeUninitializedCapacity: to.count) { buffer, initialized in
+                for i in 0..<to.count {
+                    let x = min(max((elapsed - delay[i]) / duration, 0), 1)
+                    let k = CGFloat(reduced ? 1 - (1 - x) * (1 - x) * (1 - x) : (1 - (1 + w * x) * exp(-w * x)) / end)
+                    buffer[i] = CGPoint(x: from[i].x + (to[i].x - from[i].x) * k, y: from[i].y + (to[i].y - from[i].y) * k)
+                }
+                initialized = to.count
+            }
+        }
     }
 
     // MARK: Drawing
@@ -649,6 +881,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
                 lastGeneration = snap.generation
             }
         }
+        advanceGlide(to: now)
 
         if let anim = cameraAnimation {
             let p = min(max((now - anim.start) / anim.duration, 0), 1)
@@ -723,6 +956,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     private func needsFrames(at now: TimeInterval) -> Bool {
         if let engine, engine.snapshot().isRunning { return true }
         if cameraAnimation != nil || dragging != nil || pulse != nil || replay != nil || celebration != nil { return true }
+        if glide != nil || drop != nil { return true }
         if !hoverFade.isDone(at: now) || !labelFade.isDone(at: now) { return true }
         if autoFit, size.width > 0, !storedCamera.isClose(to: fitCamera()) { return true }
         return false
@@ -776,7 +1010,20 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
             menu.addItem(.separator())
         }
         menu.addItem(GraphMenuItem("Fit All") { [weak self] in self?.fitAll() })
-        menu.addItem(GraphMenuItem("Reset Layout") { [weak self] in self?.resetVisibleLayout() })
+        if mode == .live {
+            let layouts = NSMenu()
+            for a in GraphArrangement.allCases {
+                let item = GraphMenuItem(a.title) { [weak self] in self?.setArrangement(a) }
+                item.state = a == arrangement ? .on : .off
+                layouts.addItem(item)
+            }
+            let layout = NSMenuItem(title: "Layout", action: nil, keyEquivalent: "")
+            layout.submenu = layouts
+            menu.addItem(layout)
+        }
+        if arrangement == .organic {
+            menu.addItem(GraphMenuItem("Reset Layout") { [weak self] in self?.resetVisibleLayout() })
+        }
         menu.addItem(GraphMenuItem("Node List") { [weak self] in self?.showsNodeList = true })
         if onReplayRequested != nil {
             menu.addItem(GraphMenuItem("Replay History") { [weak self] in self?.onReplayRequested?() })
@@ -922,8 +1169,9 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         if !redraw.isAnimating { redraw.revision &+= 1 }
     }
 
-    private func fitCamera() -> GraphCamera {
-        GraphCamera.fitting(positions, radii: topology.radius, in: size, padding: fitPadding,
+    /// The camera that shows `points` (by default, everything where it is now).
+    private func fitCamera(_ points: [CGPoint]? = nil) -> GraphCamera {
+        GraphCamera.fitting(points ?? positions, radii: topology.radius, in: size, padding: fitPadding,
                             horizontalPadding: alwaysShowLabels ? fitPadding + edgeLabelHalfWidth() : nil,
                             maxZoom: fitMaxZoom)
     }
@@ -1078,9 +1326,11 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     func beginNodeDrag(_ node: Int) {
         guard positions.indices.contains(node) else { return }
         finishCameraChange()
-        dragStartLayout = layoutSnapshot()
+        finishGlide()
+        if drop?.node == node { drop = nil }
+        dragStartLayout = arrangement == .organic ? layoutSnapshot() : nil
         dragging = node
-        if mode == .live {
+        if mode == .live, arrangement == .organic {
             pinned.insert(node)
             engine?.beginDrag(node)
         }
@@ -1098,6 +1348,13 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     func endNodeDrag(_ node: Int) {
         engine?.endDrag(node)
         dragging = nil
+        if slots != nil, positions.indices.contains(node) {
+            // An arrangement owns every place: let go, and the node springs home.
+            drop = (node, positions[node], CACurrentMediaTime())
+            startFrames()
+            invalidate()
+            return
+        }
         persist()
         if let before = dragStartLayout {
             registerLayoutChange("Move graph node", before: before, after: layoutSnapshot())
@@ -1121,7 +1378,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
 
     private func layoutSnapshot(syncEngine: Bool = true) -> SavedLayout {
         if syncEngine, let engine { positions = engine.snapshot().positions }
-        return LayoutStore.layout(for: topology, positions: positions, pinned: pinned)
+        return LayoutStore.layout(for: topology, positions: restingPositions, pinned: pinned)
     }
 
     private func registerLayoutChange(_ name: String, before: SavedLayout, after: SavedLayout) {
@@ -1137,7 +1394,8 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     private func restoreLayout(_ layout: SavedLayout, expecting expected: SavedLayout, generation: Int) throws {
         guard generation == vaultGeneration else { throw GraphUndoError.vaultChanged }
         let key = Self.layoutKey(vault)
-        let current = layoutSnapshot()
+        // An arrangement shows places of its own; the force layout to restore is in the store.
+        let current = arrangement == .organic ? layoutSnapshot() : SavedLayout(nodes: [:], pinned: [])
         let known = LayoutStore.merging(current, into: LayoutStore.cached(key))
         let affected = Set(expected.nodes.keys)
         let expectedPins = Set(expected.pinned)
@@ -1151,9 +1409,8 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
         let restored: SavedLayout
         do { restored = try LayoutStore.restore(layout, key: key, vault: vault) }
         catch { makeEngine(alpha: alpha); throw error }
-        let initial = topology.count > GraphOverviewLayout.threshold
-            ? GraphOverviewLayout.initial(for: topology, saved: restored)
-            : LayoutStore.initial(for: topology, saved: restored)
+        guard arrangement == .organic else { return }
+        let initial = Self.initialLayout(for: topology, arrangement: .organic, saved: restored)
         positions = initial.positions; pinned = initial.pinned
         makeEngine(alpha: 0)
         autoFit = false; cameraAnimation = nil; dragging = nil
@@ -1205,7 +1462,7 @@ final class GraphModel: ObservableObject, GraphInteractionTarget {
     }
 
     func reloadRestoredLayout() {
-        guard mode == .live, let saved = LayoutStore.cached(Self.layoutKey(vault)) else { return }
+        guard mode == .live, arrangement == .organic, let saved = LayoutStore.cached(Self.layoutKey(vault)) else { return }
         let initial = LayoutStore.initial(for: topology, saved: saved)
         positions = initial.positions; pinned = initial.pinned
         makeEngine(alpha: 0)

@@ -1,6 +1,7 @@
 import AppKit
 import FlamingoCore
 import FlamingoDesign
+import FlamingoGraph
 
 /// The menu bar. Every action goes through the responder chain to `AppDelegate`,
 /// which forwards to `AppState`. Key hints live here and in the palette only. Plan 01 owns.
@@ -125,6 +126,12 @@ enum MainMenu {
         }
         viewMenu.addItem(withTitle: "Wander Suggestions", action: #selector(AppDelegate.startWander(_:)), keyEquivalent: "")
         viewMenu.addItem(withTitle: "Replay Graph History", action: #selector(AppDelegate.replayGraph(_:)), keyEquivalent: "")
+        let graphLayoutItem = viewMenu.addItem(withTitle: "Graph Layout", action: nil, keyEquivalent: "")
+        let graphLayoutMenu = NSMenu(title: "Graph Layout")
+        for (i, arrangement) in GraphArrangement.allCases.enumerated() {
+            graphLayoutMenu.addItem(withTitle: arrangement.title, action: #selector(AppDelegate.setGraphArrangement(_:)), keyEquivalent: "").tag = i
+        }
+        graphLayoutItem.submenu = graphLayoutMenu
         viewMenu.addItem(withTitle: "Record Trail", action: #selector(AppDelegate.toggleTrailRecording(_:)), keyEquivalent: "")
         viewMenu.addItem(.separator())
         let up = String(Character(UnicodeScalar(NSUpArrowFunctionKey)!))
@@ -260,6 +267,7 @@ extension AppDelegate: NSMenuItemValidation {
     @objc func startWander(_ sender: Any?) { state.startWander() }
     @objc func toggleConnectGrid(_ sender: Any?) { state.connectGridShown.toggle() }
     @objc func replayGraph(_ sender: Any?) { state.replayGraph() }
+    @objc func setGraphArrangement(_ sender: NSMenuItem) { state.showGraphArrangement(GraphArrangement.allCases[sender.tag]) }
     @objc func toggleSplit(_ sender: Any?) { state.toggleSplit() }
     @objc func focusOtherPane(_ sender: Any?) { state.focusPane(step: 1) }
     @objc func focusPreviousPane(_ sender: Any?) { state.focusPane(step: -1) }
@@ -319,6 +327,9 @@ extension AppDelegate: NSMenuItemValidation {
             item.state = state.connectGridShown ? .on : .off
             return state.vault != nil
         case #selector(startWander(_:)), #selector(replayGraph(_:)):
+            return hasVault
+        case #selector(setGraphArrangement(_:)):
+            item.state = GraphArrangement.allCases[item.tag] == state.graphArrangement ? .on : .off
             return hasVault
         case #selector(toggleSplit(_:)):
             item.state = state.splitVisible ? .on : .off

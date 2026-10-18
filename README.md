@@ -55,7 +55,11 @@ Unattached captures go to **Inbox**, where you can assign them to a file.
 
 In Graph, **+++** selects files to connect; Command-click adds more files. Add a reason and
 press Connect. **---** removes your manual links. The inspector distinguishes manual links,
-document links, shared activity, and folders. Selected folders remain hollow. Name and resume
+document links, shared activity, and folders. Selected folders remain hollow. The button
+beside the graph's filter (or **View › Graph Layout**) lays it out as **Organic** (the force
+layout you shape by dragging), **Circles**, **Radial**, **Honeycomb** or **Grid**. All but
+Organic are worked out from your folders, so files always sit with their folder; Organic comes
+back exactly as you left it. Name and resume
 sessions in Trail, or split, merge, and exclude misleading activity connections.
 
 ![Flamingo on the demo vault](docs/screens/graph-dark.png)

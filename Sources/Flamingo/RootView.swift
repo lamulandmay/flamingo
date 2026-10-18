@@ -109,9 +109,11 @@ private struct RootLayout: View {
                     .allowsHitTesting(!state.briefing.isPresented)
             case .graph:
                 GraphView(graph: state.graph, selected: state.selected, vault: state.vault, scope: state.selectedFolder,
+                          arrangement: state.graphArrangement,
                           onSelectionChange: { state.select($0, source: .graph) },
                           onScopeChange: { state.selectFromSidebar(folder: $0, file: nil) },
-                          onConnectionsChanged: { state.connectionsTouched(identities: true) }) {
+                          onConnectionsChanged: { state.connectionsTouched(identities: true) },
+                          onArrangementChange: { state.graphArrangement = $0 }) {
                     state.jump(to: $0, anchor: nil)
                 }
                 .actionHistory(state.actionHistory)

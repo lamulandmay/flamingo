@@ -9,6 +9,8 @@ import FlamingoDesign
 /// it; ⌥-drag from one file to another connects them. Hover shows neighbors; click selects,
 /// double-click opens. Arrows walk the graph, Return opens. Typing filters: `ext:pptx`,
 /// `orphans`, or any part of a path. Right-click for Fit All, Reset Layout and the node list.
+/// The button beside the filter, or Layout in that menu, lays the graph out as circles, rings,
+/// a honeycomb or a grid of folders instead (`GraphArrangement`).
 ///
 /// Lines: solid when someone linked or connected the two files, dashed when Flamingo only
 /// noticed them together (a mention, similar content, the same work session), faint between
@@ -21,6 +23,9 @@ public struct GraphView: View {
     public var onSelectionChange: (FileRef?) -> Void
     public var onScopeChange: (String?) -> Void
     public var onConnectionsChanged: () -> Void
+    /// How the graph is laid out, and where a choice made on the canvas goes.
+    public var arrangement: GraphArrangement
+    public var onArrangementChange: (GraphArrangement) -> Void
     var vault: Vault?
     var history: ActionHistory?
     var firstSeen: (() async -> [String: Date])?
@@ -47,14 +52,17 @@ public struct GraphView: View {
     /// shows the graph exactly as it was left, pins included. Without it the layout lives only
     /// for the life of the process.
     public init(graph: Graph, selected: FileRef? = nil, vault: Vault?, scope: String? = nil,
+                arrangement: GraphArrangement = .organic,
                 onSelectionChange: @escaping (FileRef?) -> Void = { _ in },
                 onScopeChange: @escaping (String?) -> Void = { _ in },
                 onConnectionsChanged: @escaping () -> Void = {},
+                onArrangementChange: @escaping (GraphArrangement) -> Void = { _ in },
                 onSelect: @escaping (FileRef) -> Void) {
         self.graph = graph; self.selected = selected; self.vault = vault; self.scope = scope; self.onSelect = onSelect
         self.onSelectionChange = onSelectionChange; self.onScopeChange = onScopeChange
         self.onConnectionsChanged = onConnectionsChanged
-        _model = StateObject(wrappedValue: GraphModel(graph: graph, vault: vault))
+        self.arrangement = arrangement; self.onArrangementChange = onArrangementChange
+        _model = StateObject(wrappedValue: GraphModel(graph: graph, vault: vault, arrangement: arrangement))
     }
 
     public func actionHistory(_ history: ActionHistory?) -> GraphView {
@@ -94,24 +102,27 @@ public struct GraphView: View {
                     }
                 }
             VStack(alignment: .leading, spacing: Theme.Space.s) {
-                if fieldShown || !filter.isEmpty {
-                    SearchField(text: $filter, focused: $filterFocused,
-                                onSubmit: { model.openBestMatch() },
-                                onExit: { filter = ""; fieldShown = false; model.focusCanvas() })
-                    // Up and down walk the matches without leaving the field.
-                    .onKeyPress(.upArrow) { model.moveSelection(.up); return .handled }
-                    .onKeyPress(.downArrow) { model.moveSelection(.down); return .handled }
-                    .frame(width: 200)
-                    .background(GeometryReader { proxy in
-                        Color.clear
-                            .onAppear { model.occludedRect = proxy.frame(in: .named(Self.space)) }
-                            .onChange(of: proxy.frame(in: .named(Self.space))) { _, r in model.occludedRect = r }
-                    })
-                    .onChange(of: filterFocused) { _, focused in if !focused && filter.isEmpty { fieldShown = false } }
-                    .transition(.opacity)
-                } else {
-                    IconButton("magnifyingglass", help: "Filter") { showField() }
-                        .onAppear { model.occludedRect = .null }
+                HStack(spacing: Theme.Space.xs) {
+                    if fieldShown || !filter.isEmpty {
+                        SearchField(text: $filter, focused: $filterFocused,
+                                    onSubmit: { model.openBestMatch() },
+                                    onExit: { filter = ""; fieldShown = false; model.focusCanvas() })
+                        // Up and down walk the matches without leaving the field.
+                        .onKeyPress(.upArrow) { model.moveSelection(.up); return .handled }
+                        .onKeyPress(.downArrow) { model.moveSelection(.down); return .handled }
+                        .frame(width: 200)
+                        .background(GeometryReader { proxy in
+                            Color.clear
+                                .onAppear { model.occludedRect = proxy.frame(in: .named(Self.space)) }
+                                .onChange(of: proxy.frame(in: .named(Self.space))) { _, r in model.occludedRect = r }
+                        })
+                        .onChange(of: filterFocused) { _, focused in if !focused && filter.isEmpty { fieldShown = false } }
+                        .transition(.opacity)
+                    } else {
+                        IconButton("magnifyingglass", help: "Filter") { showField() }
+                            .onAppear { model.occludedRect = .null }
+                    }
+                    arrangementMenu
                 }
                 if let error = model.connectionError {
                     Text(error)
@@ -140,6 +151,7 @@ public struct GraphView: View {
         }
         .onChange(of: selected) { _, new in model.select(new) }
         .onChange(of: scope) { _, new in model.setScope(new) }
+        .onChange(of: arrangement) { _, new in model.setArrangement(new, notify: false) }
         .onChange(of: vault) { _, new in model.reset(graph: graph, vault: new) }
         .onChange(of: filter) { _, new in model.setFilter(new) }
         .onChange(of: replayRequest) { _, _ in model.onReplayRequested?() }
@@ -173,6 +185,7 @@ public struct GraphView: View {
         model.onSelectionChange = onSelectionChange
         model.onScopeChange = onScopeChange
         model.onConnectionsChanged = onConnectionsChanged
+        model.onArrangementChange = onArrangementChange
         model.onType = { text in
             filter += text
             fieldShown = true
@@ -190,6 +203,32 @@ public struct GraphView: View {
         model.onReplayRequested = firstSeen.map { load in
             { [weak model] in Task { @MainActor in model?.startReplay(firstSeen: await load()) } }
         }
+    }
+
+    /// The layouts, behind one glyph showing the current one.
+    private var arrangementMenu: some View {
+        Menu {
+            Picker("Layout", selection: Binding(get: { model.arrangement }, set: { model.setArrangement($0) })) {
+                ForEach(GraphArrangement.allCases) { a in
+                    Label(a.title, systemImage: a.symbol).tag(a)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+        } label: {
+            Image(systemName: model.arrangement.symbol)
+                .font(.system(size: Theme.Size.iconSmall))
+                .foregroundStyle(Theme.Color.textSecondary)
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .tint(Theme.Color.textSecondary)
+        .fixedSize()
+        .opacity(Theme.Opacity.rest)
+        .help("Layout")
+        .accessibilityLabel("Layout")
     }
 
     private var nodeList: some View {
