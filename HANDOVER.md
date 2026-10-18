@@ -120,6 +120,16 @@ chrome. The 2026-10-16 pass kept the function and rebuilt the surface to DESIGN.
   context (`AskContext`), follow-ups only borrow the last question when they need it, a 5k local
   budget. "Claude" with no API key uses the installed Claude Code (`ClaudeCodeClient`);
   Automatic stays local unless a Flamingo API key is set.
+- Settings (2026-10-17): Flamingo ▸ Settings… (⌘,, also in the palette) is a Finder-style
+  window (`SettingsWindow.swift`) with General, Chat, Thoughts, Capture and Index panes. The
+  Chat pane is `FlamingoAsk/AskSettings.swift`: provider, the Anthropic key (checked with a
+  free `GET /v1/models` before it goes into the Keychain item `com.flamingo.anthropic`), the
+  Claude model (`FlamingoClaudeModel`, Sonnet 5.5 by default), the local model folder and
+  the Ollama model. Index edits `.flamingo/ignore` in place; saving rescans. Thought models
+  are Ollama names only; nothing in Settings can send thoughts off the Mac. Only the app
+  (bundle id `com.flamingo.app`, not under XCTest) touches that Keychain item
+  (`KeyStore.keychainEnabled`): the item trusts the app that saved it, so tests and QA copies
+  would raise an access prompt on the user's screen. They use `ANTHROPIC_API_KEY`.
 - Calmer graph (same day): mentions skip machine listings and keep the strongest 20 per source,
   5 per file; dashed suggestions draw only for the selected or hovered node; selection dims
   the rest; labels fade in by degree; clicks in the graph don't re-scope it; the local graph

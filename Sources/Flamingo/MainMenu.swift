@@ -16,6 +16,8 @@ enum MainMenu {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Flamingo", action: #selector(AppDelegate.showAbout(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Flamingo", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         hideOthers.keyEquivalentModifierMask = [.command, .option]
@@ -220,6 +222,7 @@ extension AppDelegate: NSMenuItemValidation {
         ])
     }
 
+    @objc func showSettings(_ sender: Any?) { SettingsWindowController.show(state: state) }
     @objc func openVault(_ sender: Any?) { state.openVaultDialog() }
     @objc func openRecent(_ sender: NSMenuItem) {
         if let url = sender.representedObject as? URL { state.open(url) }

@@ -2112,6 +2112,9 @@ final class AppState: ObservableObject {
             PaletteCommand(id: "new-file", title: "New File…", keys: "⌘N", symbol: "doc.badge.plus", enabled: hasVault) { [weak self] in self?.showNewFile() },
             PaletteCommand(id: "connect-grid", title: "Connect Files", keys: "⌘J", symbol: "square.grid.3x3", enabled: hasVault) { [weak self] in self?.connectGridShown.toggle() },
             PaletteCommand(id: "health", title: "Workspace Health", keys: nil, symbol: "externaldrive", enabled: hasVault) { [weak self] in self?.isHealthPresented = true },
+            PaletteCommand(id: "settings", title: "Settings…", keys: "⌘,", symbol: "gearshape") { [weak self] in
+                if let self { SettingsWindowController.show(state: self) }
+            },
             PaletteCommand(id: "open", title: "Open Vault…", keys: "⌘O", symbol: "folder") { [weak self] in self?.openVaultDialog() },
             PaletteCommand(id: "search", title: "Search", keys: "⌘F", symbol: "magnifyingglass", enabled: hasVault) { [weak self] in self?.showPalette(.search) },
             PaletteCommand(id: "thought", title: "Leave a Thought", keys: "⌘⇧C", symbol: "text.bubble", enabled: hasVault) { [weak self] in self?.leaveThought() },

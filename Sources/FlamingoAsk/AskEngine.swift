@@ -77,8 +77,21 @@ public final class AskEngine: @unchecked Sendable {
     /// The latest Sonnet-class model. The shell may switch it.
     public static let defaultModel = "claude-sonnet-5-5"
 
+    /// The Claude model chosen in Settings, else `defaultModel`.
+    public static var preferredModel: String {
+        get { UserDefaults.standard.string(forKey: "FlamingoClaudeModel") ?? defaultModel }
+        set {
+            UserDefaults.standard.set(newValue == defaultModel ? nil : newValue, forKey: "FlamingoClaudeModel")
+            NotificationCenter.default.post(name: settingsDidChange, object: nil)
+        }
+    }
+
+    /// Posted when the key, the Claude model or the local model folder changes in Settings.
+    public static let settingsDidChange = Notification.Name("FlamingoAskSettingsDidChange")
+
+    /// `preferredModel` until something sets one for this engine.
     public var model: String {
-        get { lock.withLock { _model } }
+        get { lock.withLock { _model } ?? AskEngine.preferredModel }
         set { lock.withLock { _model = newValue } }
     }
 
@@ -90,6 +103,12 @@ public final class AskEngine: @unchecked Sendable {
 
     /// Stores the key in the Keychain item `com.flamingo.anthropic`.
     public static func setKey(_ key: String) throws { try KeyStore.save(key) }
+
+    /// Deletes the Keychain item. A key from `ANTHROPIC_API_KEY` stays.
+    public static func removeKey() throws {
+        try KeyStore.remove()
+        NotificationCenter.default.post(name: settingsDidChange, object: nil)
+    }
 
     /// The passages a question retrieves: the user's matching comments first, then sections
     /// by rank, packed into about 12k tokens and numbered from 1.
@@ -161,7 +180,7 @@ public final class AskEngine: @unchecked Sendable {
     var isOnline: @Sendable () -> Bool = { Reachability.shared.isOnline }
     var llama: @Sendable (@escaping @Sendable () -> Void) async throws -> URL = { try await LlamaServer.shared.endpoint(onLoading: $0) }
     private let lock = NSLock()
-    private var _model = AskEngine.defaultModel
+    private var _model: String?
 
     init(index: IndexStore, source: PassageSource, client: MessagesClient, key: @escaping @Sendable () -> String?) {
         self.index = index

@@ -223,6 +223,9 @@ final class RadialRecentsController {
     private unowned let state: AppState
     private weak var window: NSWindow?
     private var machine = RadialHoldMachine()
+
+    /// Settings ▸ General moved the slider.
+    func reloadHoldDelay() { machine.holdDelay = Defaults.radialHoldDelay }
     private var monitor: Any?
     private var holdTimer: Timer?
     private var pollTimer: Timer?
@@ -240,7 +243,7 @@ final class RadialRecentsController {
     init(state: AppState, window: NSWindow) {
         self.state = state
         self.window = window
-        machine.holdDelay = Defaults.radialHoldDelay
+        reloadHoldDelay()
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown,
                                                               .otherMouseDown, .scrollWheel]) { [weak self] event in
             let consume = MainActor.assumeIsolated { self?.ingest(event) ?? false }

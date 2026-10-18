@@ -127,6 +127,21 @@ enum Defaults {
         set { d.set(newValue, forKey: "autoReveal") }
     }
 
+    // MARK: Settings
+
+    /// Flamingo ▸ Settings ▸ Appearance. `-FlamingoAppearance dark|light` on the command line
+    /// pins it for screenshots.
+    static var appearance: Appearance {
+        get { d.string(forKey: "FlamingoAppearance").flatMap(Appearance.init(rawValue:)) ?? .system }
+        set { d.set(newValue == .system ? nil : newValue.rawValue, forKey: "FlamingoAppearance") }
+    }
+
+    /// The Settings pane shown last, so ⌘, opens where it was left.
+    static var settingsPane: String? {
+        get { d.string(forKey: "settingsPane") }
+        set { d.set(newValue, forKey: "settingsPane") }
+    }
+
     // MARK: Morning inbox
 
     /// `yyyy-MM-dd` of the last briefing day the morning inbox opened (the day starts at 04:00).

@@ -16,10 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let state = AppState()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        // QA hook: `-FlamingoAppearance dark|light` pins the appearance for screenshots.
-        if let a = UserDefaults.standard.string(forKey: "FlamingoAppearance") {
-            NSApp.appearance = NSAppearance(named: a == "dark" ? .darkAqua : .aqua)
-        }
+        // Settings ▸ Appearance; `-FlamingoAppearance dark|light` pins it for screenshots.
+        Defaults.appearance.apply()
         Extract.registerDefaults()
         MainMenu.install()
         AppIcon.installFallbackIfNeeded()

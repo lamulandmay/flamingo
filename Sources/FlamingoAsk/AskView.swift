@@ -101,6 +101,7 @@ final class AskSession: ObservableObject {
     }
 
     private var observer: NSObjectProtocol?
+    private var settingsObserver: NSObjectProtocol?
 
     static var keyReady: Bool { AskProvider.preferred != .claude || AskEngine.claudeReady }
 
@@ -125,10 +126,22 @@ final class AskSession: ObservableObject {
         observer = NotificationCenter.default.addObserver(forName: AskProvider.didChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.hasKey = AskSession.keyReady; self?.refreshReadiness() }
         }
+        // A key saved or removed in Settings: the field turns back into the question field.
+        settingsObserver = NotificationCenter.default.addObserver(forName: AskEngine.settingsDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.hasKey = AskSession.keyReady
+                if self.hasKey { self.keyError = nil; self.pending = nil }
+                self.refreshReadiness()
+            }
+        }
         refreshReadiness()
     }
 
-    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
+    }
 
     func submit(file: FileRef? = nil, saveTarget: FileRef? = nil, context: AskContext = .empty) {
         let question = draft.trimmingCharacters(in: .whitespacesAndNewlines)
