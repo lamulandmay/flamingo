@@ -85,6 +85,7 @@ private struct ThoughtsPane: View {
             .onAskAI { c in state.askAssistant(about: c, in: file) }
             .onWork { c, recipe in state.workOnThought(c, recipe: recipe, in: file) }
             .onCopyLink { c in state.copyThoughtLink(c, in: file) }
+            .onSendToCapybara { c in state.sendToCapybara(c, in: file) }
             .pendingReplies(jobs.pending)
             .onCancelPending { jobs.cancel($0) }
             .linkCandidates(state.files, recent: state.recentLinkTargets(excluding: file))

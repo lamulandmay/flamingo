@@ -71,6 +71,18 @@ sessions in Trail, or split, merge, and exclude misleading activity connections.
 
 ![Flamingo on the demo vault](docs/screens/graph-dark.png)
 
+## With Capybara on your other Mac
+
+Flamingo and Capybara find each other on the home network. Pair once from Capybara (Settings ›
+Flamingo › Pair): both Macs show six digits; check they match and click Pair on both.
+Flamingo ▸ Capybara… shows the pairing and whether they're connected.
+
+Capybara's tasks can then point at your folders (it searches them as you type `[[`), and
+right-clicking a thought › **Send to Capybara** puts it on the iMac as a card to accept or
+reject. Only the thought you send leaves this Mac, only to the Capybara you paired, and the
+link is encrypted. While the two connect, the flamingo in the Dock flies over and lands on the
+capybara. See `plans/20-capybara-link.md`.
+
 ## Keys
 
 **Help ▸ Keyboard Shortcuts** (⌘/) lists every key, including the ones that only work in the

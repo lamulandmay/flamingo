@@ -64,6 +64,12 @@ on localhost, and Apple's on-device models. Never Claude, Claude Code, an API ke
   thoughts on that project's own files, through a read-only copy in `<project>/scratch/thoughts/`,
   which git ignores. Thoughts on anything outside the project are never copied, and no thought
   goes into a tracked file. Everything above still holds for Flamingo's own AI.
+- Capybara (plan 20, decided 2026-10-24 by Lamont): Send to Capybara in a thought's menu sends
+  that one thought (its text, its file's name and path, its anchor and due date) to the Capybara
+  you paired with, as a card to accept or reject. Nothing is sent without that click, nothing
+  goes anywhere but the paired Mac, and the link is end-to-end encrypted (Noise KK over TCP,
+  keys made on each Mac and confirmed with six digits). Everything above still holds for
+  Flamingo's own AI.
 
 ## Module map
 
@@ -80,6 +86,7 @@ on localhost, and Apple's on-device models. Never Claude, Claude Code, an API ke
 | `FlamingoAsk` | `Sources/FlamingoAsk` | 09 | Core, Index, Design |
 | `FlamingoThoughts` | `Sources/FlamingoThoughts` | 16, 17 | Core, Index, Ask, Trail |
 | `FlamingoAgents` | `Sources/FlamingoAgents` | 18 | Core |
+| `FlamingoLink` + peer | `Sources/FlamingoLink`, `Sources/FlamingoLinkPeer` | 20 | Core |
 | build, fixtures, QA | `scripts/`, `Resources/`, `fixtures/`, `README.md`, `ISSUES.md` | 10 | — |
 
 Tests live in `Tests/<Module>Tests` and belong to the module's session.

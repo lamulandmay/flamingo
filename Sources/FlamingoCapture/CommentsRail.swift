@@ -29,6 +29,7 @@ public struct CommentsRail: View {
     var askAI: ((Comment) -> Void)?
     var work: ((Comment, RailRecipe) -> Void)?
     var copyLink: ((Comment) -> Void)?
+    var sendToCapybara: ((Comment) -> Void)?
     var pending: [String: String] = [:]
     var cancelPending: ((String) -> Void)?
     var linkFiles: [FileRef] = []
@@ -69,6 +70,10 @@ public struct CommentsRail: View {
     /// when it knows the file (`recoveryContext`).
     public func onCopyLink(_ handler: @escaping (Comment) -> Void) -> CommentsRail {
         var rail = self; rail.copyLink = handler; return rail
+    }
+    /// Send to Capybara in the menu: the thought becomes a card on the paired Capybara (plan 20).
+    public func onSendToCapybara(_ handler: @escaping (Comment) -> Void) -> CommentsRail {
+        var rail = self; rail.sendToCapybara = handler; return rail
     }
     /// AI answers still streaming, by the uid of the thought they answer. Each shows under its
     /// thread as grey text over a pulsing hairline. Empty text shows the hairline alone.
@@ -278,6 +283,7 @@ public struct CommentsRail: View {
                     }
                 }
                 Button("Copy Link to Thought") { copyLinkToThought(c) }
+                if let sendToCapybara { Button("Send to Capybara") { sendToCapybara(c) } }
                 Divider()
                 Button("Edit") { beginEdit(c) }
                 Button("Delete") { delete(c) }

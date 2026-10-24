@@ -2,6 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Flamingo lets Capybara on your other Mac find it, so tasks can point at your folders and thoughts you send become tasks. Everything between the two Macs is encrypted.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_capyflamingo._tcp</string>
+	</array>
 	<key>CFBundleIdentifier</key>
 	<string>com.flamingo.app</string>
 	<key>CFBundleName</key>

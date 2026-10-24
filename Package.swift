@@ -10,13 +10,15 @@ let package = Package(
     products: [
         .executable(name: "Flamingo", targets: ["Flamingo"]),
         .executable(name: "flamingo-index", targets: ["FlamingoIndexCLI"]),
+        .executable(name: "flamingo-link-peer", targets: ["FlamingoLinkPeer"]),
     ],
     targets: [
         // The app. Owns the window, navigation, and wiring of every other module.
         .executableTarget(
             name: "Flamingo",
             dependencies: ["FlamingoCore", "FlamingoDesign", "FlamingoCapture", "FlamingoExtract",
-                           "FlamingoIndex", "FlamingoGraph", "FlamingoTrail", "FlamingoAsk", "FlamingoThoughts", "FlamingoAgents", "FlamingoConnectors"],
+                           "FlamingoIndex", "FlamingoGraph", "FlamingoTrail", "FlamingoAsk", "FlamingoThoughts", "FlamingoAgents", "FlamingoConnectors",
+                           "FlamingoLink"],
             path: "Sources/Flamingo"
         ),
         // Pure model layer: vault, file identity, sidecar notes, wikilinks, graph model.
@@ -44,6 +46,13 @@ let package = Package(
         // Connectors (plan 19): calendar feeds and Apple Calendar brought in as items, by purpose card.
         // Items stay on this Mac; Claude only drafts the card from a description and the feed's shape.
         .target(name: "FlamingoConnectors", dependencies: ["FlamingoCore"], path: "Sources/FlamingoConnectors"),
+        // The link to Capybara on another Mac (plan 20): Bonjour, pairing, the encrypted
+        // connection and the icon it animates. Shared/ is a copy of Capybara's Sources/CapybaraLink
+        // (its scripts/sync-link.sh). AppKit only, no SwiftUI, so it builds with the Command Line Tools.
+        .target(name: "FlamingoLink", dependencies: ["FlamingoCore"], path: "Sources/FlamingoLink"),
+        // `flamingo-link-peer --vault DIR`: Flamingo's side of the link without its window, for
+        // testing against Capybara and for checking the network between two Macs.
+        .executableTarget(name: "FlamingoLinkPeer", dependencies: ["FlamingoLink", "FlamingoCore"], path: "Sources/FlamingoLinkPeer"),
 
         .testTarget(name: "FlamingoCoreTests", dependencies: ["FlamingoCore"], path: "Tests/FlamingoCoreTests"),
         .testTarget(name: "FlamingoExtractTests", dependencies: ["FlamingoExtract"], path: "Tests/FlamingoExtractTests"),
